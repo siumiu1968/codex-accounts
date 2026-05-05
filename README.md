@@ -41,7 +41,15 @@ Codex Accounts 是一个 macOS 小工具，用来为不同 OpenAI / GPT 账号�
 1. 打开 [Releases](https://github.com/siumiu1968/codex-accounts/releases)。
 2. 下载 `Codex-Accounts-macOS.zip`。
 3. 解压后把 `Codex Accounts.app` 移到 `/Applications`。
-4. 从 Finder 打开。如果 macOS Gatekeeper 拦截，右键点击 app，选择 `打开`。
+4. 从 Finder 打开。
+
+如果 macOS 显示 `Apple 无法验证 “Codex Accounts” 有没有包含可能危害你的 Mac 或泄漏隐私的恶意软件`：
+
+1. 打开 `System Settings`。
+2. 进入 `Privacy & Security`。
+3. 找到 `Codex Accounts` 被拦截的提示。
+4. 点击 `Open Anyway`。
+5. 再次打开 app。
 
 ### 从源码构建
 
@@ -177,7 +185,15 @@ It is useful when you switch between multiple accounts often and do not want to 
 1. Open [Releases](https://github.com/siumiu1968/codex-accounts/releases).
 2. Download `Codex-Accounts-macOS.zip`.
 3. Unzip it and move `Codex Accounts.app` to `/Applications`.
-4. Open it from Finder. If macOS Gatekeeper warns, right-click the app and choose `Open`.
+4. Open it from Finder.
+
+If macOS says Apple cannot verify whether `Codex Accounts` contains malware:
+
+1. Open `System Settings`.
+2. Go to `Privacy & Security`.
+3. Find the blocked `Codex Accounts` message.
+4. Click `Open Anyway`.
+5. Open the app again.
 
 #### Build From Source
 
