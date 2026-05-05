@@ -1,0 +1,591 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+# Launch a second Codex profile and sync local memory files between profiles.
+# This intentionally does not copy auth.json, cookies, or SQLite logs.
+
+CODEX_APP="${CODEX_APP:-/Applications/Codex.app}"
+PRIMARY_CODEX_HOME="${PRIMARY_CODEX_HOME:-$HOME/.codex}"
+SECOND_CODEX_HOME="${SECOND_CODEX_HOME:-$HOME/.codex-account2}"
+SECOND_APP_DATA="${SECOND_APP_DATA:-$HOME/Library/Application Support/Codex Account 2}"
+ACCOUNTS_ROOT="${ACCOUNTS_ROOT:-$HOME/.codex-accounts}"
+APP_DATA_ROOT="${APP_DATA_ROOT:-$HOME/Library/Application Support/Codex Accounts}"
+SHARED_MEMORY_DIR="${SHARED_MEMORY_DIR:-$HOME/.codex-shared-memory}"
+SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
+
+SYNC_ITEMS=(
+  "AGENTS.md"
+  "memories"
+  "rules"
+)
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/codex_multi_account.zsh init
+  scripts/codex_multi_account.zsh launch-account2
+  scripts/codex_multi_account.zsh sync-once
+  scripts/codex_multi_account.zsh sync-loop
+  scripts/codex_multi_account.zsh init-account <account-name>
+  scripts/codex_multi_account.zsh launch-account <account-name> [display-name]
+  scripts/codex_multi_account.zsh close-account <account-name>
+  scripts/codex_multi_account.zsh list-accounts
+  scripts/codex_multi_account.zsh account-status <account-name>
+  scripts/codex_multi_account.zsh list-accounts-status
+  scripts/codex_multi_account.zsh delete-account <account-name>
+  scripts/codex_multi_account.zsh link-history <account-name>
+  scripts/codex_multi_account.zsh unlink-history <account-name>
+  scripts/codex_multi_account.zsh link-all-history
+  scripts/codex_multi_account.zsh link-account2-history
+  scripts/codex_multi_account.zsh unlink-account2-history
+
+Environment overrides:
+  CODEX_APP=/Applications/Codex.app
+  PRIMARY_CODEX_HOME=$HOME/.codex
+  SECOND_CODEX_HOME=$HOME/.codex-account2
+  SECOND_APP_DATA="$HOME/Library/Application Support/Codex Account 2"
+  ACCOUNTS_ROOT=$HOME/.codex-accounts
+  APP_DATA_ROOT="$HOME/Library/Application Support/Codex Accounts"
+  SHARED_MEMORY_DIR=$HOME/.codex-shared-memory
+  SYNC_INTERVAL_SECONDS=20
+
+Notes:
+  - Login separately inside the second Codex window.
+  - This syncs local memory files only: AGENTS.md, memories/, rules/.
+  - link-account2-history is experimental: it makes Account 2 use Account 1's
+    local Codex history files through symlinks, while keeping auth/cookies
+    separate. Quit the second Codex profile before running it.
+  - It does not sync cloud conversation history, ChatGPT account memory,
+    auth.json, or cookies.
+USAGE
+}
+
+require_rsync() {
+  if ! command -v rsync >/dev/null 2>&1; then
+    echo "rsync is required but was not found." >&2
+    exit 1
+  fi
+}
+
+ensure_dirs() {
+  mkdir -p "$PRIMARY_CODEX_HOME" "$SECOND_CODEX_HOME" "$SECOND_APP_DATA" "$ACCOUNTS_ROOT" "$APP_DATA_ROOT" "$SHARED_MEMORY_DIR"
+}
+
+sanitize_account_name() {
+  local raw="$1"
+  local clean
+  clean="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+  if [[ -z "$clean" ]]; then
+    echo "Invalid account name: $raw" >&2
+    exit 2
+  fi
+  printf '%s' "$clean"
+}
+
+account_home_for() {
+  local name
+  name="$(sanitize_account_name "$1")"
+  if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
+    printf '%s' "$PRIMARY_CODEX_HOME"
+  elif [[ "$name" == "account2" ]]; then
+    printf '%s' "$SECOND_CODEX_HOME"
+  else
+    printf '%s/%s' "$ACCOUNTS_ROOT" "$name"
+  fi
+}
+
+account_app_data_for() {
+  local name
+  name="$(sanitize_account_name "$1")"
+  if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
+    printf '%s' "$HOME/Library/Application Support/Codex"
+  elif [[ "$name" == "account2" ]]; then
+    printf '%s' "$SECOND_APP_DATA"
+  else
+    printf '%s/%s' "$APP_DATA_ROOT" "$name"
+  fi
+}
+
+copy_initial_profile() {
+  require_rsync
+  ensure_dirs
+
+  rsync -a \
+    --exclude 'auth.json' \
+    --exclude '*.sqlite' \
+    --exclude '*.sqlite-*' \
+    --exclude 'logs_*.sqlite*' \
+    --exclude 'state_*.sqlite*' \
+    --exclude 'session_index.jsonl' \
+    --exclude 'sessions/' \
+    --exclude 'shell_snapshots/' \
+    --exclude 'cache/' \
+    --exclude '.tmp/' \
+    --exclude 'tmp/' \
+    "$PRIMARY_CODEX_HOME/" "$SECOND_CODEX_HOME/"
+
+  echo "Initialized second Codex home:"
+  echo "  $SECOND_CODEX_HOME"
+  echo
+  echo "Second Electron profile:"
+  echo "  $SECOND_APP_DATA"
+}
+
+copy_initial_profile_to() {
+  local target_home="$1"
+  require_rsync
+  ensure_dirs
+  mkdir -p "$target_home"
+
+  rsync -a \
+    --exclude 'auth.json' \
+    --exclude '*.sqlite' \
+    --exclude '*.sqlite-*' \
+    --exclude 'logs_*.sqlite*' \
+    --exclude 'state_*.sqlite*' \
+    --exclude 'session_index.jsonl' \
+    --exclude 'sessions/' \
+    --exclude 'shell_snapshots/' \
+    --exclude 'cache/' \
+    --exclude '.tmp/' \
+    --exclude 'tmp/' \
+    "$PRIMARY_CODEX_HOME/" "$target_home/"
+}
+
+init_account() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "init-account requires an account name." >&2
+    exit 2
+  fi
+
+  local home_dir app_data
+  home_dir="$(account_home_for "$name")"
+  app_data="$(account_app_data_for "$name")"
+  rm -f "$ACCOUNTS_ROOT/.deleted-$(sanitize_account_name "$name")"
+
+  if [[ "$home_dir" == "$PRIMARY_CODEX_HOME" ]]; then
+    echo "Account 1 already exists: $PRIMARY_CODEX_HOME"
+    return 0
+  fi
+
+  copy_initial_profile_to "$home_dir"
+  mkdir -p "$app_data"
+  link_history_for "$name" >/dev/null
+
+  echo "Initialized account:"
+  echo "  name: $(sanitize_account_name "$name")"
+  echo "  CODEX_HOME: $home_dir"
+  echo "  app data: $app_data"
+  echo "  history: shared with account1"
+}
+
+list_accounts() {
+  ensure_dirs
+  echo "account1 | $PRIMARY_CODEX_HOME | $HOME/Library/Application Support/Codex"
+  if [[ ! -f "$ACCOUNTS_ROOT/.deleted-account2" ]]; then
+    echo "account2 | $SECOND_CODEX_HOME | $SECOND_APP_DATA"
+  fi
+  find "$ACCOUNTS_ROOT" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | while read -r dir; do
+    local name
+    name="$(basename "$dir")"
+    echo "$name | $dir | $(account_app_data_for "$name")"
+  done
+}
+
+delete_account() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "delete-account requires an account name." >&2
+    exit 2
+  fi
+
+  name="$(sanitize_account_name "$name")"
+  if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
+    echo "Refusing to delete account1." >&2
+    exit 2
+  fi
+
+  ensure_dirs
+  local home_dir app_data archive_root stamp archive_dir
+  home_dir="$(account_home_for "$name")"
+  app_data="$(account_app_data_for "$name")"
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  archive_root="$HOME/.codex-accounts-archive"
+  archive_dir="$archive_root/$name-$stamp"
+  mkdir -p "$archive_dir"
+
+  if [[ -e "$home_dir" || -L "$home_dir" ]]; then
+    mv "$home_dir" "$archive_dir/CODEX_HOME"
+    echo "Archived CODEX_HOME -> $archive_dir/CODEX_HOME"
+  fi
+  if [[ -e "$app_data" || -L "$app_data" ]]; then
+    mv "$app_data" "$archive_dir/AppData"
+    echo "Archived app data -> $archive_dir/AppData"
+  fi
+
+  touch "$ACCOUNTS_ROOT/.deleted-$name"
+  echo "Deleted profile '$name' by archiving it under:"
+  echo "  $archive_dir"
+}
+
+account_status_for() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "account-status requires an account name." >&2
+    exit 2
+  fi
+
+  local home_dir auth_file auth_mode last_refresh auth_status quota reset
+  home_dir="$(account_home_for "$name")"
+  auth_file="$home_dir/auth.json"
+  auth_mode="unknown"
+  last_refresh="never"
+  auth_status="login_needed"
+  quota="unknown"
+  reset="unknown"
+
+  if [[ -f "$auth_file" ]]; then
+    auth_mode="$(jq -r '.auth_mode // "unknown"' "$auth_file" 2>/dev/null || echo "unknown")"
+    last_refresh="$(jq -r '.last_refresh // "unknown"' "$auth_file" 2>/dev/null || echo "unknown")"
+    if jq -e '.tokens.access_token? and .tokens.refresh_token?' "$auth_file" >/dev/null 2>&1; then
+      auth_status="signed_in_local"
+    else
+      auth_status="auth_incomplete"
+    fi
+  fi
+
+  echo "$(sanitize_account_name "$name") | $auth_status | $auth_mode | $last_refresh | $quota | $reset"
+}
+
+list_accounts_status() {
+  list_accounts | cut -d '|' -f 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | while read -r name; do
+    account_status_for "$name"
+  done
+}
+
+rsync_item_to_shared() {
+  local profile_home="$1"
+  local item="$2"
+  local src="$profile_home/$item"
+  local dst="$SHARED_MEMORY_DIR/$item"
+
+  [[ -e "$src" ]] || return 0
+
+  if [[ -d "$src" ]]; then
+    mkdir -p "$dst"
+    rsync -a --update "$src/" "$dst/"
+  else
+    mkdir -p "$(dirname "$dst")"
+    rsync -a --update "$src" "$dst"
+  fi
+}
+
+rsync_item_from_shared() {
+  local profile_home="$1"
+  local item="$2"
+  local src="$SHARED_MEMORY_DIR/$item"
+  local dst="$profile_home/$item"
+
+  [[ -e "$src" ]] || return 0
+
+  if [[ -d "$src" ]]; then
+    mkdir -p "$dst"
+    rsync -a --update "$src/" "$dst/"
+  else
+    mkdir -p "$(dirname "$dst")"
+    rsync -a --update "$src" "$dst"
+  fi
+}
+
+sync_once() {
+  require_rsync
+  ensure_dirs
+
+  for item in "${SYNC_ITEMS[@]}"; do
+    rsync_item_to_shared "$PRIMARY_CODEX_HOME" "$item"
+    rsync_item_to_shared "$SECOND_CODEX_HOME" "$item"
+    rsync_item_from_shared "$PRIMARY_CODEX_HOME" "$item"
+    rsync_item_from_shared "$SECOND_CODEX_HOME" "$item"
+  done
+
+  echo "Synced local Codex memory files at $(date '+%Y-%m-%d %H:%M:%S')."
+}
+
+sync_loop() {
+  echo "Syncing every $SYNC_INTERVAL_SECONDS seconds. Press Ctrl-C to stop."
+  while true; do
+    sync_once
+    sleep "$SYNC_INTERVAL_SECONDS"
+  done
+}
+
+launch_account2() {
+  launch_account "account2"
+}
+
+stop_codex_windows_for_app_data() {
+  local app_data="$1"
+  local pids=()
+  local pid args
+
+  while read -r pid args; do
+    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
+    [[ "$args" == *"$CODEX_APP/Contents/MacOS/Codex"* ]] || continue
+    [[ "$args" == *"--user-data-dir=$app_data"* ]] || continue
+    pids+=("$pid")
+  done < <(ps axww -o pid= -o args=)
+
+  if (( ${#pids[@]} == 0 )); then
+    return 0
+  fi
+
+  echo "Closing existing Codex window(s) for this profile: ${pids[*]}"
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  sleep 1
+
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+process_env_contains() {
+  local pid="$1"
+  local needle="$2"
+  ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -Fq "$needle"
+}
+
+stop_codex_servers_for_home() {
+  local home_dir="$1"
+  local pids=()
+  local pid args
+
+  while read -r pid args; do
+    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
+    [[ "$args" == *"codex app-server"* ]] || continue
+    if [[ "$args" == *"--codex-home $home_dir"* || "$args" == *"--codex-home=$home_dir"* ]] || process_env_contains "$pid" "CODEX_HOME=$home_dir"; then
+      pids+=("$pid")
+    fi
+  done < <(ps axww -o pid= -o args=)
+
+  if (( ${#pids[@]} == 0 )); then
+    return 0
+  fi
+
+  echo "Closing stale Codex app-server(s) for this profile: ${pids[*]}"
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  sleep 1
+
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+launch_account() {
+  local name="${1:-}" display_name="${2:-}"
+  if [[ -z "$name" ]]; then
+    echo "launch-account requires an account name." >&2
+    exit 2
+  fi
+
+  ensure_dirs
+
+  if [[ ! -d "$CODEX_APP" ]]; then
+    echo "Codex app not found at: $CODEX_APP" >&2
+    exit 1
+  fi
+
+  local home_dir app_data
+  home_dir="$(account_home_for "$name")"
+  app_data="$(account_app_data_for "$name")"
+  mkdir -p "$home_dir" "$app_data"
+
+  if [[ "$home_dir" != "$PRIMARY_CODEX_HOME" && ! -e "$home_dir/config.toml" ]]; then
+    copy_initial_profile_to "$home_dir"
+  fi
+
+  echo "Launching Codex profile..."
+  echo "  account=$(sanitize_account_name "$name")"
+  echo "  app=$CODEX_APP"
+  echo "  CODEX_HOME=$home_dir"
+  echo "  user-data-dir=$app_data"
+
+  stop_codex_windows_for_app_data "$app_data"
+  stop_codex_servers_for_home "$home_dir"
+
+  # Keep the account env scoped to this launch. `launchctl setenv` is global
+  # and can make later Codex windows inherit the wrong CODEX_HOME.
+  launchctl unsetenv CODEX_HOME >/dev/null 2>&1 || true
+  open -na "$CODEX_APP" \
+    --env "CODEX_HOME=$home_dir" \
+    --args --user-data-dir="$app_data"
+
+  echo "Started Codex profile."
+}
+
+close_account() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "close-account requires an account name." >&2
+    exit 2
+  fi
+
+  ensure_dirs
+
+  local home_dir app_data
+  home_dir="$(account_home_for "$name")"
+  app_data="$(account_app_data_for "$name")"
+
+  echo "Closing Codex profile..."
+  echo "  account=$(sanitize_account_name "$name")"
+  echo "  CODEX_HOME=$home_dir"
+  echo "  user-data-dir=$app_data"
+
+  stop_codex_windows_for_app_data "$app_data"
+  stop_codex_servers_for_home "$home_dir"
+
+  echo "Closed matching profile window(s)."
+}
+
+backup_path_for_account() {
+  local account_home="$1"
+  local item_name="$2"
+  local backup_dir="$account_home/backups/history-link-$(date '+%Y%m%d-%H%M%S')"
+  mkdir -p "$backup_dir"
+  echo "$backup_dir/$item_name"
+}
+
+replace_with_symlink() {
+  local account_home="$1"
+  local item="$2"
+  local source="$PRIMARY_CODEX_HOME/$item"
+  local target="$account_home/$item"
+
+  [[ -e "$source" || -L "$source" ]] || return 0
+
+  if [[ -L "$target" ]]; then
+    rm "$target"
+  elif [[ -e "$target" ]]; then
+    local backup_target
+    backup_target="$(backup_path_for_account "$account_home" "$(basename "$item")")"
+    mv "$target" "$backup_target"
+    echo "Backed up $target -> $backup_target"
+  fi
+
+  mkdir -p "$(dirname "$target")"
+  ln -s "$source" "$target"
+  echo "Linked $target -> $source"
+}
+
+history_items() {
+  printf '%s\n' \
+    "logs_2.sqlite" \
+    "logs_2.sqlite-shm" \
+    "logs_2.sqlite-wal" \
+    "state_5.sqlite" \
+    "state_5.sqlite-shm" \
+    "state_5.sqlite-wal" \
+    "session_index.jsonl" \
+    "sessions" \
+    "shell_snapshots"
+}
+
+link_history_for() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "link-history requires an account name." >&2
+    exit 2
+  fi
+
+  ensure_dirs
+  local account_home
+  account_home="$(account_home_for "$name")"
+
+  if [[ "$account_home" == "$PRIMARY_CODEX_HOME" ]]; then
+    echo "account1 already owns the shared history."
+    return 0
+  fi
+
+  mkdir -p "$account_home"
+  echo "Linking $(sanitize_account_name "$name") to Account 1 local Codex history."
+  echo "Keep auth separate:"
+  echo "  Account 1: $PRIMARY_CODEX_HOME/auth.json"
+  echo "  $(sanitize_account_name "$name"): $account_home/auth.json"
+  echo
+
+  history_items | while read -r item; do
+    replace_with_symlink "$account_home" "$item"
+  done
+}
+
+unlink_history_for() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "unlink-history requires an account name." >&2
+    exit 2
+  fi
+
+  ensure_dirs
+  local account_home
+  account_home="$(account_home_for "$name")"
+
+  history_items | while read -r item; do
+    local target="$account_home/$item"
+    if [[ -L "$target" ]]; then
+      rm "$target"
+      echo "Removed symlink: $target"
+    fi
+  done
+
+  echo "$(sanitize_account_name "$name") history links removed. Previous files, if any, are under:"
+  echo "  $account_home/backups/"
+}
+
+link_all_history() {
+  list_accounts | cut -d '|' -f 1 | sed 's/[[:space:]]//g' | while read -r name; do
+    [[ "$name" == "account1" ]] && continue
+    link_history_for "$name"
+  done
+}
+
+link_account2_history() {
+  link_history_for "account2"
+}
+
+unlink_account2_history() {
+  unlink_history_for "account2"
+}
+
+main() {
+  local command="${1:-}"
+  case "$command" in
+    init) copy_initial_profile ;;
+    launch-account2) launch_account2 ;;
+    sync-once) sync_once ;;
+    sync-loop) sync_loop ;;
+    init-account) init_account "${2:-}" ;;
+    launch-account) launch_account "${2:-}" "${3:-}" ;;
+    close-account) close_account "${2:-}" ;;
+    list-accounts) list_accounts ;;
+    account-status) account_status_for "${2:-}" ;;
+    list-accounts-status) list_accounts_status ;;
+    delete-account) delete_account "${2:-}" ;;
+    link-history) link_history_for "${2:-}" ;;
+    unlink-history) unlink_history_for "${2:-}" ;;
+    link-all-history) link_all_history ;;
+    link-account2-history) link_account2_history ;;
+    unlink-account2-history) unlink_account2_history ;;
+    -h|--help|help|"") usage ;;
+    *)
+      echo "Unknown command: $command" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
