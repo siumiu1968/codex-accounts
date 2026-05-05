@@ -12,6 +12,9 @@ ACCOUNTS_ROOT="${ACCOUNTS_ROOT:-$HOME/.codex-accounts}"
 APP_DATA_ROOT="${APP_DATA_ROOT:-$HOME/Library/Application Support/Codex Accounts}"
 SHARED_MEMORY_DIR="${SHARED_MEMORY_DIR:-$HOME/.codex-shared-memory}"
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
+USAGE_API_URL="${USAGE_API_URL:-https://chatgpt.com/backend-api/wham/usage}"
+USAGE_CACHE_SECONDS="${USAGE_CACHE_SECONDS:-60}"
+USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
@@ -57,6 +60,8 @@ Notes:
     separate. Quit the second Codex profile before running it.
   - It does not sync cloud conversation history, ChatGPT account memory,
     auth.json, or cookies.
+  - Usage status is fetched per profile from Codex's authenticated usage
+    endpoint. Tokens are only read for the request and are not cached.
 USAGE
 }
 
@@ -68,12 +73,12 @@ require_rsync() {
 }
 
 ensure_dirs() {
-  mkdir -p "$PRIMARY_CODEX_HOME" "$SECOND_CODEX_HOME" "$SECOND_APP_DATA" "$ACCOUNTS_ROOT" "$APP_DATA_ROOT" "$SHARED_MEMORY_DIR"
+  mkdir -p "$PRIMARY_CODEX_HOME" "$SECOND_CODEX_HOME" "$SECOND_APP_DATA" "$ACCOUNTS_ROOT" "$APP_DATA_ROOT" "$SHARED_MEMORY_DIR" "$USAGE_CACHE_ROOT"
 }
 
 sanitize_account_name() {
   local raw="$1"
-  local clean
+  local clean=""
   clean="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
   if [[ -z "$clean" ]]; then
     echo "Invalid account name: $raw" >&2
@@ -83,7 +88,7 @@ sanitize_account_name() {
 }
 
 account_home_for() {
-  local name
+  local name=""
   name="$(sanitize_account_name "$1")"
   if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
     printf '%s' "$PRIMARY_CODEX_HOME"
@@ -95,7 +100,7 @@ account_home_for() {
 }
 
 account_app_data_for() {
-  local name
+  local name=""
   name="$(sanitize_account_name "$1")"
   if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
     printf '%s' "$HOME/Library/Application Support/Codex"
@@ -187,7 +192,7 @@ list_accounts() {
     echo "account2 | $SECOND_CODEX_HOME | $SECOND_APP_DATA"
   fi
   find "$ACCOUNTS_ROOT" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | while read -r dir; do
-    local name
+    local name=""
     name="$(basename "$dir")"
     echo "$name | $dir | $(account_app_data_for "$name")"
   done
@@ -229,6 +234,138 @@ delete_account() {
   echo "  $archive_dir"
 }
 
+usage_cache_file_for() {
+  local name=""
+  name="$(sanitize_account_name "$1")"
+  printf '%s/%s.status' "$USAGE_CACHE_ROOT" "$name"
+}
+
+read_cached_usage() {
+  local cache_file="$1"
+  local max_age="${2:-$USAGE_CACHE_SECONDS}"
+  [[ -f "$cache_file" ]] || return 1
+
+  local mtime now age
+  mtime="$(stat -f '%m' "$cache_file" 2>/dev/null || echo 0)"
+  now="$(date '+%s')"
+  age=$(( now - mtime ))
+  if (( age < 0 || age > max_age )); then
+    return 1
+  fi
+
+  cat "$cache_file"
+}
+
+write_cached_usage() {
+  local cache_file="$1"
+  local quota="$2"
+  local reset="$3"
+  local tmp_file
+
+  mkdir -p "$USAGE_CACHE_ROOT"
+  tmp_file="${cache_file}.$$"
+  printf '%s\t%s\n' "$quota" "$reset" > "$tmp_file"
+  mv "$tmp_file" "$cache_file"
+}
+
+format_reset_epoch() {
+  local epoch="${1:-}"
+  if [[ -z "$epoch" || "$epoch" == "unknown" || "$epoch" == "null" ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [[ ! "$epoch" =~ '^[0-9]+$' ]]; then
+    printf 'unknown'
+    return 0
+  fi
+
+  local today reset_day
+  today="$(date '+%Y%m%d')"
+  reset_day="$(date -r "$epoch" '+%Y%m%d' 2>/dev/null || echo '')"
+  if [[ "$reset_day" == "$today" ]]; then
+    date -r "$epoch" '+%H:%M' 2>/dev/null || printf 'unknown'
+  else
+    date -r "$epoch" '+%m/%d %H:%M' 2>/dev/null || printf 'unknown'
+  fi
+}
+
+fetch_usage_summary_for() {
+  local name="$1"
+  local home_dir="$2"
+  local auth_file="$home_dir/auth.json"
+  local cache_file
+  cache_file="$(usage_cache_file_for "$name")"
+
+  if read_cached_usage "$cache_file"; then
+    return 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -f "$auth_file" ]] || return 1
+
+  local token tmp_file http_status raw_summary quota reset_epochs primary_epoch secondary_epoch
+  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
+  [[ -n "$token" ]] || return 1
+
+  tmp_file="$(mktemp)"
+  http_status="$(curl -sS --connect-timeout 4 --max-time 10 -o "$tmp_file" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json' \
+    "$USAGE_API_URL" 2>/dev/null || true)"
+
+  if [[ "$http_status" == "401" || "$http_status" == "403" ]]; then
+    rm -f "$tmp_file"
+    printf '%s\t%s\n' "__auth_invalid__" "unknown"
+    return 0
+  fi
+
+  if [[ "$http_status" != "200" ]]; then
+    rm -f "$tmp_file"
+    # Keep a short stale fallback when the network/API is temporarily unavailable.
+    read_cached_usage "$cache_file" 600 2>/dev/null || return 1
+    return 0
+  fi
+
+  raw_summary="$(jq -r '
+    def clamp: if . < 0 then 0 elif . > 100 then 100 else . end;
+    def left($w):
+      if $w == null or ($w.used_percent == null) then "unknown"
+      else (((100 - ($w.used_percent | tonumber)) | clamp | floor) | tostring) + "%"
+      end;
+    def epoch($w):
+      if $w == null or ($w.reset_at == null) then "unknown"
+      else ($w.reset_at | tostring)
+      end;
+    if (.rate_limit.unlimited == true) then
+      ["unlimited", "none / none"]
+    else
+      [
+        ("5h " + left(.rate_limit.primary_window) + " / 7d " + left(.rate_limit.secondary_window)),
+        (epoch(.rate_limit.primary_window) + " / " + epoch(.rate_limit.secondary_window))
+      ]
+    end | @tsv
+  ' "$tmp_file" 2>/dev/null || true)"
+  rm -f "$tmp_file"
+  [[ -n "$raw_summary" ]] || return 1
+
+  quota="${raw_summary%%$'\t'*}"
+  reset_epochs="${raw_summary#*$'\t'}"
+  if [[ "$quota" == "unlimited" ]]; then
+    write_cached_usage "$cache_file" "$quota" "none"
+    printf '%s\t%s\n' "$quota" "none"
+    return 0
+  fi
+
+  primary_epoch="${reset_epochs%% / *}"
+  secondary_epoch="${reset_epochs#* / }"
+  reset="5h $(format_reset_epoch "$primary_epoch") / 7d $(format_reset_epoch "$secondary_epoch")"
+
+  write_cached_usage "$cache_file" "$quota" "$reset"
+  printf '%s\t%s\n' "$quota" "$reset"
+}
+
 account_status_for() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
@@ -236,7 +373,7 @@ account_status_for() {
     exit 2
   fi
 
-  local home_dir auth_file auth_mode last_refresh auth_status quota reset
+  local home_dir auth_file auth_mode last_refresh auth_status quota reset usage_summary
   home_dir="$(account_home_for "$name")"
   auth_file="$home_dir/auth.json"
   auth_mode="unknown"
@@ -250,6 +387,16 @@ account_status_for() {
     last_refresh="$(jq -r '.last_refresh // "unknown"' "$auth_file" 2>/dev/null || echo "unknown")"
     if jq -e '.tokens.access_token? and .tokens.refresh_token?' "$auth_file" >/dev/null 2>&1; then
       auth_status="signed_in_local"
+      usage_summary="$(fetch_usage_summary_for "$name" "$home_dir" 2>/dev/null || true)"
+      if [[ -n "$usage_summary" ]]; then
+        quota="${usage_summary%%$'\t'*}"
+        reset="${usage_summary#*$'\t'}"
+        if [[ "$quota" == "__auth_invalid__" ]]; then
+          auth_status="login_needed"
+          quota="unknown"
+          reset="unknown"
+        fi
+      fi
     else
       auth_status="auth_incomplete"
     fi

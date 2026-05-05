@@ -13,7 +13,7 @@ Codex Accounts 是一个 macOS 小工具，用来为不同 OpenAI / GPT 账号�
 - 创建任意数量的本地 Codex profile。
 - 每个 profile 用独立的 Codex 桌面窗口打开。
 - 每个 profile 使用独立的 `CODEX_HOME` 和 Electron `--user-data-dir`，登录状态互不混用。
-- 每分钟自动刷新本地登录状态。
+- 每分钟自动刷新登录状态和 Codex 用量限额。
 - 在一个窗口里改名、关闭、显示资料夹、归档、删除 profile。
 - 可选：在多个 profile 之间共享本地 Codex 对话记录。
 - 可选：同步本地记忆文件，包括 `AGENTS.md`、`memories/`、`rules/`。
@@ -25,7 +25,8 @@ Codex Accounts 是一个 macOS 小工具，用来为不同 OpenAI / GPT 账号�
 
 - 不会复制 OpenAI auth token、cookie 或账号 session。
 - 不会同步 OpenAI 云端对话记录，也不会同步 ChatGPT 服务端 memory。
-- 如果 Codex 本身没有提供可靠的本地数据，用量和重置时间可能会显示为未知。
+- 不会把账号凭证发送到第三方；用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
+- 如果官方接口不可用、网络失败或 token 已失效，用量和重置时间会显示为未知，profile 会提示重新登录。
 - 这是非官方辅助工具，与 OpenAI 没有关联。
 
 ## 系统要求
@@ -130,11 +131,11 @@ rules/
 
 如果 profile 显示 `要登录` / `Login needed`，打开它并重新登录。改密码或本地 auth 过期后可能会出现这种情况。
 
-如果用量一直显示未知，这是目前预期行为。这个 app 只显示可靠的本地状态。
+如果用量一直显示未知，通常代表网络/API 暂时不可用，或者该 profile 的登录 token 已失效。重新打开该 profile 并登录一次即可。
 
 ## 隐私
 
-所有 profile 都是你 Mac 上的本地文件夹。这个 app 不会上传你的文件，也不会把账号凭证发送到其他地方。它只是用不同的本地 profile 目录启动官方 Codex app。
+所有 profile 都是你 Mac 上的本地文件夹。这个 app 不会上传你的文件，也不会把账号凭证发送到第三方。为了显示 Codex 剩余用量，它会读取该 profile 的本地 access token，并只发送到 OpenAI / ChatGPT 官方用量接口；token 不会写入缓存或日志。
 
 ## License
 
@@ -157,7 +158,7 @@ It is useful when you switch between multiple accounts often and do not want to 
 - Create as many local Codex profiles as you need.
 - Open each profile in a separate Codex desktop window.
 - Keep login state separate per profile by using a separate `CODEX_HOME` and Electron `--user-data-dir`.
-- Show local sign-in state, with automatic refresh every minute.
+- Show sign-in state and Codex usage limits, with automatic refresh every minute.
 - Rename, close, reveal, archive, and delete profiles from one window.
 - Optional local history sharing between profiles.
 - Optional local memory sync for `AGENTS.md`, `memories/`, and `rules/`.
@@ -169,7 +170,8 @@ It is useful when you switch between multiple accounts often and do not want to 
 
 - It does not copy OpenAI auth tokens, cookies, or account sessions between profiles.
 - It does not sync OpenAI cloud chat history or ChatGPT server-side memory.
-- Quota and reset time may show as unknown unless Codex exposes reliable local data for that account.
+- It does not send account credentials to third parties. Usage checks use the profile's local token only against the official Codex / ChatGPT usage endpoint.
+- Quota and reset time may show as unknown if the official usage endpoint is unavailable, the network fails, or the profile token has expired.
 - This is an unofficial helper app and is not affiliated with OpenAI.
 
 ### Requirements
@@ -274,11 +276,11 @@ If the wrong account opens, close that profile from Codex Accounts with the `x` 
 
 If a profile shows `要登入` / `Login needed`, open it and sign in again. This can happen after password changes or expired local auth.
 
-If quota stays unknown, that is expected for now. The app only reports reliable local state.
+If quota stays unknown, the usage endpoint may be temporarily unavailable, or the profile token may have expired. Open that profile and sign in again.
 
 ### Privacy
 
-All profiles are local folders on your Mac. The app does not upload your files and does not send account credentials anywhere. It launches the official Codex app with different local profile directories.
+All profiles are local folders on your Mac. The app does not upload your files and does not send account credentials to third parties. To show remaining Codex usage, it reads the profile's local access token and sends it only to OpenAI / ChatGPT's official usage endpoint. Tokens are not written to cache or logs.
 
 ### License
 
