@@ -1,5 +1,7 @@
 # Codex Accounts
 
+**Language:** English | [简体中文](README.zh-CN.md)
+
 ![Codex Accounts overview](docs/assets/codex-accounts-overview.png)
 
 Codex Accounts is a small macOS helper app for opening separate Codex desktop login windows for different OpenAI or GPT accounts, while keeping local Codex profile management in one place.
