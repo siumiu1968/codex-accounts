@@ -14,6 +14,13 @@ struct CodexProfile: Identifiable {
     let reset: String
 }
 
+private struct QuotaWindow: Identifiable {
+    let id: String
+    let labelZH: String
+    let labelEN: String
+    let percent: Int?
+}
+
 private func runCodexScript(_ scriptPath: String, _ arguments: [String], wait: Bool = false) -> (Int32, String) {
     let process = Process()
     let pipe = Pipe()
@@ -249,7 +256,7 @@ struct AccountsRootView: View {
             appBackground
 
             VStack(spacing: 0) {
-                Color.clear.frame(height: 32)
+                Color.clear.frame(height: 26)
 
                 HStack(spacing: 0) {
                     sidebar
@@ -310,16 +317,16 @@ struct AccountsRootView: View {
             Rectangle().fill(.ultraThinMaterial)
             LinearGradient(
                 colors: [
-                    Color(red: 0.04, green: 0.07, blue: 0.10).opacity(0.42),
-                    Color(red: 0.13, green: 0.09, blue: 0.09).opacity(0.40)
+                    Color(red: 0.04, green: 0.07, blue: 0.10).opacity(0.30),
+                    Color(red: 0.13, green: 0.09, blue: 0.09).opacity(0.28)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Color.black.opacity(0.10)
-            RadialGradient(colors: [Color.cyan.opacity(0.12), Color.clear], center: .topLeading, startRadius: 40, endRadius: 420)
-            RadialGradient(colors: [Color.blue.opacity(0.10), Color.clear], center: .topTrailing, startRadius: 80, endRadius: 520)
-            RadialGradient(colors: [Color.orange.opacity(0.08), Color.clear], center: .bottomTrailing, startRadius: 60, endRadius: 460)
+            Color.black.opacity(0.04)
+            RadialGradient(colors: [Color.cyan.opacity(0.10), Color.clear], center: .topLeading, startRadius: 40, endRadius: 420)
+            RadialGradient(colors: [Color.blue.opacity(0.08), Color.clear], center: .topTrailing, startRadius: 80, endRadius: 520)
+            RadialGradient(colors: [Color.orange.opacity(0.07), Color.clear], center: .bottomTrailing, startRadius: 60, endRadius: 460)
         }
         .ignoresSafeArea()
     }
@@ -342,11 +349,11 @@ struct AccountsRootView: View {
         .background(
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
-                Color.black.opacity(0.12)
+                Color.black.opacity(0.06)
                 LinearGradient(
                     colors: [
-                        Color.white.opacity(0.03),
-                        Color.black.opacity(0.04)
+                        Color.white.opacity(0.025),
+                        Color.black.opacity(0.02)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
@@ -403,11 +410,11 @@ struct AccountsRootView: View {
         .background(
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
-                Color.black.opacity(0.16)
+                Color.black.opacity(0.09)
                 LinearGradient(
                     colors: [
-                        Color(red: 0.035, green: 0.055, blue: 0.08).opacity(0.34),
-                        Color(red: 0.05, green: 0.07, blue: 0.10).opacity(0.30)
+                        Color(red: 0.035, green: 0.055, blue: 0.08).opacity(0.22),
+                        Color(red: 0.05, green: 0.07, blue: 0.10).opacity(0.18)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -492,7 +499,7 @@ struct AccountsRootView: View {
         .padding(scaled(14))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial)
-        .background(Color.black.opacity(0.14))
+        .background(Color.black.opacity(0.09))
         .overlay(
             RoundedRectangle(cornerRadius: scaled(16), style: .continuous)
                 .stroke(Color.white.opacity(0.10), lineWidth: 1)
@@ -547,28 +554,31 @@ struct AccountsRootView: View {
     private func profileRow(_ profile: CodexProfile) -> some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let showQuota = width >= 640
+            let veryCompact = width < 620
             let compactStatus = width < 760
+            let rowSpacing = scaled(veryCompact ? 7 : 10)
+            let titleMinWidth = scaled(veryCompact ? 54 : 90)
+            let quotaWidth = scaled(width < 640 ? 154 : (width < 920 ? 178 : 218))
+            let statusWidth = scaled(compactStatus ? 86 : 96)
+            let menuWidth = scaled(veryCompact ? 32 : 38)
 
-            HStack(spacing: scaled(10)) {
+            HStack(spacing: rowSpacing) {
                 profileBadge(profile)
                     .layoutPriority(20)
 
                 profileTitleBlock(profile, showsPath: true)
-                    .frame(minWidth: scaled(90), maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: titleMinWidth, maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(1)
 
-                Spacer(minLength: scaled(10))
+                Spacer(minLength: scaled(4))
+
+                quotaMeter(profile, compact: veryCompact)
+                    .frame(width: quotaWidth, alignment: .trailing)
+                    .layoutPriority(30)
 
                 authBadge(profile, compact: compactStatus)
-                    .frame(width: scaled(compactStatus ? 76 : 92))
+                    .frame(width: statusWidth)
                     .layoutPriority(20)
-
-                if showQuota {
-                    quotaBlock(profile)
-                        .frame(width: scaled(106), alignment: .trailing)
-                        .layoutPriority(20)
-                }
 
                 openButton(profile)
                     .frame(width: scaled(64))
@@ -579,7 +589,7 @@ struct AccountsRootView: View {
                     .layoutPriority(20)
 
                 profileMenu(profile)
-                    .frame(width: scaled(38))
+                    .frame(width: menuWidth)
                     .layoutPriority(20)
             }
             .padding(.horizontal, scaled(14))
@@ -588,7 +598,7 @@ struct AccountsRootView: View {
         }
         .frame(maxWidth: .infinity, minHeight: scaled(58), idealHeight: scaled(58), maxHeight: scaled(58), alignment: .leading)
         .background(.ultraThinMaterial)
-        .background(Color.black.opacity(0.11))
+        .background(Color.black.opacity(0.07))
         .background(
             LinearGradient(
                 colors: [Color.white.opacity(0.07), Color.white.opacity(0.015)],
@@ -598,7 +608,17 @@ struct AccountsRootView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            quotaAccent(for: profile).opacity(profile.quota == "unknown" ? 0.10 : 0.34),
+                            Color.white.opacity(0.10)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    lineWidth: 1
+                )
         )
         .shadow(color: .black.opacity(0.08), radius: 16, x: 0, y: 8)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -656,7 +676,7 @@ struct AccountsRootView: View {
     private func authBadge(_ profile: CodexProfile, compact: Bool = false) -> some View {
         let signedIn = profile.authStatus == "signed_in_local"
         let title = signedIn
-            ? (compact ? tr("已登入", "In") : tr("已登入", "Signed in"))
+            ? tr("已登入", "Signed in")
             : (compact ? tr("要登入", "Login") : tr("要登入", "Login needed"))
         let color = signedIn ? Color.green : Color.orange
 
@@ -673,20 +693,194 @@ struct AccountsRootView: View {
             .allowsTightening(true)
     }
 
-    private func quotaBlock(_ profile: CodexProfile) -> some View {
-        VStack(alignment: .trailing, spacing: scaled(3)) {
-            Text("\(tr("用量", "Quota")) \(profile.quota == "unknown" ? tr("未知", "Unknown") : profile.quota.capitalized)")
-                .font(.system(size: scaled(11), weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Text("\(tr("重設", "Reset")) \(profile.reset == "unknown" ? tr("未知", "unknown") : profile.reset)")
-                .font(.system(size: scaled(11)))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+    private func quotaMeter(_ profile: CodexProfile, compact: Bool) -> some View {
+        let accent = quotaAccent(for: profile)
+        let windows = quotaWindows(for: profile)
+        let percent = quotaRemainingPercent(for: profile)
+
+        return HStack(alignment: .center, spacing: scaled(compact ? 6 : 8)) {
+            VStack(spacing: scaled(5)) {
+                ForEach(windows) { window in
+                    quotaMeterLine(window, accent: quotaAccent(for: window.percent), compact: compact)
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            HStack(alignment: .firstTextBaseline, spacing: scaled(1)) {
+                Text(quotaMainLabel(for: profile, percent: percent))
+                    .font(.system(size: scaled(compact ? 16 : 18), weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                if percent != nil, profile.quota != "unlimited" {
+                    Text("%")
+                        .font(.system(size: scaled(9), weight: .heavy, design: .rounded))
+                }
+            }
+            .foregroundStyle(accent)
+            .frame(width: scaled(compact ? 48 : 58), alignment: .trailing)
+            .lineLimit(1)
+            .minimumScaleFactor(0.70)
         }
-        .fixedSize(horizontal: false, vertical: false)
+        .padding(.horizontal, scaled(compact ? 8 : 10))
+        .padding(.vertical, scaled(7))
+        .background(.ultraThinMaterial)
+        .background(Color.black.opacity(0.12))
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(13), style: .continuous)
+                .stroke(accent.opacity(profile.quota == "unknown" ? 0.16 : 0.58), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(13), style: .continuous))
+        .shadow(color: accent.opacity(profile.quota == "unknown" ? 0 : 0.12), radius: 8, x: 0, y: 3)
+        .help(quotaHelp(for: profile))
+    }
+
+    private func quotaMeterLine(_ window: QuotaWindow, accent: Color, compact: Bool) -> some View {
+        HStack(spacing: scaled(5)) {
+            Text(tr(window.labelZH, window.labelEN))
+                .font(.system(size: scaled(8), weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.58))
+                .frame(width: scaled(compact ? 16 : 19), alignment: .leading)
+                .lineLimit(1)
+
+            quotaProgressBar(percent: window.percent, accent: accent, compact: compact)
+                .frame(maxWidth: .infinity)
+
+            Text(window.percent.map { "\($0)%" } ?? "--")
+                .font(.system(size: scaled(compact ? 9 : 10), weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(accent.opacity(window.percent == nil ? 0.56 : 0.95))
+                .frame(width: scaled(compact ? 28 : 34), alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+    }
+
+    private func quotaMainLabel(for profile: CodexProfile, percent: Int?) -> String {
+        if profile.quota == "unlimited" {
+            return "∞"
+        }
+
+        guard let percent else {
+            return "--"
+        }
+
+        return "\(percent)"
+    }
+
+    private func quotaWindows(for profile: CodexProfile) -> [QuotaWindow] {
+        if profile.quota == "unlimited" {
+            return [
+                QuotaWindow(id: "5h", labelZH: "5時", labelEN: "5h", percent: 100),
+                QuotaWindow(id: "7d", labelZH: "週", labelEN: "7d", percent: 100)
+            ]
+        }
+
+        guard profile.quota != "unknown" else {
+            return [
+                QuotaWindow(id: "5h", labelZH: "5時", labelEN: "5h", percent: nil),
+                QuotaWindow(id: "7d", labelZH: "週", labelEN: "7d", percent: nil)
+            ]
+        }
+
+        var parsed: [QuotaWindow] = []
+        for part in profile.quota.split(separator: "/") {
+            let text = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            let percent = quotaPercents(from: text).first
+            if text.lowercased().hasPrefix("5h") {
+                parsed.append(QuotaWindow(id: "5h", labelZH: "5時", labelEN: "5h", percent: percent))
+            } else if text.lowercased().hasPrefix("7d") {
+                parsed.append(QuotaWindow(id: "7d", labelZH: "週", labelEN: "7d", percent: percent))
+            }
+        }
+
+        let ids = Set(parsed.map(\.id))
+        if !ids.contains("5h") {
+            parsed.insert(QuotaWindow(id: "5h", labelZH: "5時", labelEN: "5h", percent: nil), at: 0)
+        }
+        if !ids.contains("7d") {
+            parsed.append(QuotaWindow(id: "7d", labelZH: "週", labelEN: "7d", percent: nil))
+        }
+
+        return parsed.sorted { $0.id < $1.id }
+    }
+
+    private func quotaRemainingPercent(for profile: CodexProfile) -> Int? {
+        if profile.quota == "unlimited" {
+            return 100
+        }
+        return quotaPercents(from: profile.quota).min()
+    }
+
+    private func quotaAccent(for percent: Int?) -> Color {
+        guard let percent else {
+            return Color.gray
+        }
+
+        switch percent {
+        case ...15:
+            return Color(red: 0.88, green: 0.10, blue: 0.18)
+        case ...45:
+            return Color(red: 1.00, green: 0.40, blue: 0.34)
+        case ...75:
+            return Color(red: 0.62, green: 0.86, blue: 0.38)
+        default:
+            return Color(red: 0.04, green: 0.74, blue: 0.64)
+        }
+    }
+
+    private func quotaProgressBar(percent: Int?, accent: Color, compact: Bool) -> some View {
+        GeometryReader { geometry in
+            let clamped = min(max(percent ?? 0, 0), 100)
+            let fillWidth = geometry.size.width * CGFloat(clamped) / 100
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.13))
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [accent.opacity(0.66), accent],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: fillWidth)
+            }
+        }
+        .frame(height: scaled(compact ? 7 : 8))
+        .clipShape(Capsule())
+    }
+
+    private func quotaHelp(for profile: CodexProfile) -> String {
+        let quotaText = profile.quota == "unknown" ? tr("用量未知", "Usage unknown") : profile.quota
+        let resetText = profile.reset == "unknown" ? tr("重設時間未知", "Reset unknown") : profile.reset
+        return "\(quotaText)\n\(resetText)"
+    }
+
+    private func quotaAccent(for profile: CodexProfile) -> Color {
+        if profile.quota == "unlimited" {
+            return Color(red: 0.04, green: 0.74, blue: 0.64)
+        }
+        return quotaAccent(for: quotaRemainingPercent(for: profile))
+    }
+
+    private func quotaPercents(from quota: String) -> [Int] {
+        var values: [Int] = []
+        var digits = ""
+
+        for character in quota {
+            if character.isNumber {
+                digits.append(character)
+            } else if character == "%" {
+                if let value = Int(digits) {
+                    values.append(value)
+                }
+                digits = ""
+            } else {
+                digits = ""
+            }
+        }
+
+        return values
     }
 
     private func openButton(_ profile: CodexProfile) -> some View {
