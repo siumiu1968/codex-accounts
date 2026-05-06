@@ -696,34 +696,17 @@ struct AccountsRootView: View {
     private func quotaMeter(_ profile: CodexProfile, compact: Bool) -> some View {
         let accent = quotaAccent(for: profile)
         let windows = quotaWindows(for: profile)
-        let percent = quotaRemainingPercent(for: profile)
 
-        return HStack(alignment: .center, spacing: scaled(compact ? 6 : 8)) {
-            VStack(spacing: scaled(5)) {
-                ForEach(windows) { window in
-                    quotaMeterLine(window, accent: quotaAccent(for: window.percent), compact: compact)
-                }
+        return VStack(spacing: scaled(5)) {
+            ForEach(windows) { window in
+                quotaMeterLine(window, accent: quotaAccent(for: window.percent), compact: compact)
             }
-            .frame(maxWidth: .infinity)
-
-            HStack(alignment: .firstTextBaseline, spacing: scaled(1)) {
-                Text(quotaMainLabel(for: profile, percent: percent))
-                    .font(.system(size: scaled(compact ? 16 : 18), weight: .heavy, design: .rounded))
-                    .monospacedDigit()
-                if percent != nil, profile.quota != "unlimited" {
-                    Text("%")
-                        .font(.system(size: scaled(9), weight: .heavy, design: .rounded))
-                }
-            }
-            .foregroundStyle(accent)
-            .frame(width: scaled(compact ? 48 : 58), alignment: .trailing)
-            .lineLimit(1)
-            .minimumScaleFactor(0.70)
         }
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, scaled(compact ? 8 : 10))
         .padding(.vertical, scaled(7))
         .background(.ultraThinMaterial)
-        .background(Color.black.opacity(0.12))
+        .background(Color.black.opacity(0.10))
         .overlay(
             RoundedRectangle(cornerRadius: scaled(13), style: .continuous)
                 .stroke(accent.opacity(profile.quota == "unknown" ? 0.16 : 0.58), lineWidth: 1)
@@ -734,36 +717,24 @@ struct AccountsRootView: View {
     }
 
     private func quotaMeterLine(_ window: QuotaWindow, accent: Color, compact: Bool) -> some View {
-        HStack(spacing: scaled(5)) {
+        HStack(spacing: scaled(compact ? 5 : 7)) {
             Text(tr(window.labelZH, window.labelEN))
-                .font(.system(size: scaled(8), weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.58))
-                .frame(width: scaled(compact ? 16 : 19), alignment: .leading)
+                .font(.system(size: scaled(compact ? 9 : 10), weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.62))
+                .frame(width: scaled(compact ? 18 : 22), alignment: .leading)
                 .lineLimit(1)
 
             quotaProgressBar(percent: window.percent, accent: accent, compact: compact)
                 .frame(maxWidth: .infinity)
 
             Text(window.percent.map { "\($0)%" } ?? "--")
-                .font(.system(size: scaled(compact ? 9 : 10), weight: .bold, design: .rounded))
+                .font(.system(size: scaled(compact ? 12 : 13), weight: .heavy, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(accent.opacity(window.percent == nil ? 0.56 : 0.95))
-                .frame(width: scaled(compact ? 28 : 34), alignment: .trailing)
+                .frame(width: scaled(compact ? 42 : 48), alignment: .trailing)
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
+                .minimumScaleFactor(0.70)
         }
-    }
-
-    private func quotaMainLabel(for profile: CodexProfile, percent: Int?) -> String {
-        if profile.quota == "unlimited" {
-            return "∞"
-        }
-
-        guard let percent else {
-            return "--"
-        }
-
-        return "\(percent)"
     }
 
     private func quotaWindows(for profile: CodexProfile) -> [QuotaWindow] {
@@ -846,7 +817,7 @@ struct AccountsRootView: View {
                     .frame(width: fillWidth)
             }
         }
-        .frame(height: scaled(compact ? 7 : 8))
+        .frame(height: scaled(compact ? 8 : 9))
         .clipShape(Capsule())
     }
 
