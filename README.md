@@ -1,56 +1,135 @@
 # Codex Accounts
 
-**语言 / Language:** 简体中文 | [English](#english)
+**Languages:** [繁體中文](#繁體中文) | [简体中文](#简体中文) | [English](#english)
 
-![Codex Accounts overview](docs/assets/codex-accounts-overview.png)
+![Codex Accounts v2 overview](docs/assets/codex-accounts-v2-hero.png)
 
-Codex Accounts 是一个 macOS 小工具，用来为不同 OpenAI / GPT 账号打开独立的 Codex 桌面登录窗口，同时集中管理本地 Codex profiles。
+> The screenshots use demo profile names and fake local paths. They do not expose real account names or local user paths.
 
-适合经常切换多个 Codex / OpenAI 账号的人使用，避免反复登出、登录，亦可以更清楚地管理每个账号窗口。
+## Screenshots
 
-## 功能
+![Profile list with quota meters](docs/assets/codex-accounts-v2-profiles.png)
 
-- 创建任意数量的本地 Codex profile。
-- 每个 profile 用独立的 Codex 桌面窗口打开。
-- 每个 profile 使用独立的 `CODEX_HOME` 和 Electron `--user-data-dir`，登录状态互不混用。
-- 每分钟自动刷新登录状态和 Codex 用量限额。
-- 在一个窗口里改名、关闭、显示资料夹、归档、删除 profile。
-- 可选：在多个 profile 之间共享本地 Codex 对话记录。
-- 可选：同步本地记忆文件，包括 `AGENTS.md`、`memories/`、`rules/`。
-- 菜单栏快速打开不同账号窗口。
-- 防睡眠开关，适合长时间运行 Codex 任务。
-- 支持中文和英文界面。
+![Automation, theme, and Keep Awake controls](docs/assets/codex-accounts-v2-sidebar.png)
 
-## 它不会做什么
+![Toolbar controls and signed-in grouping](docs/assets/codex-accounts-v2-toolbar.png)
 
-- 不会复制 OpenAI auth token、cookie 或账号 session。
-- 不会同步 OpenAI 云端对话记录，也不会同步 ChatGPT 服务端 memory。
-- 不会把账号凭证发送到第三方；用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
-- 如果官方接口不可用、网络失败或 token 已失效，用量和重置时间会显示为未知，profile 会提示重新登录。
+---
+
+<a id="繁體中文"></a>
+
+## 繁體中文
+
+Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
+
+### v2 主要功能
+
+- 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
+- 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
+- 打開 profile 前先同步：先同步本機記憶，再共享本機對話紀錄，之後才打開該帳戶視窗。
+- 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間，並支援快速 reload 動畫。
+- 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
+- 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
+- 記憶同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
+- 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態。
+- Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、中文和英文介面。
+- 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
+
+### 不會做的事
+
+- 不會複製 OpenAI auth token、cookie 或 account session 到其他 profile。
+- 不會同步 OpenAI 雲端對話，也不會同步 ChatGPT server-side memory。
+- 不會把帳戶憑證傳到第三方。
+- 用量查詢只會使用該 profile 的本機 token 請求官方 Codex / ChatGPT 用量接口。
+- 這是非官方輔助工具，與 OpenAI 沒有從屬關係。
+
+### 安裝
+
+1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下載 `Codex-Accounts-macOS.zip`。
+2. 解壓後把 `Codex Accounts.app` 移到 `/Applications`。
+3. 從 Finder 開啟 app。
+
+如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
+
+### 從源碼構建
+
+```zsh
+git clone https://github.com/siumiu1968/codex-accounts.git
+cd codex-accounts
+scripts/build_codex_accounts_app.zsh
+open "/Applications/Codex Accounts.app"
+```
+
+建立 release ZIP：
+
+```zsh
+scripts/package_release.zsh
+```
+
+輸出位置：
+
+```text
+dist/Codex-Accounts-macOS.zip
+```
+
+### 本機資料位置
+
+```text
+Account 1: ~/.codex
+Account 2: ~/.codex-account2
+More profiles: ~/.codex-accounts/<profile-name>
+```
+
+Electron app data 會分開放在：
+
+```text
+Account 1: ~/Library/Application Support/Codex
+Account 2: ~/Library/Application Support/Codex Account 2
+More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
+```
+
+刪除 profile 時會先封存到：
+
+```text
+~/.codex-accounts-archive
+```
+
+---
+
+<a id="简体中文"></a>
+
+## 简体中文
+
+Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### v2 主要功能
+
+- 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
+- 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
+- 打开 profile 前先同步：先同步本地记忆，再共享本地对话记录，然后才打开该账号窗口。
+- 用量显示：显示 5H / 1W 额度、百分比和恢复时间，并支持快速 reload 动画。
+- 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
+- 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
+- 记忆同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
+- 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态。
+- Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、中文和英文界面。
+- 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
+
+### 它不会做什么
+
+- 不会复制 OpenAI auth token、cookie 或 account session 到其他 profile。
+- 不会同步 OpenAI 云端对话，也不会同步 ChatGPT server-side memory。
+- 不会把账号凭证发送到第三方。
+- 用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
 - 这是非官方辅助工具，与 OpenAI 没有关联。
 
-## 系统要求
+### 安装
 
-- macOS 13 或更新版本。
-- 官方 Codex 桌面应用已安装在 `/Applications/Codex.app`。
-- 只有从源码构建时才需要 Xcode Command Line Tools。
+1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下载 `Codex-Accounts-macOS.zip`。
+2. 解压后把 `Codex Accounts.app` 移到 `/Applications`。
+3. 从 Finder 打开 app。
 
-## 安装
-
-### 下载 Release
-
-1. 打开 [Releases](https://github.com/siumiu1968/codex-accounts/releases)。
-2. 下载 `Codex-Accounts-macOS.zip`。
-3. 解压后把 `Codex Accounts.app` 移到 `/Applications`。
-4. 从 Finder 打开。
-
-如果 macOS 显示 `Apple 无法验证 “Codex Accounts” 有没有包含可能危害你的 Mac 或泄漏隐私的恶意软件`：
-
-1. 打开 `System Settings`。
-2. 进入 `Privacy & Security`。
-3. 找到 `Codex Accounts` 被拦截的提示。
-4. 点击 `Open Anyway`。
-5. 再次打开 app。
+如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
 ### 从源码构建
 
@@ -61,85 +140,39 @@ scripts/build_codex_accounts_app.zsh
 open "/Applications/Codex Accounts.app"
 ```
 
-创建发布 ZIP：
+创建 release ZIP：
 
 ```zsh
 scripts/package_release.zsh
 ```
 
-ZIP 会生成在：
+输出位置：
 
 ```text
 dist/Codex-Accounts-macOS.zip
 ```
 
-## 使用方法
-
-1. 启动 `Codex Accounts`。
-2. 点击 `+` 创建新 profile。
-3. 点击该 profile 的 `登录` / `Log In`。
-4. 在打开的 Codex 窗口里登录你想使用的 OpenAI / GPT 账号。
-5. 之后点击 `打开` / `Open` 重新打开该 profile。
-6. 点击某一行的 `x`，只关闭该 profile 对应的 Codex 窗口。
-7. 使用 `...` 菜单改名、显示资料夹、共享本地历史或归档 profile。
-
-## 本地文件位置
-
-默认 profile 位置：
+### 本地数据位置
 
 ```text
 Account 1: ~/.codex
 Account 2: ~/.codex-account2
-更多账号: ~/.codex-accounts/<profile-name>
+More profiles: ~/.codex-accounts/<profile-name>
 ```
 
-独立 Electron app data：
+Electron app data 会分开保存在：
 
 ```text
 Account 1: ~/Library/Application Support/Codex
 Account 2: ~/Library/Application Support/Codex Account 2
-更多账号: ~/Library/Application Support/Codex Accounts/<profile-name>
+More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ```
 
-删除 profile 时会先归档，不会立刻永久删除：
+删除 profile 时会先归档到：
 
 ```text
 ~/.codex-accounts-archive
 ```
-
-## 共享本地对话记录
-
-`Share History` 会把 Account 1 的本地 Codex 历史文件链接到另一个 profile。登录文件仍然保持分离。
-
-请先理解这个取舍再使用：它可以让多个 profile 看到同一份本地历史，但这些 profile 会共享同一组本地历史文件。
-
-## 记忆同步
-
-记忆同步会复制这些本地项目：
-
-```text
-AGENTS.md
-memories/
-rules/
-```
-
-它会刻意跳过登录文件、cookie、SQLite 日志、sessions、cache 和临时文件。
-
-## 常见问题
-
-如果打开了错误账号，请先在 Codex Accounts 里点击该 profile 的 `x` 关闭窗口，再从正确的 profile 行重新打开。尽量不要直接从普通 Codex app 图标打开 profile 窗口，因为普通 Codex app 会使用默认 profile。
-
-如果 profile 显示 `要登录` / `Login needed`，打开它并重新登录。改密码或本地 auth 过期后可能会出现这种情况。
-
-如果用量一直显示未知，通常代表网络/API 暂时不可用，或者该 profile 的登录 token 已失效。重新打开该 profile 并登录一次即可。
-
-## 隐私
-
-所有 profile 都是你 Mac 上的本地文件夹。这个 app 不会上传你的文件，也不会把账号凭证发送到第三方。为了显示 Codex 剩余用量，它会读取该 profile 的本地 access token，并只发送到 OpenAI / ChatGPT 官方用量接口；token 不会写入缓存或日志。
-
-## License
-
-MIT. See [LICENSE](LICENSE).
 
 ---
 
@@ -147,57 +180,38 @@ MIT. See [LICENSE](LICENSE).
 
 ## English
 
-**Language:** [简体中文](#codex-accounts) | English
+Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
-Codex Accounts is a small macOS helper app for opening separate Codex desktop login windows for different OpenAI or GPT accounts, while keeping local Codex profile management in one place.
+### v2 Highlights
 
-It is useful when you switch between multiple accounts often and do not want to log out, log in, and lose your current workflow each time.
-
-### Features
-
-- Create as many local Codex profiles as you need.
-- Open each profile in a separate Codex desktop window.
-- Keep login state separate per profile by using a separate `CODEX_HOME` and Electron `--user-data-dir`.
-- Show sign-in state and Codex usage limits, with automatic refresh every minute.
-- Rename, close, reveal, archive, and delete profiles from one window.
-- Optional local history sharing between profiles.
-- Optional local memory sync for `AGENTS.md`, `memories/`, and `rules/`.
-- Menu bar controls for quick account opening.
-- Keep Awake toggle to stop macOS sleeping during long runs.
-- Cantonese Chinese and English UI.
+- Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
+- Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
+- Sync before opening: when opening a profile, the app syncs local memory and shares local chat history first, then opens the account window.
+- Usage meters: show 5H / 1W quota, percentage, and reset time with a fast reload animation.
+- Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
+- Optional local history sharing across profiles.
+- Optional memory sync for `AGENTS.md`, `memories/`, and `rules/`.
+- Keep Awake: uses `caffeinate` to stop macOS from sleeping, and the toggle follows the real system process state.
+- Liquid Glass interface: multiple themes, hover glow, profile card animation, Chinese and English UI.
+- Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
 
 ### What It Does Not Do
 
 - It does not copy OpenAI auth tokens, cookies, or account sessions between profiles.
 - It does not sync OpenAI cloud chat history or ChatGPT server-side memory.
-- It does not send account credentials to third parties. Usage checks use the profile's local token only against the official Codex / ChatGPT usage endpoint.
-- Quota and reset time may show as unknown if the official usage endpoint is unavailable, the network fails, or the profile token has expired.
+- It does not send account credentials to third parties.
+- Usage checks use the profile's local token only against the official Codex / ChatGPT usage endpoint.
 - This is an unofficial helper app and is not affiliated with OpenAI.
-
-### Requirements
-
-- macOS 13 or later.
-- The official Codex desktop app installed at `/Applications/Codex.app`.
-- Xcode Command Line Tools only if you want to build from source.
 
 ### Install
 
-#### Download Release
+1. Download `Codex-Accounts-macOS.zip` from [Releases](https://github.com/siumiu1968/codex-accounts/releases).
+2. Unzip it and move `Codex Accounts.app` to `/Applications`.
+3. Open the app from Finder.
 
-1. Open [Releases](https://github.com/siumiu1968/codex-accounts/releases).
-2. Download `Codex-Accounts-macOS.zip`.
-3. Unzip it and move `Codex Accounts.app` to `/Applications`.
-4. Open it from Finder.
+If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-If macOS says Apple cannot verify whether `Codex Accounts` contains malware:
-
-1. Open `System Settings`.
-2. Go to `Privacy & Security`.
-3. Find the blocked `Codex Accounts` message.
-4. Click `Open Anyway`.
-5. Open the app again.
-
-#### Build From Source
+### Build From Source
 
 ```zsh
 git clone https://github.com/siumiu1968/codex-accounts.git
@@ -206,36 +220,24 @@ scripts/build_codex_accounts_app.zsh
 open "/Applications/Codex Accounts.app"
 ```
 
-To create a release ZIP:
+Create a release ZIP:
 
 ```zsh
 scripts/package_release.zsh
 ```
 
-The ZIP will be written to:
+Output:
 
 ```text
 dist/Codex-Accounts-macOS.zip
 ```
 
-### How To Use
-
-1. Launch `Codex Accounts`.
-2. Click the `+` button to create a new profile.
-3. Click `登入` / `Log In` for that profile.
-4. Sign in with the OpenAI or GPT account you want to use in that profile.
-5. Click `打開` / `Open` later to reopen that profile.
-6. Click the `x` button on a row to close only that profile's Codex window.
-7. Use the `...` menu on a profile to rename it, reveal its folder, share local history, or archive it.
-
-### Local Files
-
-Default profile locations:
+### Local Data
 
 ```text
 Account 1: ~/.codex
 Account 2: ~/.codex-account2
-More accounts: ~/.codex-accounts/<profile-name>
+More profiles: ~/.codex-accounts/<profile-name>
 ```
 
 Separate Electron app data:
@@ -243,45 +245,15 @@ Separate Electron app data:
 ```text
 Account 1: ~/Library/Application Support/Codex
 Account 2: ~/Library/Application Support/Codex Account 2
-More accounts: ~/Library/Application Support/Codex Accounts/<profile-name>
+More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ```
 
-Deleted profiles are archived instead of permanently removed:
+Deleted profiles are archived here first:
 
 ```text
 ~/.codex-accounts-archive
 ```
 
-### Sharing Local History
-
-The `Share History` feature links local Codex history files from Account 1 into another profile. Auth files remain separate.
-
-Use this only if you understand the tradeoff: it helps profiles see the same local history, but it means those profiles share the same local history files on disk.
-
-### Memory Sync
-
-Memory sync copies these local items between profiles:
-
-```text
-AGENTS.md
-memories/
-rules/
-```
-
-It intentionally skips login files, cookies, SQLite logs, sessions, caches, and temporary files.
-
-### Troubleshooting
-
-If the wrong account opens, close that profile from Codex Accounts with the `x` button, then open it again from the correct row. Avoid launching profile windows directly from the normal Codex app icon, because that uses the default profile.
-
-If a profile shows `要登入` / `Login needed`, open it and sign in again. This can happen after password changes or expired local auth.
-
-If quota stays unknown, the usage endpoint may be temporarily unavailable, or the profile token may have expired. Open that profile and sign in again.
-
-### Privacy
-
-All profiles are local folders on your Mac. The app does not upload your files and does not send account credentials to third parties. To show remaining Codex usage, it reads the profile's local access token and sends it only to OpenAI / ChatGPT's official usage endpoint. Tokens are not written to cache or logs.
-
-### License
+## License
 
 MIT. See [LICENSE](LICENSE).

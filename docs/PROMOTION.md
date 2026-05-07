@@ -6,7 +6,9 @@ This file gives you ready-to-post copy for GitHub, forums, Reddit, X, V2EX, and 
 
 - Add repo topics: `macos`, `codex`, `openai`, `swiftui`, `productivity`, `multi-account`.
 - Upload `dist/Codex-Accounts-macOS.zip` to GitHub Releases.
-- Add the generated screenshot from `docs/assets/codex-accounts-overview.png`.
+- Add the generated v2 screenshots from `docs/assets/codex-accounts-v2-hero.png`,
+  `docs/assets/codex-accounts-v2-profiles.png`, `docs/assets/codex-accounts-v2-sidebar.png`,
+  and `docs/assets/codex-accounts-v2-toolbar.png`.
 - Mention that the app is unofficial and does not copy auth tokens or cookies.
 - Add install notes for Gatekeeper: right-click `Open` if macOS blocks the first launch.
 
@@ -31,12 +33,14 @@ It creates separate local Codex profiles, then opens the official Codex desktop 
 
 Main features:
 - Create unlimited local profiles
-- Open, close, rename, reveal, and archive profiles
+- Open, close, rename, reveal, archive, and delete profiles
 - Separate login state per profile
+- Sync local memory and share local history before opening a profile
+- Usage meters for 5H / 1W quota windows with reset times
 - Optional local history sharing
 - Optional local memory sync for AGENTS.md, memories/, and rules/
-- Keep Awake toggle for long Codex runs
-- Chinese and English UI
+- Keep Awake toggle that follows the real caffeinate state
+- Liquid Glass UI with multiple themes, hover glow, and Chinese / English UI
 
 It does not copy cookies, auth tokens, cloud conversations, or ChatGPT server-side memory. It is only a local macOS helper around the official Codex app.
 
@@ -61,12 +65,14 @@ Codex Accounts 會為每個 profile 建立獨立嘅 CODEX_HOME 同 Electron user
 
 功能：
 - 新增多個 profile
-- 打開、關閉、改名、顯示資料夾、封存 profile
+- 打開、關閉、改名、顯示資料夾、封存、刪除 profile
 - 每個 profile 保留獨立登入狀態
+- 打開 profile 前先同步本機記憶同共享本機對話紀錄
+- 顯示 5H / 1W quota、百分比同恢復時間
 - 可選擇共享本機 Codex 對話紀錄
 - 可選擇同步 AGENTS.md、memories/、rules/
-- 防睡眠開關，方便長時間跑 Codex
-- 中文/英文介面
+- 防睡眠開關會跟返真實 caffeinate 狀態
+- Liquid Glass UI、多主題、hover 發光、中文/英文介面
 
 注意：佢唔會複製 cookies、auth token、OpenAI 雲端對話或 ChatGPT server-side memory。只係本機 profile 管理工具。
 
@@ -93,7 +99,7 @@ Show HN: Codex Accounts, a macOS helper for multiple Codex/OpenAI accounts
 
 I use multiple OpenAI accounts with the Codex desktop app and got tired of logging in and out. This helper creates separate local profiles, each with its own CODEX_HOME and Electron user-data-dir, then launches the official Codex app against that profile.
 
-It includes profile creation, open/close, rename, archive, local history sharing, local memory sync, and a Keep Awake toggle for long-running Codex sessions.
+It includes profile creation, open/close, rename, archive, local history sharing, local memory sync, quota meters, multi-theme Liquid Glass UI, and a Keep Awake toggle for long-running Codex sessions.
 
 It does not copy cookies or auth tokens and it does not sync cloud conversations. It is only local profile management.
 

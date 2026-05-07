@@ -1,5 +1,6 @@
 #!/usr/bin/env zsh
 set -euo pipefail
+setopt typesetsilent
 
 # Launch a second Codex profile and sync local memory files between profiles.
 # This intentionally does not copy auth.json, cookies, or SQLite logs.
@@ -13,8 +14,8 @@ APP_DATA_ROOT="${APP_DATA_ROOT:-$HOME/Library/Application Support/Codex Accounts
 SHARED_MEMORY_DIR="${SHARED_MEMORY_DIR:-$HOME/.codex-shared-memory}"
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
 USAGE_API_URL="${USAGE_API_URL:-https://chatgpt.com/backend-api/wham/usage}"
-USAGE_CACHE_SECONDS="${USAGE_CACHE_SECONDS:-60}"
-USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache}"
+USAGE_CACHE_SECONDS="${USAGE_CACHE_SECONDS:-20}"
+USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache-v5}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
@@ -32,6 +33,7 @@ Usage:
   scripts/codex_multi_account.zsh init-account <account-name>
   scripts/codex_multi_account.zsh launch-account <account-name> [display-name]
   scripts/codex_multi_account.zsh close-account <account-name>
+  scripts/codex_multi_account.zsh close-all-accounts
   scripts/codex_multi_account.zsh list-accounts
   scripts/codex_multi_account.zsh account-status <account-name>
   scripts/codex_multi_account.zsh list-accounts-status
@@ -245,6 +247,14 @@ read_cached_usage() {
   local max_age="${2:-$USAGE_CACHE_SECONDS}"
   [[ -f "$cache_file" ]] || return 1
 
+  # Older cache files may contain a fabricated 5h window for free accounts.
+  if ! grep -Fq $'\t' "$cache_file" 2>/dev/null; then
+    return 1
+  fi
+  if grep -Fq '5h unknown' "$cache_file" 2>/dev/null; then
+    return 1
+  fi
+
   local mtime now age
   mtime="$(stat -f '%m' "$cache_file" 2>/dev/null || echo 0)"
   now="$(date '+%s')"
@@ -309,7 +319,7 @@ fetch_usage_summary_for() {
   [[ -n "$token" ]] || return 1
 
   tmp_file="$(mktemp)"
-  http_status="$(curl -sS --connect-timeout 4 --max-time 10 -o "$tmp_file" -w '%{http_code}' \
+  http_status="$(curl -sS --connect-timeout 2 --max-time 5 -o "$tmp_file" -w '%{http_code}' \
     -H "Authorization: Bearer $token" \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
@@ -317,6 +327,9 @@ fetch_usage_summary_for() {
 
   if [[ "$http_status" == "401" || "$http_status" == "403" ]]; then
     rm -f "$tmp_file"
+    # Codex may still be locally signed in even when the usage endpoint rejects
+    # one request. Prefer the last known usage value so 0% accounts stay visible.
+    read_cached_usage "$cache_file" 86400 2>/dev/null && return 0
     printf '%s\t%s\n' "__auth_invalid__" "unknown"
     return 0
   fi
@@ -330,20 +343,48 @@ fetch_usage_summary_for() {
 
   raw_summary="$(jq -r '
     def clamp: if . < 0 then 0 elif . > 100 then 100 else . end;
-    def left($w):
-      if $w == null or ($w.used_percent == null) then "unknown"
-      else (((100 - ($w.used_percent | tonumber)) | clamp | floor) | tostring) + "%"
+    def limits:
+      if .rate_limits then
+        .rate_limits
+      elif .rate_limit then
+        {
+          unlimited: .rate_limit.unlimited,
+          primary: .rate_limit.primary_window,
+          secondary: .rate_limit.secondary_window
+        }
+      else
+        {}
       end;
+    def has_usage($w): $w != null and ($w.used_percent != null);
+    def left($w): (((100 - ($w.used_percent | tonumber)) | clamp | floor) | tostring) + "%";
     def epoch($w):
-      if $w == null or ($w.reset_at == null) then "unknown"
-      else ($w.reset_at | tostring)
+      if $w == null then "unknown"
+      elif ($w.resets_at != null) then ($w.resets_at | tostring)
+      elif ($w.reset_at != null) then ($w.reset_at | tostring)
+      else "unknown"
       end;
-    if (.rate_limit.unlimited == true) then
-      ["unlimited", "none / none"]
+    def quota_label($fallback; $w):
+      if ($w.window_minutes == 300) then "5h"
+      elif ($w.window_minutes == 10080) then "7d"
+      else $fallback
+      end;
+    def primary_label($l):
+      if has_usage($l.secondary) then quota_label("5h"; $l.primary)
+      else "7d"
+      end;
+    (limits) as $l |
+    if ($l.unlimited == true) then
+      ["unlimited", "none"]
     else
       [
-        ("5h " + left(.rate_limit.primary_window) + " / 7d " + left(.rate_limit.secondary_window)),
-        (epoch(.rate_limit.primary_window) + " / " + epoch(.rate_limit.secondary_window))
+        ([
+          if has_usage($l.primary) then primary_label($l) + " " + left($l.primary) else empty end,
+          if has_usage($l.secondary) then quota_label("7d"; $l.secondary) + " " + left($l.secondary) else empty end
+        ] | join(" / ")),
+        ([
+          if has_usage($l.primary) then primary_label($l) + " " + epoch($l.primary) else empty end,
+          if has_usage($l.secondary) then quota_label("7d"; $l.secondary) + " " + epoch($l.secondary) else empty end
+        ] | join(" / "))
       ]
     end | @tsv
   ' "$tmp_file" 2>/dev/null || true)"
@@ -352,15 +393,25 @@ fetch_usage_summary_for() {
 
   quota="${raw_summary%%$'\t'*}"
   reset_epochs="${raw_summary#*$'\t'}"
+  [[ -n "$quota" ]] || return 1
   if [[ "$quota" == "unlimited" ]]; then
     write_cached_usage "$cache_file" "$quota" "none"
     printf '%s\t%s\n' "$quota" "none"
     return 0
   fi
 
-  primary_epoch="${reset_epochs%% / *}"
-  secondary_epoch="${reset_epochs#* / }"
-  reset="5h $(format_reset_epoch "$primary_epoch") / 7d $(format_reset_epoch "$secondary_epoch")"
+  reset=""
+  for part in ${(s: / :)reset_epochs}; do
+    local reset_label reset_epoch formatted_reset
+    reset_label="${part%% *}"
+    reset_epoch="${part#* }"
+    formatted_reset="$(format_reset_epoch "$reset_epoch")"
+    if [[ -n "$reset" ]]; then
+      reset="$reset / "
+    fi
+    reset="$reset$reset_label $formatted_reset"
+  done
+  [[ -n "$reset" ]] || reset="unknown"
 
   write_cached_usage "$cache_file" "$quota" "$reset"
   printf '%s\t%s\n' "$quota" "$reset"
@@ -392,7 +443,9 @@ account_status_for() {
         quota="${usage_summary%%$'\t'*}"
         reset="${usage_summary#*$'\t'}"
         if [[ "$quota" == "__auth_invalid__" ]]; then
-          auth_status="login_needed"
+          # A usage endpoint auth failure only proves the usage request failed.
+          # Codex can still refresh/use the local login when auth.json contains
+          # both tokens, so do not mark the profile as logged out here.
           quota="unknown"
           reset="unknown"
         fi
@@ -406,9 +459,23 @@ account_status_for() {
 }
 
 list_accounts_status() {
-  list_accounts | cut -d '|' -f 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | while read -r name; do
-    account_status_for "$name"
+  local tmp_dir index name
+  tmp_dir="$(mktemp -d)"
+  index=0
+
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    index=$((index + 1))
+    (
+      account_status_for "$name" > "$tmp_dir/$index.status" 2>/dev/null || true
+    ) &
+  done < <(list_accounts | cut -d '|' -f 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+  wait
+  for status_file in "$tmp_dir"/*.status(N); do
+    cat "$status_file"
   done
+  rm -rf "$tmp_dir"
 }
 
 rsync_item_to_shared() {
@@ -449,11 +516,21 @@ sync_once() {
   require_rsync
   ensure_dirs
 
+  local homes=()
+  local home_dir
+  while IFS='|' read -r _ raw_home _; do
+    home_dir="$(echo "$raw_home" | xargs)"
+    [[ -n "$home_dir" ]] || continue
+    homes+=("$home_dir")
+  done < <(list_accounts)
+
   for item in "${SYNC_ITEMS[@]}"; do
-    rsync_item_to_shared "$PRIMARY_CODEX_HOME" "$item"
-    rsync_item_to_shared "$SECOND_CODEX_HOME" "$item"
-    rsync_item_from_shared "$PRIMARY_CODEX_HOME" "$item"
-    rsync_item_from_shared "$SECOND_CODEX_HOME" "$item"
+    for home_dir in "${homes[@]}"; do
+      rsync_item_to_shared "$home_dir" "$item"
+    done
+    for home_dir in "${homes[@]}"; do
+      rsync_item_from_shared "$home_dir" "$item"
+    done
   done
 
   echo "Synced local Codex memory files at $(date '+%Y-%m-%d %H:%M:%S')."
@@ -598,6 +675,25 @@ close_account() {
   echo "Closed matching profile window(s)."
 }
 
+close_all_accounts() {
+  ensure_dirs
+
+  echo "Closing all Codex profile window(s)..."
+  list_accounts | while IFS='|' read -r raw_name _; do
+    local name
+    name="$(echo "$raw_name" | xargs)"
+    [[ -n "$name" ]] || continue
+
+    local home_dir app_data
+    home_dir="$(account_home_for "$name")"
+    app_data="$(account_app_data_for "$name")"
+    stop_codex_windows_for_app_data "$app_data"
+    stop_codex_servers_for_home "$home_dir"
+  done
+
+  echo "Closed all matching Codex profile window(s)."
+}
+
 backup_path_for_account() {
   local account_home="$1"
   local item_name="$2"
@@ -717,6 +813,7 @@ main() {
     init-account) init_account "${2:-}" ;;
     launch-account) launch_account "${2:-}" "${3:-}" ;;
     close-account) close_account "${2:-}" ;;
+    close-all-accounts) close_all_accounts ;;
     list-accounts) list_accounts ;;
     account-status) account_status_for "${2:-}" ;;
     list-accounts-status) list_accounts_status ;;
