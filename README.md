@@ -14,6 +14,8 @@
 
 ![Toolbar controls and signed-in grouping](docs/assets/codex-accounts-v2-toolbar.png)
 
+![Mobile Remote Bridge and Android control app](docs/assets/codex-accounts-v2-remote.png)
+
 ---
 
 <a id="繁體中文"></a>
@@ -32,6 +34,8 @@ Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳
 - 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
 - 記憶同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
 - 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態。
+- 手機遠端 Bridge：可以喺 Mac app 建立手機登入帳號，Android app 用同一組 username/password 登入後控制 profile、同步、打開/關閉視窗和傳送 prompt。
+- 遠端安全選項：Bridge 預設只接受登入 session，支援配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
 - Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、中文和英文介面。
 - 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
 
@@ -40,6 +44,7 @@ Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳
 - 不會複製 OpenAI auth token、cookie 或 account session 到其他 profile。
 - 不會同步 OpenAI 雲端對話，也不會同步 ChatGPT server-side memory。
 - 不會把帳戶憑證傳到第三方。
+- 手機遠端帳號只儲存在本機 `~/Library/Application Support/Codex Accounts/remote-users.json`，密碼用 PBKDF2 hash 儲存。
 - 用量查詢只會使用該 profile 的本機 token 請求官方 Codex / ChatGPT 用量接口。
 - 這是非官方輔助工具，與 OpenAI 沒有從屬關係。
 
@@ -70,6 +75,18 @@ scripts/package_release.zsh
 
 ```text
 dist/Codex-Accounts-macOS.zip
+```
+
+建立 Android 遙控 APK：
+
+```zsh
+android/build_apk.zsh
+```
+
+輸出位置：
+
+```text
+android/dist/CodexRemote-debug.apk
 ```
 
 ### 本機資料位置
@@ -112,6 +129,8 @@ Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账
 - 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
 - 记忆同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
 - 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态。
+- 手机远程 Bridge：可以在 Mac app 创建手机登录账号，Android app 用同一组 username/password 登录后控制 profile、同步、打开/关闭窗口和发送 prompt。
+- 远程安全选项：Bridge 默认只接受登录 session，支持配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
 - Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、中文和英文界面。
 - 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
 
@@ -120,6 +139,7 @@ Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账
 - 不会复制 OpenAI auth token、cookie 或 account session 到其他 profile。
 - 不会同步 OpenAI 云端对话，也不会同步 ChatGPT server-side memory。
 - 不会把账号凭证发送到第三方。
+- 手机远程账号只保存在本机 `~/Library/Application Support/Codex Accounts/remote-users.json`，密码用 PBKDF2 hash 保存。
 - 用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
 - 这是非官方辅助工具，与 OpenAI 没有关联。
 
@@ -150,6 +170,18 @@ scripts/package_release.zsh
 
 ```text
 dist/Codex-Accounts-macOS.zip
+```
+
+构建 Android 遥控 APK：
+
+```zsh
+android/build_apk.zsh
+```
+
+输出位置：
+
+```text
+android/dist/CodexRemote-debug.apk
 ```
 
 ### 本地数据位置
@@ -192,6 +224,8 @@ Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accoun
 - Optional local history sharing across profiles.
 - Optional memory sync for `AGENTS.md`, `memories/`, and `rules/`.
 - Keep Awake: uses `caffeinate` to stop macOS from sleeping, and the toggle follows the real system process state.
+- Mobile Remote Bridge: create a mobile login in the Mac app, then use the Android app with the same username/password to control profiles, sync, open/close windows, and send prompts.
+- Remote security options: the bridge requires signed-in bearer sessions and can sit behind Tailscale or Cloudflare Tunnel + Access service tokens.
 - Liquid Glass interface: multiple themes, hover glow, profile card animation, Chinese and English UI.
 - Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
 
@@ -200,6 +234,7 @@ Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accoun
 - It does not copy OpenAI auth tokens, cookies, or account sessions between profiles.
 - It does not sync OpenAI cloud chat history or ChatGPT server-side memory.
 - It does not send account credentials to third parties.
+- Mobile remote users stay local in `~/Library/Application Support/Codex Accounts/remote-users.json`, and passwords are stored as PBKDF2 hashes.
 - Usage checks use the profile's local token only against the official Codex / ChatGPT usage endpoint.
 - This is an unofficial helper app and is not affiliated with OpenAI.
 
@@ -230,6 +265,18 @@ Output:
 
 ```text
 dist/Codex-Accounts-macOS.zip
+```
+
+Build the Android remote-control APK:
+
+```zsh
+android/build_apk.zsh
+```
+
+Output:
+
+```text
+android/dist/CodexRemote-debug.apk
 ```
 
 ### Local Data

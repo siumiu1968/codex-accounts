@@ -20,6 +20,8 @@ Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账
 - 可选本地 Codex 对话记录共享。
 - 可选同步 `AGENTS.md`、`memories/`、`rules/`。
 - 防睡眠开关使用 `caffeinate`，并会跟随真实系统进程状态。
+- 手机远程 Bridge：在 Mac app 创建手机登录账号，Android app 用同一组 username/password 登录后控制 profile、同步、打开/关闭窗口和发送 prompt。
+- 远程安全选项：Bridge 默认只接受登录 session，支持配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
 - Liquid Glass 界面、多主题、hover 发光、profile 卡片动画。
 - 菜单栏快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
 
@@ -30,6 +32,8 @@ Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账
 ![Automation and Keep Awake controls](docs/assets/codex-accounts-v2-sidebar.png)
 
 ![Toolbar controls](docs/assets/codex-accounts-v2-toolbar.png)
+
+![Mobile Remote Bridge and Android control app](docs/assets/codex-accounts-v2-remote.png)
 
 ## 安装
 
@@ -60,11 +64,24 @@ scripts/package_release.zsh
 dist/Codex-Accounts-macOS.zip
 ```
 
+构建 Android 遥控 APK：
+
+```zsh
+android/build_apk.zsh
+```
+
+输出位置：
+
+```text
+android/dist/CodexRemote-debug.apk
+```
+
 ## 隐私
 
 - 不会复制 OpenAI auth token、cookie 或 account session 到其他 profile。
 - 不会同步 OpenAI 云端对话，也不会同步 ChatGPT server-side memory。
 - 不会把账号凭证发送到第三方。
+- 手机远程账号只保存在本机 `~/Library/Application Support/Codex Accounts/remote-users.json`，密码用 PBKDF2 hash 保存。
 - 用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
 - 这是非官方辅助工具，与 OpenAI 没有关联。
 

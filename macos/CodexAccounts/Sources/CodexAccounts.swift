@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Darwin
+import Foundation
 import SwiftUI
 
 struct CodexProfile: Identifiable {
@@ -380,6 +381,45 @@ private func promptForAccountName(title: String, message: String, defaultName: S
     return name.isEmpty ? defaultName : name
 }
 
+private func promptForRemoteUserCredentials() -> (username: String, password: String)? {
+    let language = UserDefaults.standard.string(forKey: "language") ?? "zh"
+    NSApp.activate(ignoringOtherApps: true)
+
+    let alert = NSAlert()
+    alert.messageText = language == "zh" ? "新增手機登入帳號" : "New Mobile Login"
+    alert.informativeText = language == "zh"
+        ? "喺呢部 Mac 建立一個 username/password。手機要用同一組資料登入先可以控制 Codex。"
+        : "Create a username/password on this Mac. The Android app must sign in with the same credentials before it can control Codex."
+    alert.addButton(withTitle: language == "zh" ? "建立" : "Create")
+    alert.addButton(withTitle: language == "zh" ? "取消" : "Cancel")
+
+    let stack = NSStackView()
+    stack.orientation = .vertical
+    stack.spacing = 8
+    stack.frame = NSRect(x: 0, y: 0, width: 300, height: 62)
+
+    let usernameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
+    usernameField.placeholderString = "username"
+    let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
+    passwordField.placeholderString = language == "zh" ? "密碼，至少 10 個字元" : "Password, at least 10 characters"
+
+    stack.addArrangedSubview(usernameField)
+    stack.addArrangedSubview(passwordField)
+    alert.accessoryView = stack
+
+    guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+    let username = usernameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    let password = passwordField.stringValue
+    guard !username.isEmpty, password.count >= 10 else {
+        alertMessage(
+            language == "zh" ? "帳號資料不完整" : "Invalid Login",
+            language == "zh" ? "Username 唔可以留空，密碼至少要 10 個字元。" : "Username cannot be empty and password must be at least 10 characters."
+        )
+        return nil
+    }
+    return (username, password)
+}
+
 private func alertMessage(_ title: String, _ message: String) {
     let language = UserDefaults.standard.string(forKey: "language") ?? "zh"
     NSApp.activate(ignoringOtherApps: true)
@@ -653,6 +693,11 @@ struct AccountsRootView: View {
     @State private var resetScrambleSeed = 0
     @State private var codexUsageSessionStart: Date?
     @State private var usageTicker = Date()
+    @State private var remoteBridgeProcess: Process?
+    @State private var remoteBridgeRunning = false
+    @State private var remoteBridgeUsersCount = 0
+    @State private var remoteBridgeStatus = ""
+    @State private var remoteBridgeLastOutput = ""
     @AppStorage("codexUsageDayKey") private var codexUsageDayKey = ""
     @AppStorage("codexUsageSecondsToday") private var codexUsageSecondsToday = 0.0
     @AppStorage("appTheme") private var appTheme = "graphite"
@@ -700,6 +745,7 @@ struct AccountsRootView: View {
                 }
             }
             keepAwake.refreshState()
+            refreshRemoteBridgeState()
             refreshProfiles(showLoading: true)
         }
         .sheet(isPresented: $showIntro) {
@@ -716,6 +762,7 @@ struct AccountsRootView: View {
                 syncMemories(silent: true)
             }
             keepAwake.refreshState()
+            refreshRemoteBridgeState()
             usageTicker = Date()
             normalizeUsageDay()
         }
@@ -1266,6 +1313,10 @@ struct AccountsRootView: View {
 
             Divider().background(Color.white.opacity(0.12))
 
+            remoteBridgePanel
+
+            Divider().background(Color.white.opacity(0.12))
+
             HStack(spacing: scaled(10)) {
                 VStack(alignment: .leading, spacing: scaled(3)) {
                     HStack(spacing: scaled(5)) {
@@ -1311,6 +1362,62 @@ struct AccountsRootView: View {
 
     private var keepAwakeHelpText: String {
         tr("防止 Mac 自動睡眠，讓 Codex 長任務可以繼續跑。", "Prevents Mac sleep so long Codex tasks can keep running.")
+    }
+
+    private var remoteBridgePanel: some View {
+        let running = remoteBridgeRunning
+        let accent = running ? Color(red: 0.00, green: 0.92, blue: 0.70) : Color(red: 1.00, green: 0.58, blue: 0.16)
+        let stateText = running ? tr("已啟動", "Running") : tr("未啟動", "Stopped")
+        let userText = tr("\(remoteBridgeUsersCount) 個手機帳號", "\(remoteBridgeUsersCount) mobile users")
+
+        return VStack(alignment: .leading, spacing: scaled(8)) {
+            HStack(spacing: scaled(6)) {
+                Text(tr("手機遠端", "Mobile Remote"))
+                    .font(appFont(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .lineLimit(1)
+                Spacer(minLength: scaled(8))
+                HStack(spacing: scaled(4)) {
+                    Circle()
+                        .fill(accent)
+                        .frame(width: scaled(7), height: scaled(7))
+                    Text(stateText)
+                        .font(appFont(size: 10, weight: .bold))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(accent)
+            }
+
+            VStack(alignment: .leading, spacing: scaled(3)) {
+                Text(userText)
+                    .font(appFont(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
+
+                Text(remoteBridgeURLLabel)
+                    .font(appFont(size: 10, weight: .medium, monospaced: true))
+                    .foregroundStyle(Color(red: 0.32, green: 0.86, blue: 1.00).opacity(0.86))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            HStack(spacing: scaled(8)) {
+                miniButton(running ? tr("停止 Bridge", "Stop Bridge") : tr("啟動 Bridge", "Start Bridge")) {
+                    running ? stopRemoteBridge() : startRemoteBridge()
+                }
+                miniButton(tr("新增登入", "Add Login")) {
+                    createRemoteBridgeUser()
+                }
+            }
+
+            if !remoteBridgeStatus.isEmpty {
+                Text(remoteBridgeStatus)
+                    .font(appFont(size: 10))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
     }
 
     private var keepAwakeGlassButton: some View {
@@ -2544,6 +2651,225 @@ struct AccountsRootView: View {
                 busyProfiles.remove(id)
             }
         }
+    }
+
+    private var remoteBridgePort: Int {
+        47621
+    }
+
+    private var remoteBridgeURLLabel: String {
+        "http://\(localIPAddress()):\(remoteBridgePort)"
+    }
+
+    private var remoteBridgeScriptPath: String {
+        if let bundled = Bundle.main.path(forResource: "codex_remote_bridge", ofType: "py") {
+            return bundled
+        }
+        let sibling = URL(fileURLWithPath: scriptPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("codex_remote_bridge.py")
+            .path
+        if FileManager.default.fileExists(atPath: sibling) {
+            return sibling
+        }
+        return "/Applications/Codex Accounts.app/Contents/Resources/codex_remote_bridge.py"
+    }
+
+    private var remoteBridgeStartScriptPath: String {
+        if let bundled = Bundle.main.path(forResource: "start_mac_bridge", ofType: "zsh") {
+            return bundled
+        }
+        let sibling = URL(fileURLWithPath: scriptPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("start_mac_bridge.zsh")
+            .path
+        if FileManager.default.fileExists(atPath: sibling) {
+            return sibling
+        }
+        return "/Applications/Codex Accounts.app/Contents/Resources/start_mac_bridge.zsh"
+    }
+
+    private var remoteBridgePIDFileURL: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return support
+            .appendingPathComponent("Codex Accounts", isDirectory: true)
+            .appendingPathComponent("remote-bridge.pid")
+    }
+
+    private func runRemoteBridgeUtility(_ arguments: [String], input: Data? = nil) -> (Int32, String) {
+        let process = Process()
+        let outputPipe = Pipe()
+        let inputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [remoteBridgeScriptPath, "--script", scriptPath] + arguments
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        if input != nil {
+            process.standardInput = inputPipe
+        }
+
+        do {
+            try process.run()
+            if let input {
+                inputPipe.fileHandleForWriting.write(input)
+                inputPipe.fileHandleForWriting.closeFile()
+            }
+            process.waitUntilExit()
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        } catch {
+            return (127, error.localizedDescription)
+        }
+    }
+
+    private func startRemoteBridge() {
+        refreshRemoteBridgeState()
+        guard !remoteBridgeRunning else {
+            remoteBridgeStatus = tr("Bridge 已經運行緊", "Bridge is already running")
+            return
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [remoteBridgeStartScriptPath]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_ACCOUNTS_SCRIPT"] = scriptPath
+        environment["CODEX_REMOTE_BRIDGE"] = remoteBridgeScriptPath
+        environment["CODEX_REMOTE_PORT"] = "\(remoteBridgePort)"
+        environment["CODEX_REMOTE_PID_FILE"] = remoteBridgePIDFileURL.path
+        environment["PYTHONUNBUFFERED"] = "1"
+        process.environment = environment
+        process.standardOutput = pipe
+        process.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty,
+                  let text = String(data: data, encoding: .utf8)
+            else { return }
+            DispatchQueue.main.async {
+                remoteBridgeLastOutput += text
+                let lines = remoteBridgeLastOutput
+                    .split(separator: "\n")
+                    .map(String.init)
+                    .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                if let last = lines.last {
+                    remoteBridgeStatus = last
+                }
+            }
+        }
+        process.terminationHandler = { _ in
+            DispatchQueue.main.async {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                if let current = remoteBridgeProcess, current === process {
+                    remoteBridgeProcess = nil
+                }
+                refreshRemoteBridgeState()
+            }
+        }
+
+        do {
+            try process.run()
+            remoteBridgeProcess = process
+            remoteBridgeRunning = true
+            remoteBridgeStatus = tr("Bridge 啟動中...", "Bridge starting...")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+                refreshRemoteBridgeState()
+            }
+        } catch {
+            remoteBridgeStatus = error.localizedDescription
+            alertMessage(tr("Bridge 啟動失敗", "Bridge Start Failed"), error.localizedDescription)
+        }
+    }
+
+    private func stopRemoteBridge() {
+        remoteBridgeProcess?.terminate()
+        remoteBridgeProcess = nil
+        if let pid = readRemoteBridgePID(), isProcessRunning(pid: pid) {
+            _ = Darwin.kill(pid_t(pid), SIGTERM)
+        }
+        removeRemoteBridgePIDIfStale()
+        remoteBridgeRunning = false
+        remoteBridgeStatus = tr("Bridge 已停止", "Bridge stopped")
+    }
+
+    private func createRemoteBridgeUser() {
+        guard let credentials = promptForRemoteUserCredentials() else { return }
+        let payload: [String: String] = [
+            "username": credentials.username,
+            "password": credentials.password
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            alertMessage(tr("帳號建立失敗", "Could Not Create Login"), tr("無法建立登入 payload。", "Could not create login payload."))
+            return
+        }
+
+        runBackground(tr("建立手機登入帳號...", "Creating mobile login...")) {
+            runRemoteBridgeUtility(["--create-user-stdin"], input: data)
+        } completion: { result in
+            guard result.0 == 0 else {
+                alertMessage(tr("帳號建立失敗", "Could Not Create Login"), result.1)
+                refreshRemoteBridgeState()
+                return
+            }
+            remoteBridgeStatus = tr("已建立手機登入帳號 \(credentials.username)", "Created mobile login \(credentials.username)")
+            refreshRemoteBridgeState()
+        }
+    }
+
+    private func refreshRemoteBridgeState() {
+        let processRunning = remoteBridgeProcess?.isRunning == true
+        let pidRunning = readRemoteBridgePID().map { isProcessRunning(pid: $0) } ?? false
+        remoteBridgeRunning = processRunning || pidRunning
+        if !remoteBridgeRunning {
+            removeRemoteBridgePIDIfStale()
+        }
+
+        let result = runRemoteBridgeUtility(["--list-users"])
+        guard result.0 == 0,
+              let data = result.1.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let users = json["users"] as? [Any]
+        else {
+            remoteBridgeUsersCount = 0
+            if !result.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                remoteBridgeStatus = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return
+        }
+        remoteBridgeUsersCount = users.count
+    }
+
+    private func readRemoteBridgePID() -> Int32? {
+        guard let text = try? String(contentsOf: remoteBridgePIDFileURL, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0
+        else {
+            return nil
+        }
+        return pid
+    }
+
+    private func isProcessRunning(pid: Int32) -> Bool {
+        Darwin.kill(pid_t(pid), 0) == 0
+    }
+
+    private func removeRemoteBridgePIDIfStale() {
+        guard let pid = readRemoteBridgePID(), !isProcessRunning(pid: pid) else { return }
+        try? FileManager.default.removeItem(at: remoteBridgePIDFileURL)
+    }
+
+    private func localIPAddress() -> String {
+        let addresses = Host.current().addresses
+        if let address = addresses.first(where: { candidate in
+            candidate.range(of: #"^\d+\.\d+\.\d+\.\d+$"#, options: .regularExpression) != nil
+                && !candidate.hasPrefix("127.")
+                && !candidate.hasPrefix("169.254.")
+        }) {
+            return address
+        }
+        return "127.0.0.1"
     }
 
     private func refreshProfiles(showLoading: Bool = true, replayQuota: Bool = false) {

@@ -14,6 +14,12 @@ cp "$SRC_DIR/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT_DIR/scripts/codex_multi_account.zsh" "$RESOURCES/codex_multi_account.zsh"
 chmod +x "$RESOURCES/codex_multi_account.zsh"
 
+cp "$ROOT_DIR/scripts/codex_remote_bridge.py" "$RESOURCES/codex_remote_bridge.py"
+chmod +x "$RESOURCES/codex_remote_bridge.py"
+
+cp "$ROOT_DIR/scripts/start_mac_bridge.zsh" "$RESOURCES/start_mac_bridge.zsh"
+chmod +x "$RESOURCES/start_mac_bridge.zsh"
+
 if [[ -f "$SRC_DIR/AppIcon.icns" ]]; then
   cp "$SRC_DIR/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
