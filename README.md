@@ -24,6 +24,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.1.0 更新介紹
+
+V2.1.0 重點修正最細視窗嘅穩定性同狀態準確度：loading 提示會固定留喺可見視窗右下角，左側控制欄可以上下滾動，已登入 profile 會優先以本機 token 和最近 quota 判斷，避免 Plus 帳戶被誤顯示為未登入。今版亦加強防卡死處理，所有背景 script 都會持續讀取輸出並設 timeout，減少 app 用用吓無反應嘅情況。防睡眠功能新增合蓋支援，開啟後會盡量保持 Mac 任務運行，合蓋時把內置屏幕亮度降到 0，開蓋或關閉功能時恢復亮度。
+
 ### v2 主要功能
 
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
@@ -33,7 +37,7 @@ Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
 - 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
 - 記憶同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
-- 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態。
+- 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態；開啟時會監察合蓋狀態，合蓋降內置屏幕亮度，開蓋或關閉功能時恢復亮度。
 - 手機遠端 Bridge：可以喺 Mac app 建立手機登入帳號，Android app 用同一組 username/password 登入後控制 profile、同步、打開/關閉視窗和傳送 prompt。
 - 遠端安全選項：Bridge 預設只接受登入 session，支援配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
 - Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、中文和英文介面。
@@ -119,6 +123,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
+### V2.1.0 更新介绍
+
+V2.1.0 重点修正最小窗口下的稳定性和状态准确度：loading 提示会固定留在可见窗口右下角，左侧控制栏可以上下滚动，已登录 profile 会优先根据本地 token 和最近 quota 判断，避免 Plus 账号被误显示为未登录。本版也加强了防卡死处理，所有后台 script 都会持续读取输出并设置 timeout，减少 app 使用过程中无响应的情况。防睡眠功能新增合盖支持，开启后会尽量保持 Mac 任务运行，合盖时把内置屏幕亮度降到 0，开盖或关闭功能时恢复亮度。
+
 ### v2 主要功能
 
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
@@ -128,7 +136,7 @@ Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
 - 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
 - 记忆同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
-- 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态。
+- 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态；开启时会监测合盖状态，合盖降低内置屏幕亮度，开盖或关闭功能时恢复亮度。
 - 手机远程 Bridge：可以在 Mac app 创建手机登录账号，Android app 用同一组 username/password 登录后控制 profile、同步、打开/关闭窗口和发送 prompt。
 - 远程安全选项：Bridge 默认只接受登录 session，支持配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
 - Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、中文和英文界面。
@@ -214,6 +222,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
+### V2.1.0 Update
+
+V2.1.0 focuses on stability and status accuracy in the smallest window size. The loading pill now stays inside the visible bottom-right corner, the left control column scrolls vertically, and signed-in profiles are resolved from local tokens plus recent quota data so Plus accounts are not mislabelled as logged out. Background scripts now drain output continuously and use timeouts, reducing cases where the app appears frozen. Keep Awake also gains lid-close support: when enabled, it keeps Mac tasks running where macOS allows it, dims the built-in display to 0 when the lid closes, and restores brightness when the lid opens or Keep Awake is turned off.
+
 ### v2 Highlights
 
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
@@ -223,7 +235,7 @@ Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accoun
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
 - Optional local history sharing across profiles.
 - Optional memory sync for `AGENTS.md`, `memories/`, and `rules/`.
-- Keep Awake: uses `caffeinate` to stop macOS from sleeping, and the toggle follows the real system process state.
+- Keep Awake: uses `caffeinate` to stop macOS from sleeping, follows the real system process state, monitors lid state, dims the built-in display when the lid closes, and restores brightness when opened or turned off.
 - Mobile Remote Bridge: create a mobile login in the Mac app, then use the Android app with the same username/password to control profiles, sync, open/close windows, and send prompts.
 - Remote security options: the bridge requires signed-in bearer sessions and can sit behind Tailscale or Cloudflare Tunnel + Access service tokens.
 - Liquid Glass interface: multiple themes, hover glow, profile card animation, Chinese and English UI.

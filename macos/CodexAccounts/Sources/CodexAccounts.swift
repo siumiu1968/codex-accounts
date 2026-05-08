@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Darwin
 import Foundation
+import IOKit
 import SwiftUI
 
 struct CodexProfile: Identifiable {
@@ -21,6 +22,197 @@ private struct QuotaWindow: Identifiable {
     let labelEN: String
     let percent: Int?
     let reset: String?
+}
+
+private func runProcess(
+    executable: String,
+    arguments: [String],
+    input: Data? = nil,
+    environment: [String: String]? = nil,
+    timeout: TimeInterval = 90
+) -> (Int32, String) {
+    let process = Process()
+    let outputPipe = Pipe()
+    let inputPipe = Pipe()
+    let lock = NSLock()
+    let group = DispatchGroup()
+    var output = Data()
+    var timedOut = false
+
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = outputPipe
+    process.standardError = outputPipe
+    if let environment {
+        process.environment = environment
+    }
+    if input != nil {
+        process.standardInput = inputPipe
+    }
+
+    outputPipe.fileHandleForReading.readabilityHandler = { handle in
+        let data = handle.availableData
+        guard !data.isEmpty else { return }
+        lock.lock()
+        output.append(data)
+        lock.unlock()
+    }
+
+    do {
+        try process.run()
+        if let input {
+            inputPipe.fileHandleForWriting.write(input)
+            inputPipe.fileHandleForWriting.closeFile()
+        }
+    } catch {
+        outputPipe.fileHandleForReading.readabilityHandler = nil
+        return (127, error.localizedDescription)
+    }
+
+    group.enter()
+    DispatchQueue.global(qos: .utility).async {
+        process.waitUntilExit()
+        group.leave()
+    }
+
+    if group.wait(timeout: .now() + timeout) == .timedOut {
+        timedOut = true
+        process.terminate()
+        if group.wait(timeout: .now() + 1.5) == .timedOut {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+            _ = group.wait(timeout: .now() + 1.0)
+        }
+    }
+
+    let processExited = !process.isRunning
+    outputPipe.fileHandleForReading.readabilityHandler = nil
+    if processExited {
+        let remaining = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        if !remaining.isEmpty {
+            lock.lock()
+            output.append(remaining)
+            lock.unlock()
+        }
+    }
+
+    lock.lock()
+    let text = String(data: output, encoding: .utf8) ?? ""
+    lock.unlock()
+
+    if timedOut {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = "Timed out after \(Int(timeout))s."
+        return (124, message.isEmpty ? suffix : "\(message)\n\(suffix)")
+    }
+    return (process.terminationStatus, text)
+}
+
+private func runDetachedProcess(
+    executable: String,
+    arguments: [String],
+    environment: [String: String]? = nil
+) -> (Int32, String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    if let environment {
+        process.environment = environment
+    }
+    if let nullOutput = FileHandle(forWritingAtPath: "/dev/null") {
+        process.standardOutput = nullOutput
+        process.standardError = nullOutput
+    }
+
+    do {
+        try process.run()
+        return (0, "")
+    } catch {
+        return (127, error.localizedDescription)
+    }
+}
+
+private struct WindowContentSizeReader: NSViewRepresentable {
+    @Binding var size: CGSize
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(size: $size)
+    }
+
+    func makeNSView(context: Context) -> ReportingView {
+        let view = ReportingView()
+        view.onSizeChange = { newSize in
+            context.coordinator.update(newSize)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: ReportingView, context: Context) {
+        nsView.onSizeChange = { newSize in
+            context.coordinator.update(newSize)
+        }
+        nsView.reportSize()
+    }
+
+    final class Coordinator {
+        private var size: Binding<CGSize>
+
+        init(size: Binding<CGSize>) {
+            self.size = size
+        }
+
+        func update(_ newSize: CGSize) {
+            guard newSize.width > 1, newSize.height > 1 else { return }
+            let oldSize = size.wrappedValue
+            guard abs(oldSize.width - newSize.width) > 0.5 || abs(oldSize.height - newSize.height) > 0.5 else { return }
+            size.wrappedValue = newSize
+        }
+    }
+
+    final class ReportingView: NSView {
+        var onSizeChange: ((CGSize) -> Void)?
+        private var frameObserver: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observeContentViewFrame()
+            reportSize()
+        }
+
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            reportSize()
+        }
+
+        func reportSize() {
+            let measuredSize = window?.contentView?.bounds.size ?? bounds.size
+            DispatchQueue.main.async { [weak self] in
+                self?.onSizeChange?(measuredSize)
+            }
+        }
+
+        private func observeContentViewFrame() {
+            if let frameObserver {
+                NotificationCenter.default.removeObserver(frameObserver)
+                self.frameObserver = nil
+            }
+
+            guard let contentView = window?.contentView else { return }
+            contentView.postsFrameChangedNotifications = true
+            frameObserver = NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification,
+                object: contentView,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reportSize()
+            }
+        }
+
+        deinit {
+            if let frameObserver {
+                NotificationCenter.default.removeObserver(frameObserver)
+            }
+        }
+    }
 }
 
 private struct PressScaleButtonStyle: ButtonStyle {
@@ -256,25 +448,12 @@ private struct LiquidSwitchStyle: ToggleStyle {
     }
 }
 
-private func runCodexScript(_ scriptPath: String, _ arguments: [String], wait: Bool = false) -> (Int32, String) {
-    let process = Process()
-    let pipe = Pipe()
-    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    process.arguments = [scriptPath] + arguments
-    process.standardOutput = pipe
-    process.standardError = pipe
-
-    do {
-        try process.run()
-        if wait {
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
-        }
-        return (0, "")
-    } catch {
-        return (1, error.localizedDescription)
+private func runCodexScript(_ scriptPath: String, _ arguments: [String], wait: Bool = false, timeout: TimeInterval = 90) -> (Int32, String) {
+    let processArguments = [scriptPath] + arguments
+    if wait {
+        return runProcess(executable: "/bin/zsh", arguments: processArguments, timeout: timeout)
     }
+    return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments)
 }
 
 private func parsedCodexProfiles(
@@ -434,6 +613,64 @@ extension Notification.Name {
     static let keepAwakeStateChanged = Notification.Name("CodexAccountsKeepAwakeStateChanged")
 }
 
+final class DisplayBrightnessController {
+    static let shared = DisplayBrightnessController()
+
+    private typealias GetBrightnessFunction = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
+    private typealias SetBrightnessFunction = @convention(c) (CGDirectDisplayID, Float) -> Int32
+
+    private let frameworkHandle: UnsafeMutableRawPointer?
+    private let getBrightness: GetBrightnessFunction?
+    private let setBrightness: SetBrightnessFunction?
+
+    private init() {
+        frameworkHandle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW)
+        if let frameworkHandle,
+           let getSymbol = dlsym(frameworkHandle, "DisplayServicesGetBrightness"),
+           let setSymbol = dlsym(frameworkHandle, "DisplayServicesSetBrightness") {
+            getBrightness = unsafeBitCast(getSymbol, to: GetBrightnessFunction.self)
+            setBrightness = unsafeBitCast(setSymbol, to: SetBrightnessFunction.self)
+        } else {
+            getBrightness = nil
+            setBrightness = nil
+        }
+    }
+
+    func currentBuiltInBrightness() -> Float? {
+        guard let getBrightness else { return nil }
+        for displayID in builtInDisplayIDs() {
+            var brightness: Float = 0
+            if getBrightness(displayID, &brightness) == 0 {
+                return min(max(brightness, 0), 1)
+            }
+        }
+        return nil
+    }
+
+    func setBuiltInBrightness(_ brightness: Float) {
+        guard let setBrightness else { return }
+        let clamped = min(max(brightness, 0), 1)
+        for displayID in builtInDisplayIDs() {
+            _ = setBrightness(displayID, clamped)
+        }
+    }
+
+    private func builtInDisplayIDs() -> [CGDirectDisplayID] {
+        var displayCount: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
+            return [CGMainDisplayID()]
+        }
+
+        var displays = Array(repeating: CGDirectDisplayID(0), count: Int(displayCount))
+        guard CGGetOnlineDisplayList(displayCount, &displays, &displayCount) == .success else {
+            return [CGMainDisplayID()]
+        }
+
+        let builtIn = displays.filter { CGDisplayIsBuiltin($0) != 0 }
+        return builtIn.isEmpty ? [CGMainDisplayID()] : builtIn
+    }
+}
+
 final class KeepAwakeController: ObservableObject {
     static let shared = KeepAwakeController()
 
@@ -441,7 +678,10 @@ final class KeepAwakeController: ObservableObject {
 
     private var caffeinateProcess: Process?
     private var jiggleTimer: Timer?
+    private var clamshellTimer: Timer?
     private var stateMonitorTimer: Timer?
+    private var storedBrightnessBeforeLidClose: Float?
+    private var dimmedForClosedLid = false
     private let pidFileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/Codex Accounts/keep-awake.pid")
 
@@ -454,6 +694,7 @@ final class KeepAwakeController: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             if let pid = self.readPid(), self.isRunningCaffeinate(pid) {
                 self.startMouseJiggle()
+                self.startClamshellMonitor()
                 self.updateState(true)
                 return
             }
@@ -461,11 +702,13 @@ final class KeepAwakeController: ObservableObject {
             if let pid = self.matchingCaffeinatePIDs().first {
                 self.writePid(pid)
                 self.startMouseJiggle()
+                self.startClamshellMonitor()
                 self.updateState(true)
                 return
             }
 
             self.stopMouseJiggle()
+            self.stopClamshellMonitor(restoreBrightness: true)
             self.removePidFile()
             self.updateState(false)
         }
@@ -487,7 +730,7 @@ final class KeepAwakeController: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-dims"]
+        process.arguments = ["-d", "-i", "-m", "-s"]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
 
@@ -496,6 +739,7 @@ final class KeepAwakeController: ObservableObject {
             caffeinateProcess = process
             writePid(process.processIdentifier)
             startMouseJiggle()
+            startClamshellMonitor()
             updateState(true)
         } catch {
             updateState(false)
@@ -506,6 +750,7 @@ final class KeepAwakeController: ObservableObject {
 
     func stop() {
         stopMouseJiggle()
+        stopClamshellMonitor(restoreBrightness: true)
         let runningProcess = caffeinateProcess
         let savedPID = readPid()
         caffeinateProcess = nil
@@ -567,53 +812,44 @@ final class KeepAwakeController: ObservableObject {
     }
 
     private func matchingCaffeinatePIDs() -> [Int32] {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["axww", "-o", "pid=", "-o", "command="]
-        process.standardOutput = pipe
-        process.standardError = Pipe()
+        let result = runProcess(
+            executable: "/bin/ps",
+            arguments: ["axww", "-o", "pid=", "-o", "command="],
+            timeout: 3
+        )
+        guard result.0 == 0 else { return [] }
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8) ?? ""
-            return text.split(separator: "\n").compactMap { line in
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let spaceIndex = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else { return nil }
-                let pidText = String(trimmed[..<spaceIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let command = String(trimmed[spaceIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard command == "/usr/bin/caffeinate -dims" || command == "caffeinate -dims" else { return nil }
-                return Int32(pidText)
-            }
-        } catch {
-            return []
+        return result.1.split(separator: "\n").compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let spaceIndex = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else { return nil }
+            let pidText = String(trimmed[..<spaceIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let command = String(trimmed[spaceIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isManagedCaffeinateCommand(command) else { return nil }
+            return Int32(pidText)
         }
     }
 
     private func isRunningCaffeinate(_ pid: Int32) -> Bool {
         guard Darwin.kill(pid, 0) == 0 else { return false }
         guard let command = processCommand(pid) else { return false }
-        return command.contains("/usr/bin/caffeinate") || command.contains("caffeinate -dims")
+        return isManagedCaffeinateCommand(command.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func isManagedCaffeinateCommand(_ command: String) -> Bool {
+        command == "/usr/bin/caffeinate -dims"
+            || command == "caffeinate -dims"
+            || command == "/usr/bin/caffeinate -d -i -m -s"
+            || command == "caffeinate -d -i -m -s"
     }
 
     private func processCommand(_ pid: Int32) -> String? {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-p", "\(pid)", "-o", "command="]
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        let result = runProcess(
+            executable: "/bin/ps",
+            arguments: ["-p", "\(pid)", "-o", "command="],
+            timeout: 3
+        )
+        guard result.0 == 0 else { return nil }
+        return result.1
     }
 
     private func updateState(_ newValue: Bool) {
@@ -640,6 +876,73 @@ final class KeepAwakeController: ObservableObject {
             self.jiggleTimer?.invalidate()
             self.jiggleTimer = nil
         }
+    }
+
+    private func startClamshellMonitor() {
+        DispatchQueue.main.async {
+            if self.clamshellTimer?.isValid == true {
+                self.handleClamshellState()
+                return
+            }
+            self.clamshellTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+                self.handleClamshellState()
+            }
+            self.handleClamshellState()
+        }
+    }
+
+    private func stopClamshellMonitor(restoreBrightness: Bool) {
+        DispatchQueue.main.async {
+            self.clamshellTimer?.invalidate()
+            self.clamshellTimer = nil
+            if restoreBrightness {
+                self.restoreBrightnessAfterLidOpen()
+            }
+        }
+    }
+
+    private func handleClamshellState() {
+        guard isAwake else {
+            restoreBrightnessAfterLidOpen()
+            return
+        }
+
+        if isLidClosed() {
+            dimBrightnessForClosedLid()
+        } else {
+            restoreBrightnessAfterLidOpen()
+        }
+    }
+
+    private func dimBrightnessForClosedLid() {
+        guard !dimmedForClosedLid else { return }
+        storedBrightnessBeforeLidClose = DisplayBrightnessController.shared.currentBuiltInBrightness()
+        DisplayBrightnessController.shared.setBuiltInBrightness(0)
+        dimmedForClosedLid = true
+    }
+
+    private func restoreBrightnessAfterLidOpen() {
+        guard dimmedForClosedLid else { return }
+        let restored = storedBrightnessBeforeLidClose ?? 0.55
+        DisplayBrightnessController.shared.setBuiltInBrightness(max(restored, 0.18))
+        storedBrightnessBeforeLidClose = nil
+        dimmedForClosedLid = false
+    }
+
+    private func isLidClosed() -> Bool {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard service != 0 else { return false }
+        defer { IOObjectRelease(service) }
+
+        guard let value = IORegistryEntryCreateCFProperty(
+            service,
+            "AppleClamshellState" as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue() as? Bool else {
+            return false
+        }
+        return value
     }
 
     private func jiggleMouse() {
@@ -674,6 +977,7 @@ struct AccountsRootView: View {
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
     @State private var lastAutoSync = ""
     @State private var layoutScale: CGFloat = 1
+    @State private var visibleContentSize: CGSize = .zero
     @State private var activeOperationCount = 0
     @State private var loadingMessage = ""
     @State private var isRefreshing = false
@@ -734,6 +1038,7 @@ struct AccountsRootView: View {
                     }
             }
         )
+        .background(WindowContentSizeReader(size: $visibleContentSize))
         .onAppear {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
                 hasEntered = true
@@ -986,7 +1291,17 @@ struct AccountsRootView: View {
     }
 
     private func isVisiblySignedIn(_ profile: CodexProfile) -> Bool {
-        isSignedIn(profile)
+        isSignedIn(profile) || (!isLoginNeeded(profile) && profile.quota != "unknown")
+    }
+
+    private func mergedAuthStatus(previous: String, current: String) -> String {
+        if current == "signed_in_local" {
+            return current
+        }
+        if previous == "unknown" || previous == "checking" {
+            return current
+        }
+        return previous
     }
 
     private func profileSortRank(_ profile: CodexProfile) -> Int {
@@ -1002,56 +1317,80 @@ struct AccountsRootView: View {
 
     private var loadingOverlay: some View {
         let message = loadingDisplayMessage
-        let progressSize = scaled(16)
-        let textWidth = loadingTextWidth(for: message)
-        let contentWidth = progressSize + scaled(10) + textWidth
 
-        return VStack {
-            Spacer()
-            HStack {
-                Spacer()
+        return GeometryReader { geometry in
+            let visibleSize = visibleOverlaySize(fallback: geometry.size)
+            let edgeInset = scaled(18)
+            let availableWidth = max(scaled(72), visibleSize.width - edgeInset * 2)
+
+            ZStack(alignment: .bottomTrailing) {
                 if activeOperationCount > 0 {
-                    HStack(spacing: scaled(10)) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: progressSize, height: progressSize)
-                        Text(message)
-                            .font(appFont(size: 12, weight: .semibold))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(width: textWidth, alignment: .leading)
-                    }
-                    .frame(width: contentWidth, alignment: .leading)
-                    .padding(.horizontal, scaled(14))
-                    .padding(.vertical, scaled(10))
-                    .background(.ultraThinMaterial)
-                    .background(themeMainTint.opacity(0.26))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(themePrimary.opacity(0.34), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.22), radius: 16, x: 0, y: 8)
-                    .padding(.trailing, scaled(36))
-                    .padding(.bottom, scaled(30))
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    loadingPill(message: message, availableWidth: availableWidth)
+                        .padding(.trailing, edgeInset)
+                        .padding(.bottom, edgeInset)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
                 }
             }
+            .frame(width: visibleSize.width, height: visibleSize.height, alignment: .bottomTrailing)
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+            .clipped()
         }
         .allowsHitTesting(false)
         .transition(.opacity)
         .animation(.spring(response: 0.24, dampingFraction: 0.86), value: activeOperationCount)
     }
 
+    private func visibleOverlaySize(fallback: CGSize) -> CGSize {
+        let measured = visibleContentSize
+        let width = measured.width > 1 ? min(fallback.width, measured.width) : fallback.width
+        let height = measured.height > 1 ? min(fallback.height, measured.height) : fallback.height
+        return CGSize(width: max(1, width), height: max(1, height))
+    }
+
     private var loadingDisplayMessage: String {
         loadingMessage.isEmpty ? tr("處理中...", "Working...") : loadingMessage
     }
 
-    private func loadingTextWidth(for message: String) -> CGFloat {
-        let maximum = scaled(300)
+    private func loadingPill(message: String, availableWidth: CGFloat) -> some View {
+        let progressSize = scaled(16)
+        let spacing = scaled(10)
+        let horizontalPadding = scaled(14)
+        let textWidth = loadingTextWidth(
+            for: message,
+            maximum: availableWidth - progressSize - spacing - horizontalPadding * 2
+        )
+        let pillWidth = min(availableWidth, progressSize + spacing + textWidth + horizontalPadding * 2)
+
+        return HStack(spacing: spacing) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: progressSize, height: progressSize)
+            Text(message)
+                .font(appFont(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: textWidth, alignment: .leading)
+        }
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, scaled(10))
+        .frame(width: pillWidth, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .background(themeMainTint.opacity(0.26))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .stroke(themePrimary.opacity(0.34), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 16, x: 0, y: 8)
+    }
+
+    private func loadingTextWidth(for message: String, maximum: CGFloat) -> CGFloat {
+        let maximum = max(0, min(maximum, scaled(300)))
+        guard maximum > 0 else { return 0 }
+        let minimum = min(scaled(24), maximum)
         let font = NSFont.systemFont(ofSize: scaled(12), weight: .semibold)
         let measured = ceil((message as NSString).size(withAttributes: [.font: font]).width)
-        return min(max(measured, scaled(24)), maximum)
+        return min(max(measured, minimum), maximum)
     }
 
     private var appBackground: some View {
@@ -1171,35 +1510,38 @@ struct AccountsRootView: View {
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: scaled(16)) {
-            HStack(alignment: .center, spacing: scaled(12)) {
-                appIconView
-                languageSwitcher
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: scaled(16)) {
+                HStack(alignment: .center, spacing: scaled(12)) {
+                    appIconView
+                    languageSwitcher
+                }
+
+                VStack(alignment: .leading, spacing: scaled(8)) {
+                    Text(tr("Codex 帳戶", "Codex Accounts"))
+                        .font(appFont(size: 26, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Text(tr("多帳戶登入，共用本機紀錄。", "Separate logins. Shared local history."))
+                        .font(appFont(size: 13))
+                        .foregroundStyle(.white.opacity(0.64))
+                        .lineSpacing(scaled(3))
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                }
+
+                sidebarSettings
             }
-
-            VStack(alignment: .leading, spacing: scaled(8)) {
-                Text(tr("Codex 帳戶", "Codex Accounts"))
-                    .font(appFont(size: 26, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                Text(tr("多帳戶登入，共用本機紀錄。", "Separate logins. Shared local history."))
-                    .font(appFont(size: 13))
-                    .foregroundStyle(.white.opacity(0.64))
-                    .lineSpacing(scaled(3))
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            }
-
-            sidebarSettings
-
-            Spacer(minLength: 0)
+            .padding(.top, scaled(62))
+            .padding(.bottom, scaled(22))
+            .padding(.leading, scaled(28))
+            .padding(.trailing, scaled(24))
+            .frame(width: scaled(272), alignment: .topLeading)
         }
-        .padding(.top, scaled(54))
-        .padding(.bottom, scaled(16))
-        .padding(.leading, scaled(28))
-        .padding(.trailing, scaled(24))
+        .scrollIndicators(.automatic)
+        .scrollClipDisabled(false)
         .frame(width: scaled(272), alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(
@@ -1361,7 +1703,10 @@ struct AccountsRootView: View {
     }
 
     private var keepAwakeHelpText: String {
-        tr("防止 Mac 自動睡眠，讓 Codex 長任務可以繼續跑。", "Prevents Mac sleep so long Codex tasks can keep running.")
+        tr(
+            "防止 Mac 自動睡眠。打開後合蓋會盡量保持任務運行，內置屏幕亮度會降到 0；開蓋或關閉功能會恢復亮度。",
+            "Prevents Mac sleep. When enabled, closing the lid keeps tasks running where macOS allows it and dims the built-in display to 0; opening the lid or turning this off restores brightness."
+        )
     }
 
     private var remoteBridgePanel: some View {
@@ -2697,30 +3042,13 @@ struct AccountsRootView: View {
             .appendingPathComponent("remote-bridge.pid")
     }
 
-    private func runRemoteBridgeUtility(_ arguments: [String], input: Data? = nil) -> (Int32, String) {
-        let process = Process()
-        let outputPipe = Pipe()
-        let inputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [remoteBridgeScriptPath, "--script", scriptPath] + arguments
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-        if input != nil {
-            process.standardInput = inputPipe
-        }
-
-        do {
-            try process.run()
-            if let input {
-                inputPipe.fileHandleForWriting.write(input)
-                inputPipe.fileHandleForWriting.closeFile()
-            }
-            process.waitUntilExit()
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
-        } catch {
-            return (127, error.localizedDescription)
-        }
+    private func runRemoteBridgeUtility(_ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12) -> (Int32, String) {
+        runProcess(
+            executable: "/usr/bin/python3",
+            arguments: [remoteBridgeScriptPath, "--script", scriptPath] + arguments,
+            input: input,
+            timeout: timeout
+        )
     }
 
     private func startRemoteBridge() {
@@ -2826,19 +3154,23 @@ struct AccountsRootView: View {
             removeRemoteBridgePIDIfStale()
         }
 
-        let result = runRemoteBridgeUtility(["--list-users"])
-        guard result.0 == 0,
-              let data = result.1.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let users = json["users"] as? [Any]
-        else {
-            remoteBridgeUsersCount = 0
-            if !result.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                remoteBridgeStatus = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+        DispatchQueue.global(qos: .utility).async {
+            let result = runRemoteBridgeUtility(["--list-users"], timeout: 8)
+            DispatchQueue.main.async {
+                guard result.0 == 0,
+                      let data = result.1.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let users = json["users"] as? [Any]
+                else {
+                    remoteBridgeUsersCount = 0
+                    if !result.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        remoteBridgeStatus = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    return
+                }
+                remoteBridgeUsersCount = users.count
             }
-            return
         }
-        remoteBridgeUsersCount = users.count
     }
 
     private func readRemoteBridgePID() -> Int32? {
@@ -2918,8 +3250,8 @@ struct AccountsRootView: View {
                     id: cachedProfile.id,
                     displayName: cachedProfile.displayName,
                     home: cachedProfile.home,
-                    authStatus: previous.authStatus,
-                    authMode: previous.authMode,
+                    authStatus: mergedAuthStatus(previous: previous.authStatus, current: cachedProfile.authStatus),
+                    authMode: cachedProfile.authMode == "unknown" || cachedProfile.authMode == "checking" ? previous.authMode : cachedProfile.authMode,
                     lastRefresh: previous.lastRefresh,
                     quota: previous.quota == "unknown" ? cachedProfile.quota : previous.quota,
                     reset: previous.reset == "unknown" ? cachedProfile.reset : previous.reset
@@ -3012,20 +3344,22 @@ struct AccountsRootView: View {
 
         return incoming.map { profile -> CodexProfile in
             let rawProfile = profile
-            if rawProfile.authStatus == "login_needed" {
+            let localProfile = profileWithCachedUsageFallback(profileWithLocalAuthTokenFallback(rawProfile))
+
+            if localProfile.authStatus == "login_needed" || localProfile.authStatus == "auth_incomplete" {
                 return CodexProfile(
-                    id: rawProfile.id,
-                    displayName: rawProfile.displayName,
-                    home: rawProfile.home,
-                    authStatus: "login_needed",
-                    authMode: rawProfile.authMode,
-                    lastRefresh: rawProfile.lastRefresh,
-                    quota: rawProfile.quota,
-                    reset: rawProfile.reset
+                    id: localProfile.id,
+                    displayName: localProfile.displayName,
+                    home: localProfile.home,
+                    authStatus: localProfile.authStatus,
+                    authMode: localProfile.authMode,
+                    lastRefresh: localProfile.lastRefresh,
+                    quota: localProfile.quota,
+                    reset: localProfile.reset
                 )
             }
 
-            let profile = profileWithCachedUsageFallback(profileWithConservativeLocalAuthFallback(rawProfile))
+            let profile = profileWithCachedUsageFallback(profileWithConservativeLocalAuthFallback(localProfile))
             let previous = previousByID[profile.id]
 
             if profile.authStatus == "unknown", let previous {
@@ -3033,7 +3367,7 @@ struct AccountsRootView: View {
                     id: profile.id,
                     displayName: profile.displayName,
                     home: profile.home,
-                    authStatus: previous.authStatus,
+                    authStatus: mergedAuthStatus(previous: previous.authStatus, current: profile.authStatus),
                     authMode: previous.authMode,
                     lastRefresh: previous.lastRefresh,
                     quota: previous.quota,
@@ -3059,7 +3393,11 @@ struct AccountsRootView: View {
     }
 
     private func profileWithLocalAuthTokenFallback(_ profile: CodexProfile) -> CodexProfile {
-        guard profile.authStatus == "unknown" || profile.authStatus == "checking" else {
+        guard profile.authStatus == "unknown"
+                || profile.authStatus == "checking"
+                || profile.authStatus == "login_needed"
+                || profile.authStatus == "auth_incomplete"
+        else {
             return profile
         }
 
@@ -3602,25 +3940,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func runScript(_ arguments: [String], wait: Bool = false) -> (Int32, String) {
-        let process = Process()
-        let pipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = [scriptPath] + arguments
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        do {
-            try process.run()
-            if wait {
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
-            }
-            return (0, "")
-        } catch {
-            return (1, error.localizedDescription)
+        let processArguments = [scriptPath] + arguments
+        if wait {
+            return runProcess(executable: "/bin/zsh", arguments: processArguments, timeout: 90)
         }
+        return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments)
     }
 
     private func showMessage(_ title: String, _ text: String) {
@@ -3714,8 +4038,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = [scriptPath, "sync-loop"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        if let nullOutput = FileHandle(forWritingAtPath: "/dev/null") {
+            process.standardOutput = nullOutput
+            process.standardError = nullOutput
+        }
 
         do {
             try process.run()

@@ -36,6 +36,8 @@ fi
 swiftc \
   "$SRC_DIR/Sources/CodexAccounts.swift" \
   -framework AppKit \
+  -framework CoreGraphics \
+  -framework IOKit \
   -framework SwiftUI \
   -o "$MACOS/Codex Accounts"
 
