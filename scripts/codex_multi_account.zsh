@@ -459,9 +459,12 @@ account_status_for() {
 }
 
 list_accounts_status() {
-  local tmp_dir index name
+  local tmp_dir index name status_parallelism
+  local -a pids
   tmp_dir="$(mktemp -d)"
   index=0
+  status_parallelism="${STATUS_PARALLELISM:-4}"
+  pids=()
 
   while read -r name; do
     [[ -n "$name" ]] || continue
@@ -469,9 +472,18 @@ list_accounts_status() {
     (
       account_status_for "$name" > "$tmp_dir/$index.status" 2>/dev/null || true
     ) &
+    pids+=("$!")
+    if (( ${#pids[@]} >= status_parallelism )); then
+      for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+      done
+      pids=()
+    fi
   done < <(list_accounts | cut -d '|' -f 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
-  wait
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
   for status_file in "$tmp_dir"/*.status(N); do
     cat "$status_file"
   done

@@ -697,6 +697,10 @@ public final class MainActivity extends Activity {
             callback.onError("Missing Mac URL");
             return;
         }
+        if (!isAllowedBridgeUrl(baseUrl)) {
+            callback.onError("Use HTTPS for remote URLs. Plain HTTP is only allowed for localhost, private LAN IPs, or .local hosts.");
+            return;
+        }
         network.execute(() -> {
             HttpURLConnection connection = null;
             try {
@@ -766,6 +770,43 @@ public final class MainActivity extends Activity {
         String text = urlInput.getText().toString().trim();
         while (text.endsWith("/")) text = text.substring(0, text.length() - 1);
         return text;
+    }
+
+    private boolean isAllowedBridgeUrl(String baseUrl) {
+        try {
+            URL url = new URL(baseUrl);
+            String scheme = url.getProtocol() == null ? "" : url.getProtocol().toLowerCase(Locale.US);
+            if ("https".equals(scheme)) return true;
+            if (!"http".equals(scheme)) return false;
+
+            String host = url.getHost() == null ? "" : url.getHost().toLowerCase(Locale.US);
+            return isLocalOrPrivateHost(host);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isLocalOrPrivateHost(String host) {
+        if (host.equals("localhost") || host.endsWith(".local") || host.equals("::1") || host.startsWith("fe80:")) {
+            return true;
+        }
+        String[] parts = host.split("\\.");
+        if (parts.length != 4) return false;
+        try {
+            int a = Integer.parseInt(parts[0]);
+            int b = Integer.parseInt(parts[1]);
+            for (String part : parts) {
+                int value = Integer.parseInt(part);
+                if (value < 0 || value > 255) return false;
+            }
+            return a == 10
+                || a == 127
+                || (a == 169 && b == 254)
+                || (a == 172 && b >= 16 && b <= 31)
+                || (a == 192 && b == 168);
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     private void setLoading(boolean loading, String message) {

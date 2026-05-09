@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
@@ -22,6 +23,227 @@ private struct QuotaWindow: Identifiable {
     let labelEN: String
     let percent: Int?
     let reset: String?
+}
+
+private struct QuotaPoolRouteDecision {
+    let requested: CodexProfile
+    let target: CodexProfile
+    let didSwitch: Bool
+}
+
+private struct AppThemeOption: Identifiable {
+    let id: String
+    let zhTitle: String
+    let primary: Color
+    let secondary: Color
+    let warm: Color
+}
+
+private enum AppLanguage: String, CaseIterable, Identifiable {
+    case zhHK = "zh-HK"
+    case zhCN = "zh-CN"
+    case zhTW = "zh-TW"
+    case en = "en"
+
+    var id: String { rawValue }
+
+    static func normalized(_ rawValue: String?) -> AppLanguage {
+        switch rawValue {
+        case "zh", "zh-HK", "zh-Hant-HK":
+            return .zhHK
+        case "zh-CN", "zh-Hans", "zh-Hans-CN":
+            return .zhCN
+        case "zh-TW", "zh-Hant-TW":
+            return .zhTW
+        case "en", "en-US":
+            return .en
+        default:
+            return .zhHK
+        }
+    }
+
+    var flag: String {
+        switch self {
+        case .zhHK: return "🇭🇰"
+        case .zhCN: return "🇨🇳"
+        case .zhTW: return "🇹🇼"
+        case .en: return "🇺🇸"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .zhHK: return "繁中 HK"
+        case .zhCN: return "简中"
+        case .zhTW: return "繁中 TW"
+        case .en: return "English"
+        }
+    }
+
+    var displayTitle: String {
+        switch self {
+        case .zhHK: return "繁體中文・香港"
+        case .zhCN: return "简体中文"
+        case .zhTW: return "繁體中文・台灣"
+        case .en: return "English"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .zhHK: return "香港用語"
+        case .zhCN: return "简体界面"
+        case .zhTW: return "台灣用語"
+        case .en: return "US English"
+        }
+    }
+
+    var localeIdentifier: String {
+        switch self {
+        case .zhHK: return "zh_Hant_HK"
+        case .zhCN: return "zh_Hans_CN"
+        case .zhTW: return "zh_Hant_TW"
+        case .en: return "en_US_POSIX"
+        }
+    }
+
+    var accent: Color {
+        switch self {
+        case .zhHK: return Color(red: 0.10, green: 0.56, blue: 1.00)
+        case .zhCN: return Color(red: 1.00, green: 0.34, blue: 0.28)
+        case .zhTW: return Color(red: 0.10, green: 0.86, blue: 0.66)
+        case .en: return Color(red: 0.58, green: 0.42, blue: 1.00)
+        }
+    }
+}
+
+private func localizedText(_ zhHK: String, _ en: String, language rawLanguage: String?) -> String {
+    AppTextLocalizer.localized(zhHK, en, language: AppLanguage.normalized(rawLanguage))
+}
+
+private enum AppTextLocalizer {
+    static func localized(_ zhHK: String, _ en: String, language: AppLanguage) -> String {
+        switch language {
+        case .en:
+            return en
+        case .zhHK:
+            return zhHK
+        case .zhTW:
+            return taiwanTraditional(zhHK)
+        case .zhCN:
+            return simplifiedChinese(taiwanTraditional(zhHK))
+        }
+    }
+
+    private static func taiwanTraditional(_ text: String) -> String {
+        var output = text
+        let replacements: [(String, String)] = [
+            ("Codex 帳戶", "Codex 帳號"),
+            ("帳戶", "帳號"),
+            ("登入", "登入"),
+            ("本機", "本機"),
+            ("紀錄", "記錄"),
+            ("視窗", "視窗"),
+            ("資料夾", "資料夾"),
+            ("用量", "用量"),
+            ("重設", "重置"),
+            ("共享", "共用"),
+            ("立即", "立即"),
+            ("防睡眠", "防止睡眠"),
+            ("喺呢部 Mac", "在這台 Mac"),
+            ("喺 Finder 顯示", "在 Finder 顯示"),
+            ("喺長任務期間", "在長任務期間"),
+            ("撳", "按"),
+            ("唔", "不"),
+            ("咗", "了"),
+            ("嘅", "的"),
+            ("嗰個", "那個"),
+            ("嗰", "那"),
+            ("呢個", "這個"),
+            ("呢部", "這台"),
+            ("呢", "這"),
+            ("冇", "沒有"),
+            ("俾", "給"),
+            ("要登入", "需要登入"),
+            ("打開", "開啟"),
+            ("刪除 Profile", "刪除 Profile"),
+            ("好", "好")
+        ]
+        for replacement in replacements {
+            output = output.replacingOccurrences(of: replacement.0, with: replacement.1)
+        }
+        if output == "已開" { return "已開啟" }
+        if output == "已關" { return "已關閉" }
+        output = output
+            .replacingOccurrences(of: "已開啟啟", with: "已開啟")
+            .replacingOccurrences(of: "已關閉閉", with: "已關閉")
+        return output
+    }
+
+    private static func simplifiedChinese(_ text: String) -> String {
+        let phraseReplacements: [(String, String)] = [
+            ("繁體中文", "简体中文"),
+            ("帳號", "账号"),
+            ("帳戶", "账户"),
+            ("登入", "登录"),
+            ("登出", "退出登录"),
+            ("視窗", "窗口"),
+            ("資料夾", "文件夹"),
+            ("本機", "本机"),
+            ("記錄", "记录"),
+            ("紀錄", "记录"),
+            ("記憶", "记忆"),
+            ("對話", "对话"),
+            ("防止睡眠", "防睡眠"),
+            ("開啟", "开启"),
+            ("關閉", "关闭"),
+            ("重新整理", "刷新"),
+            ("同步", "同步"),
+            ("共用", "共享"),
+            ("等待恢復", "等待恢复"),
+            ("新增", "添加"),
+            ("建立", "创建"),
+            ("取消", "取消"),
+            ("選擇", "选择"),
+            ("顯示", "显示"),
+            ("刪除", "删除"),
+            ("切換", "切换"),
+            ("清潔模式", "清洁模式"),
+            ("鍵盤", "键盘"),
+            ("鎖", "锁"),
+            ("無法", "无法"),
+            ("錯誤", "错误"),
+            ("需要登入", "需要登录"),
+            ("未登入", "未登录"),
+            ("已登入", "已登录")
+        ]
+        var output = text
+        for replacement in phraseReplacements {
+            output = output.replacingOccurrences(of: replacement.0, with: replacement.1)
+        }
+
+        let characterMap: [Character: Character] = [
+            "帳": "账", "戶": "户", "體": "体", "簡": "简", "開": "开", "關": "关",
+            "機": "机", "記": "记", "錄": "录", "視": "视", "資": "资", "夾": "夹",
+            "選": "选", "擇": "择", "預": "预", "設": "设", "輸": "输", "顯": "显",
+            "點": "点", "擊": "击", "對": "对", "話": "话", "歷": "历",
+            "語": "语", "換": "换", "區": "区", "類": "类", "標": "标",
+            "導": "导", "線": "线", "個": "个", "這": "这", "裡": "里", "邊": "边",
+            "應": "应", "啟": "启", "動": "动", "刪": "删", "除": "除", "復": "复",
+            "務": "务", "長": "长", "間": "间", "員": "员", "數": "数", "據": "据",
+            "檔": "档", "儲": "储", "與": "与", "無": "无", "錯": "错", "誤": "误",
+            "綁": "绑", "認": "认", "證": "证", "權": "权", "限": "限", "彈": "弹",
+            "潔": "洁", "鎖": "锁", "鍵": "键", "盤": "盘", "閉": "闭", "圖": "图",
+            "庫": "库", "網": "网", "狀": "状", "態": "态", "掃": "扫",
+            "遲": "迟", "瀏": "浏", "覽": "览", "遠": "远", "端": "端", "號": "号"
+        ]
+        output = String(output.map { characterMap[$0] ?? $0 })
+        if output == "已开" { return "已开启" }
+        if output == "已关" { return "已关闭" }
+        return output
+            .replacingOccurrences(of: "已开启启", with: "已开启")
+            .replacingOccurrences(of: "已关闭闭", with: "已关闭")
+    }
 }
 
 private func runProcess(
@@ -540,13 +762,13 @@ private func cachedUsage(for profileID: String) -> (quota: String, reset: String
 }
 
 private func promptForAccountName(title: String, message: String, defaultName: String? = nil) -> String? {
-    let language = UserDefaults.standard.string(forKey: "language") ?? "zh"
+    let language = UserDefaults.standard.string(forKey: "language")
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
     alert.messageText = title
     alert.informativeText = message
-    alert.addButton(withTitle: language == "zh" ? "繼續" : "Continue")
-    alert.addButton(withTitle: language == "zh" ? "取消" : "Cancel")
+    alert.addButton(withTitle: localizedText("繼續", "Continue", language: language))
+    alert.addButton(withTitle: localizedText("取消", "Cancel", language: language))
 
     let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
     field.placeholderString = defaultName ?? "account3"
@@ -561,16 +783,18 @@ private func promptForAccountName(title: String, message: String, defaultName: S
 }
 
 private func promptForRemoteUserCredentials() -> (username: String, password: String)? {
-    let language = UserDefaults.standard.string(forKey: "language") ?? "zh"
+    let language = UserDefaults.standard.string(forKey: "language")
     NSApp.activate(ignoringOtherApps: true)
 
     let alert = NSAlert()
-    alert.messageText = language == "zh" ? "新增手機登入帳號" : "New Mobile Login"
-    alert.informativeText = language == "zh"
-        ? "喺呢部 Mac 建立一個 username/password。手機要用同一組資料登入先可以控制 Codex。"
-        : "Create a username/password on this Mac. The Android app must sign in with the same credentials before it can control Codex."
-    alert.addButton(withTitle: language == "zh" ? "建立" : "Create")
-    alert.addButton(withTitle: language == "zh" ? "取消" : "Cancel")
+    alert.messageText = localizedText("新增手機登入帳號", "New Mobile Login", language: language)
+    alert.informativeText = localizedText(
+        "喺呢部 Mac 建立一個 username/password。手機要用同一組資料登入先可以控制 Codex。",
+        "Create a username/password on this Mac. The Android app must sign in with the same credentials before it can control Codex.",
+        language: language
+    )
+    alert.addButton(withTitle: localizedText("建立", "Create", language: language))
+    alert.addButton(withTitle: localizedText("取消", "Cancel", language: language))
 
     let stack = NSStackView()
     stack.orientation = .vertical
@@ -580,7 +804,7 @@ private func promptForRemoteUserCredentials() -> (username: String, password: St
     let usernameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
     usernameField.placeholderString = "username"
     let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
-    passwordField.placeholderString = language == "zh" ? "密碼，至少 10 個字元" : "Password, at least 10 characters"
+    passwordField.placeholderString = localizedText("密碼，至少 10 個字元", "Password, at least 10 characters", language: language)
 
     stack.addArrangedSubview(usernameField)
     stack.addArrangedSubview(passwordField)
@@ -591,8 +815,8 @@ private func promptForRemoteUserCredentials() -> (username: String, password: St
     let password = passwordField.stringValue
     guard !username.isEmpty, password.count >= 10 else {
         alertMessage(
-            language == "zh" ? "帳號資料不完整" : "Invalid Login",
-            language == "zh" ? "Username 唔可以留空，密碼至少要 10 個字元。" : "Username cannot be empty and password must be at least 10 characters."
+            localizedText("帳號資料不完整", "Invalid Login", language: language),
+            localizedText("Username 唔可以留空，密碼至少要 10 個字元。", "Username cannot be empty and password must be at least 10 characters.", language: language)
         )
         return nil
     }
@@ -600,17 +824,332 @@ private func promptForRemoteUserCredentials() -> (username: String, password: St
 }
 
 private func alertMessage(_ title: String, _ message: String) {
-    let language = UserDefaults.standard.string(forKey: "language") ?? "zh"
+    let language = UserDefaults.standard.string(forKey: "language")
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
     alert.messageText = title
     alert.informativeText = message
-    alert.addButton(withTitle: language == "zh" ? "好" : "OK")
+    alert.addButton(withTitle: localizedText("好", "OK", language: language))
     alert.runModal()
 }
 
 extension Notification.Name {
     static let keepAwakeStateChanged = Notification.Name("CodexAccountsKeepAwakeStateChanged")
+    static let keyboardCleanStateChanged = Notification.Name("CodexAccountsKeyboardCleanStateChanged")
+    static let updateStateChanged = Notification.Name("CodexAccountsUpdateStateChanged")
+}
+
+private struct HIDKeyMapping: Codable, Equatable {
+    let src: UInt64
+    let dst: UInt64
+}
+
+final class HIDMediaKeyBlocker {
+    private let activeDefaultsKey = "keyboardCleanHIDMappingActive"
+    private let previousDefaultsKey = "keyboardCleanPreviousHIDMapping"
+    private let noEventUsage: UInt64 = 0x0007_0000_0000
+
+    private let blockedUsages: [UInt64] = [
+        0x0007_0000_003A, // F1 / brightness down on Apple keyboards
+        0x0007_0000_003B, // F2 / brightness up on Apple keyboards
+        0x0007_0000_0043, // F10 / mute on Apple keyboards
+        0x0007_0000_0044, // F11 / volume down on Apple keyboards
+        0x0007_0000_0045, // F12 / volume up on Apple keyboards
+        0x0007_0000_0066, // keyboard power usage, when exposed as HID
+        0x000C_0000_0030, // consumer power
+        0x000C_0000_006F, // display brightness increment
+        0x000C_0000_0070, // display brightness decrement
+        0x000C_0000_0079, // keyboard illumination up
+        0x000C_0000_007A, // keyboard illumination down
+        0x000C_0000_00B0, // play
+        0x000C_0000_00B1, // pause
+        0x000C_0000_00B3, // fast forward
+        0x000C_0000_00B4, // rewind
+        0x000C_0000_00B5, // scan next track
+        0x000C_0000_00B6, // scan previous track
+        0x000C_0000_00B7, // stop
+        0x000C_0000_00CD, // play/pause
+        0x000C_0000_00E2, // mute
+        0x000C_0000_00E9, // volume increment
+        0x000C_0000_00EA, // volume decrement
+        0x0001_0000_0081, // system power down
+        0x0001_0000_0082  // system sleep
+    ]
+
+    init() {
+        restoreIfLeftActive()
+    }
+
+    func enable() -> String? {
+        let previous = currentMappings()
+        persistPreviousMappings(previous)
+
+        var combined = previous.filter { mapping in
+            !blockedUsages.contains(mapping.src)
+        }
+        combined.append(contentsOf: blockedUsages.map { HIDKeyMapping(src: $0, dst: noEventUsage) })
+
+        let result = applyMappings(combined)
+        guard result.0 == 0 else {
+            UserDefaults.standard.set(false, forKey: activeDefaultsKey)
+            return result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        UserDefaults.standard.set(true, forKey: activeDefaultsKey)
+        return nil
+    }
+
+    func disable() {
+        let previous = persistedPreviousMappings()
+        _ = applyMappings(previous)
+        UserDefaults.standard.set(false, forKey: activeDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: previousDefaultsKey)
+    }
+
+    private func restoreIfLeftActive() {
+        guard UserDefaults.standard.bool(forKey: activeDefaultsKey) else { return }
+        disable()
+    }
+
+    private func currentMappings() -> [HIDKeyMapping] {
+        let result = runProcess(executable: "/usr/bin/hidutil", arguments: ["property", "--get", "UserKeyMapping"], timeout: 2)
+        guard result.0 == 0 else { return [] }
+        return parseMappings(from: result.1)
+    }
+
+    private func parseMappings(from text: String) -> [HIDKeyMapping] {
+        var mappings: [HIDKeyMapping] = []
+        var currentSrc: UInt64?
+        var currentDst: UInt64?
+
+        for rawLine in text.split(separator: "\n") {
+            let line = String(rawLine)
+            if line.contains("HIDKeyboardModifierMappingSrc") {
+                currentSrc = decimalValue(from: line)
+            } else if line.contains("HIDKeyboardModifierMappingDst") {
+                currentDst = decimalValue(from: line)
+            }
+
+            if let src = currentSrc, let dst = currentDst {
+                mappings.append(HIDKeyMapping(src: src, dst: dst))
+                currentSrc = nil
+                currentDst = nil
+            }
+        }
+        return mappings
+    }
+
+    private func decimalValue(from line: String) -> UInt64? {
+        let digits = line.filter(\.isNumber)
+        return UInt64(digits)
+    }
+
+    private func applyMappings(_ mappings: [HIDKeyMapping]) -> (Int32, String) {
+        let entries = mappings.map { mapping in
+            #"{"HIDKeyboardModifierMappingSrc":\#(mapping.src),"HIDKeyboardModifierMappingDst":\#(mapping.dst)}"#
+        }.joined(separator: ",")
+        let payload = #"{"UserKeyMapping":[\#(entries)]}"#
+        return runProcess(executable: "/usr/bin/hidutil", arguments: ["property", "--set", payload], timeout: 2)
+    }
+
+    private func persistPreviousMappings(_ mappings: [HIDKeyMapping]) {
+        guard let data = try? JSONEncoder().encode(mappings),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        UserDefaults.standard.set(text, forKey: previousDefaultsKey)
+    }
+
+    private func persistedPreviousMappings() -> [HIDKeyMapping] {
+        guard let text = UserDefaults.standard.string(forKey: previousDefaultsKey),
+              let data = text.data(using: .utf8),
+              let mappings = try? JSONDecoder().decode([HIDKeyMapping].self, from: data)
+        else { return [] }
+        return mappings
+    }
+}
+
+final class KeyboardCleanController: ObservableObject {
+    static let shared = KeyboardCleanController()
+
+    @Published private(set) var isLocked = false
+    @Published private(set) var isSwitching = false
+    @Published private(set) var lastError = ""
+
+    private let hidMediaKeyBlocker = HIDMediaKeyBlocker()
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    private init() {}
+
+    func setLocked(_ enabled: Bool) {
+        DispatchQueue.main.async {
+            guard !self.isSwitching else { return }
+            if self.isLocked == enabled {
+                self.updateState(enabled, error: self.lastError)
+                return
+            }
+            self.isSwitching = true
+            enabled ? self.start() : self.stop()
+            self.finishSwitchingAfterDelay()
+        }
+    }
+
+    func toggle() {
+        setLocked(!isLocked)
+    }
+
+    func start() {
+        if eventTap != nil {
+            updateState(true, error: "")
+            return
+        }
+
+        requestRequiredPermissionsIfNeeded()
+
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                if let refcon {
+                    let controller = Unmanaged<KeyboardCleanController>
+                        .fromOpaque(refcon)
+                        .takeUnretainedValue()
+                    controller.reenableTapSoon()
+                }
+                return Unmanaged.passUnretained(event)
+            }
+
+            if type.rawValue == 14 {
+                return nil
+            }
+
+            switch type {
+            case .keyDown, .keyUp, .flagsChanged:
+                return nil
+            default:
+                return Unmanaged.passUnretained(event)
+            }
+        }
+
+        guard let tap = createKeyboardEventTap(callback: callback) else {
+            let language = UserDefaults.standard.string(forKey: "language")
+            let message = localizedText(
+                "未能鎖定鍵盤。請確認 Codex Accounts 喺「輔助使用」同「輸入監察」都有權限，然後完全退出再開一次 app。",
+                "Could not lock the keyboard. Confirm Codex Accounts is allowed in both Accessibility and Input Monitoring, then fully quit and reopen the app.",
+                language: language
+            )
+            updateState(false, error: message)
+            alertMessage(localizedText("清潔模式啟動失敗", "Clean Mode Failed", language: language), message)
+            return
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        eventTap = tap
+        runLoopSource = source
+        if let source {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else {
+            if let source {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            }
+            CFMachPortInvalidate(tap)
+            eventTap = nil
+            runLoopSource = nil
+            let language = UserDefaults.standard.string(forKey: "language")
+            let message = localizedText(
+                "鍵盤攔截器建立咗但被 macOS 停用。請重新開啟 Codex Accounts，或重新勾選輔助使用/輸入監察權限。",
+                "The keyboard event tap was created but macOS disabled it. Reopen Codex Accounts or re-check Accessibility/Input Monitoring permissions.",
+                language: language
+            )
+            updateState(false, error: message)
+            alertMessage(localizedText("清潔模式被系統停用", "Clean Mode Disabled", language: language), message)
+            return
+        }
+
+        if let hidError = hidMediaKeyBlocker.enable() {
+            let language = UserDefaults.standard.string(forKey: "language")
+            let message = localizedText(
+                "鍵盤已鎖，但音量/亮度硬件鍵未能完全映射：\(hidError)",
+                "Keyboard locked, but media-key mapping failed: \(hidError)",
+                language: language
+            )
+            updateState(true, error: message)
+            return
+        }
+        updateState(true, error: "")
+    }
+
+    func stop() {
+        hidMediaKeyBlocker.disable()
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        if let tap = eventTap {
+            CFMachPortInvalidate(tap)
+        }
+        eventTap = nil
+        runLoopSource = nil
+        updateState(false, error: "")
+    }
+
+    private var keyboardEventMask: CGEventMask {
+        let keyDown = CGEventMask(1) << CGEventMask(CGEventType.keyDown.rawValue)
+        let keyUp = CGEventMask(1) << CGEventMask(CGEventType.keyUp.rawValue)
+        let flagsChanged = CGEventMask(1) << CGEventMask(CGEventType.flagsChanged.rawValue)
+        let systemDefined = CGEventMask(1) << CGEventMask(14)
+        return keyDown | keyUp | flagsChanged | systemDefined
+    }
+
+    private func createKeyboardEventTap(callback: @escaping CGEventTapCallBack) -> CFMachPort? {
+        let userInfo = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        let taps: [CGEventTapLocation] = [.cgSessionEventTap, .cghidEventTap]
+        for tapLocation in taps {
+            if let tap = CGEvent.tapCreate(
+                tap: tapLocation,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: keyboardEventMask,
+                callback: callback,
+                userInfo: userInfo
+            ) {
+                return tap
+            }
+        }
+        return nil
+    }
+
+    private func reenableTapSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            if let tap = self.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+        }
+    }
+
+    private func requestRequiredPermissionsIfNeeded() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        if #available(macOS 10.15, *), !CGPreflightListenEventAccess() {
+            _ = CGRequestListenEventAccess()
+        }
+    }
+
+    private func updateState(_ locked: Bool, error: String) {
+        DispatchQueue.main.async {
+            self.isLocked = locked
+            self.lastError = error
+            NotificationCenter.default.post(name: .keyboardCleanStateChanged, object: nil)
+        }
+    }
+
+    private func finishSwitchingAfterDelay() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
+            self.isSwitching = false
+            NotificationCenter.default.post(name: .keyboardCleanStateChanged, object: nil)
+        }
+    }
 }
 
 final class DisplayBrightnessController {
@@ -675,6 +1214,7 @@ final class KeepAwakeController: ObservableObject {
     static let shared = KeepAwakeController()
 
     @Published private(set) var isAwake = false
+    @Published private(set) var isSwitching = false
 
     private var caffeinateProcess: Process?
     private var jiggleTimer: Timer?
@@ -691,6 +1231,7 @@ final class KeepAwakeController: ObservableObject {
     }
 
     func refreshState() {
+        if isSwitching { return }
         DispatchQueue.global(qos: .utility).async {
             if let pid = self.readPid(), self.isRunningCaffeinate(pid) {
                 self.startMouseJiggle()
@@ -715,7 +1256,16 @@ final class KeepAwakeController: ObservableObject {
     }
 
     func setAwake(_ enabled: Bool) {
-        enabled ? start() : stop()
+        DispatchQueue.main.async {
+            guard !self.isSwitching else { return }
+            if self.isAwake == enabled {
+                self.updateState(enabled)
+                return
+            }
+            self.isSwitching = true
+            enabled ? self.start() : self.stop()
+            self.finishSwitchingAfterDelay()
+        }
     }
 
     func toggle() {
@@ -743,8 +1293,8 @@ final class KeepAwakeController: ObservableObject {
             updateState(true)
         } catch {
             updateState(false)
-            let language = UserDefaults.standard.string(forKey: "language") ?? "zh"
-            alertMessage(language == "zh" ? "防睡眠啟動失敗" : "Keep Awake Failed", error.localizedDescription)
+            let language = UserDefaults.standard.string(forKey: "language")
+            alertMessage(localizedText("防睡眠啟動失敗", "Keep Awake Failed", language: language), error.localizedDescription)
         }
     }
 
@@ -860,6 +1410,14 @@ final class KeepAwakeController: ObservableObject {
         }
     }
 
+    private func finishSwitchingAfterDelay() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
+            self.isSwitching = false
+            NotificationCenter.default.post(name: .keepAwakeStateChanged, object: nil)
+            self.refreshState()
+        }
+    }
+
     private func startMouseJiggle() {
         DispatchQueue.main.async {
             if self.jiggleTimer?.isValid == true {
@@ -969,10 +1527,13 @@ struct AccountsRootView: View {
     let scriptPath: String
 
     @StateObject private var keepAwake = KeepAwakeController.shared
+    @StateObject private var keyboardClean = KeyboardCleanController.shared
+    @StateObject private var updater = UpdateController.shared
     @State private var profiles: [CodexProfile] = []
     @State private var statusText = "就緒"
     @AppStorage("autoRefresh") private var autoRefresh = true
     @AppStorage("autoSync") private var autoSync = true
+    @AppStorage("autoQuotaPool") private var autoQuotaPool = false
     @AppStorage("language") private var language = "zh"
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
     @State private var lastAutoSync = ""
@@ -984,6 +1545,7 @@ struct AccountsRootView: View {
     @State private var isSyncing = false
     @State private var hasEntered = false
     @State private var showKeepAwakeHelp = false
+    @State private var showKeyboardCleanHelp = false
     @State private var showSyncHelp = false
     @State private var busyProfiles: Set<String> = []
     @State private var expandedResetKeys: Set<String> = []
@@ -1002,9 +1564,21 @@ struct AccountsRootView: View {
     @State private var remoteBridgeUsersCount = 0
     @State private var remoteBridgeStatus = ""
     @State private var remoteBridgeLastOutput = ""
+    @State private var activeQuotaPoolProfileID: String?
+    @State private var quotaPoolFailoverInProgress = false
+    @State private var showLanguageMenu = false
+    @State private var languageTransitionActive = false
+    @State private var languagePulse = false
+    @State private var hoveredProfileID: String?
+    @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
+    @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
+    @AppStorage("sidebarRemoteExpanded") private var sidebarRemoteExpanded = false
+    @AppStorage("sidebarAppearanceExpanded") private var sidebarAppearanceExpanded = false
+    @AppStorage("sidebarUpdatesExpanded") private var sidebarUpdatesExpanded = false
     @AppStorage("codexUsageDayKey") private var codexUsageDayKey = ""
     @AppStorage("codexUsageSecondsToday") private var codexUsageSecondsToday = 0.0
     @AppStorage("appTheme") private var appTheme = "graphite"
+    @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
@@ -1026,9 +1600,16 @@ struct AccountsRootView: View {
             .blur(radius: hasEntered ? 0 : 4)
 
             loadingOverlay
+
+            if languageTransitionActive {
+                languageTransitionOverlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
         }
         .frame(minWidth: 860, minHeight: 560)
         .animation(.spring(response: 0.36, dampingFraction: 0.82), value: sidebarCollapsed)
+        .animation(.easeInOut(duration: 0.22), value: selectedLanguage.id)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: languageTransitionActive)
         .background(
             GeometryReader { geometry in
                 Color.clear
@@ -1040,6 +1621,10 @@ struct AccountsRootView: View {
         )
         .background(WindowContentSizeReader(size: $visibleContentSize))
         .onAppear {
+            let normalizedLanguage = AppLanguage.normalized(language).rawValue
+            if normalizedLanguage != language {
+                language = normalizedLanguage
+            }
             withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
                 hasEntered = true
             }
@@ -1049,15 +1634,31 @@ struct AccountsRootView: View {
                     hasSeenIntro = true
                 }
             }
+            if autoQuotaPool {
+                autoQuotaPool = false
+            }
             keepAwake.refreshState()
             refreshRemoteBridgeState()
+            updater.checkForUpdates(presentNoUpdate: false, notifyIfAvailable: false)
             refreshProfiles(showLoading: true)
         }
         .sheet(isPresented: $showIntro) {
             introView
         }
-        .onChange(of: language) { _, _ in
+        .onChange(of: language) { _, newValue in
+            let normalized = AppLanguage.normalized(newValue).rawValue
+            if normalized != newValue {
+                language = normalized
+                return
+            }
             NotificationCenter.default.post(name: Notification.Name("CodexAccountsLanguageChanged"), object: nil)
+        }
+        .onChange(of: updater.availableRelease?.version) { _, version in
+            if version != nil, updater.updateAvailable {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                    sidebarUpdatesExpanded = true
+                }
+            }
         }
         .onReceive(timer) { _ in
             if autoRefresh {
@@ -1073,8 +1674,12 @@ struct AccountsRootView: View {
         }
     }
 
+    private var selectedLanguage: AppLanguage {
+        AppLanguage.normalized(language)
+    }
+
     private func tr(_ zh: String, _ en: String) -> String {
-        language == "zh" ? zh : en
+        localizedText(zh, en, language: language)
     }
 
     private func scaled(_ value: CGFloat) -> CGFloat {
@@ -1082,7 +1687,7 @@ struct AccountsRootView: View {
     }
 
     private var profileHoverPadding: CGFloat {
-        scaled(12)
+        scaled(24)
     }
 
     private var profileScrollBarReserve: CGFloat {
@@ -1166,6 +1771,39 @@ struct AccountsRootView: View {
         case "violet": return tr("紫晶", "Violet")
         default: return tr("石墨", "Graphite")
         }
+    }
+
+    private var themeOptions: [AppThemeOption] {
+        [
+            AppThemeOption(
+                id: "graphite",
+                zhTitle: tr("石墨", "Graphite"),
+                primary: Color(red: 0.22, green: 0.74, blue: 1.00),
+                secondary: Color(red: 0.00, green: 0.92, blue: 0.78),
+                warm: Color(red: 0.82, green: 0.20, blue: 0.12)
+            ),
+            AppThemeOption(
+                id: "aurora",
+                zhTitle: tr("極光", "Aurora"),
+                primary: Color(red: 0.02, green: 0.78, blue: 0.72),
+                secondary: Color(red: 0.22, green: 0.95, blue: 0.48),
+                warm: Color(red: 0.18, green: 0.50, blue: 1.00)
+            ),
+            AppThemeOption(
+                id: "amber",
+                zhTitle: tr("琥珀", "Amber"),
+                primary: Color(red: 1.00, green: 0.58, blue: 0.16),
+                secondary: Color(red: 1.00, green: 0.76, blue: 0.20),
+                warm: Color(red: 0.88, green: 0.22, blue: 0.10)
+            ),
+            AppThemeOption(
+                id: "violet",
+                zhTitle: tr("紫晶", "Violet"),
+                primary: Color(red: 0.62, green: 0.42, blue: 1.00),
+                secondary: Color(red: 0.30, green: 0.84, blue: 1.00),
+                warm: Color(red: 0.94, green: 0.30, blue: 0.64)
+            )
+        ]
     }
 
     private var themePrimary: Color {
@@ -1263,6 +1901,10 @@ struct AccountsRootView: View {
         sortedProfileList(profiles.filter { !isLoginNeeded($0) && isWaitingForRecovery($0) })
     }
 
+    private var visibleProfileIDsForDock: [String] {
+        (activeProfiles + loginProfiles + waitingProfiles).map(\.id)
+    }
+
     private func sortedProfileList(_ input: [CodexProfile]) -> [CodexProfile] {
         input.sorted { lhs, rhs in
             let leftRank = profileSortRank(lhs)
@@ -1275,6 +1917,68 @@ struct AccountsRootView: View {
                 return leftName == .orderedAscending
             }
             return lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+        }
+    }
+
+    private func profileDockDistance(for profile: CodexProfile) -> Int? {
+        guard let hoveredProfileID,
+              let hoveredIndex = visibleProfileIDsForDock.firstIndex(of: hoveredProfileID),
+              let index = visibleProfileIDsForDock.firstIndex(of: profile.id)
+        else {
+            return nil
+        }
+        return abs(index - hoveredIndex)
+    }
+
+    private func profileDockScale(for profile: CodexProfile) -> CGFloat {
+        guard let distance = profileDockDistance(for: profile) else { return 1 }
+        switch distance {
+        case 0: return 1.040
+        case 1: return 1.024
+        case 2: return 1.012
+        default: return 1
+        }
+    }
+
+    private func profileDockGlowOpacity(for profile: CodexProfile) -> Double {
+        guard let distance = profileDockDistance(for: profile) else { return 0.12 }
+        switch distance {
+        case 0: return 0.32
+        case 1: return 0.18
+        case 2: return 0.10
+        default: return 0.08
+        }
+    }
+
+    private func updateHoveredProfile(_ profileID: String, hovering: Bool) {
+        if hovering {
+            withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.70, blendDuration: 0.08)) {
+                hoveredProfileID = profileID
+            }
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            guard hoveredProfileID == profileID else { return }
+            withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.74, blendDuration: 0.08)) {
+                hoveredProfileID = nil
+            }
+        }
+    }
+
+    private func clearHoveredProfileSoon() {
+        let current = hoveredProfileID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            guard hoveredProfileID == current else { return }
+            withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.74, blendDuration: 0.08)) {
+                hoveredProfileID = nil
+            }
+        }
+    }
+
+    private func setHoveredProfile(_ profileID: String?) {
+        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.70, blendDuration: 0.08)) {
+            hoveredProfileID = profileID
         }
     }
 
@@ -1585,55 +2289,262 @@ struct AccountsRootView: View {
     }
 
     private var languageSwitcher: some View {
-        HStack(spacing: scaled(3)) {
-            languageButton("中文", flag: "🇭🇰", tag: "zh", accent: Color(red: 0.08, green: 0.55, blue: 1.00))
-            languageButton("EN", flag: "🇺🇸", tag: "en", accent: Color(red: 0.56, green: 0.42, blue: 1.00))
+        let current = selectedLanguage
+
+        return ZStack(alignment: .topLeading) {
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                    showLanguageMenu.toggle()
+                }
+            } label: {
+                HStack(spacing: scaled(7)) {
+                    Text(current.flag)
+                        .font(.system(size: scaled(13)))
+                        .frame(width: scaled(18), alignment: .center)
+
+                    VStack(alignment: .leading, spacing: scaled(1)) {
+                        Text(current.shortTitle)
+                            .font(appFont(size: 11, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.70)
+                        Text(tr("語言", "Language"))
+                            .font(appFont(size: 8, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.46))
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: scaled(2))
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: scaled(9), weight: .bold))
+                        .rotationEffect(.degrees(showLanguageMenu ? 180 : 0))
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                .padding(.horizontal, scaled(10))
+                .frame(width: scaled(122), height: scaled(42), alignment: .leading)
+                .background(.ultraThinMaterial)
+                .background(
+                    LinearGradient(
+                        colors: [current.accent.opacity(0.28), Color.white.opacity(0.055)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: scaled(16), style: .continuous)
+                        .stroke(current.accent.opacity(0.38), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: scaled(16), style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: scaled(16), style: .continuous))
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.92, hoverScale: 1.035, glow: current.accent, glowOpacity: 0.20))
+            .foregroundStyle(.white)
+            .zIndex(2)
+
+            if showLanguageMenu {
+                languageMenuPanel
+                    .padding(.top, scaled(48))
+                    .transition(
+                        .asymmetric(
+                            insertion: .opacity
+                                .combined(with: .scale(scale: 0.92, anchor: .topLeading))
+                                .combined(with: .move(edge: .top)),
+                            removal: .opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading))
+                        )
+                    )
+                    .zIndex(3)
+            }
         }
-        .padding(scaled(4))
-        .background(.ultraThinMaterial)
-        .background(Color.white.opacity(0.045))
-        .overlay(
-            Capsule()
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .clipShape(Capsule())
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(width: scaled(122), height: showLanguageMenu ? scaled(246) : scaled(42), alignment: .topLeading)
+        .animation(.spring(response: 0.30, dampingFraction: 0.78), value: showLanguageMenu)
+        .zIndex(showLanguageMenu ? 10 : 1)
     }
 
-    private func languageButton(_ title: String, flag: String, tag: String, accent: Color) -> some View {
-        let selected = language == tag
+    private var languageMenuPanel: some View {
+        VStack(spacing: scaled(5)) {
+            ForEach(AppLanguage.allCases) { item in
+                languageMenuRow(item)
+            }
+        }
+        .padding(scaled(6))
+        .frame(width: scaled(122), alignment: .topLeading)
+        .background(.ultraThinMaterial)
+        .background(
+            LinearGradient(
+                colors: [selectedLanguage.accent.opacity(0.22), themeMainTint.opacity(0.18), Color.black.opacity(0.05)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(18), style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(18), style: .continuous))
+        .shadow(color: selectedLanguage.accent.opacity(0.18), radius: 18, x: 0, y: 10)
+        .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 10)
+    }
+
+    private func languageMenuRow(_ item: AppLanguage) -> some View {
+        let selected = selectedLanguage == item
 
         return Button {
-            guard language != tag else { return }
-            showEphemeralLoading(language == "zh" ? "Switching language..." : "切換語言...", duration: 0.34)
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.72)) {
-                language = tag
-            }
+            setLanguage(item)
         } label: {
-            HStack(spacing: scaled(4)) {
-                Text(flag)
-                    .font(.system(size: scaled(11)))
-                Text(title)
-                    .font(appFont(size: 11, weight: .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
+            HStack(spacing: scaled(8)) {
+                Text(item.flag)
+                    .font(.system(size: scaled(13)))
+                    .frame(width: scaled(18), alignment: .center)
+
+                VStack(alignment: .leading, spacing: scaled(1)) {
+                    Text(item.shortTitle)
+                        .font(appFont(size: 10, weight: .heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.70)
+                    Text(item.subtitle)
+                        .font(appFont(size: 8, weight: .semibold))
+                        .foregroundStyle(.white.opacity(selected ? 0.74 : 0.46))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.70)
+                }
+
+                Spacer(minLength: scaled(2))
+
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: scaled(11), weight: .semibold))
+                    .foregroundStyle(selected ? item.accent : .white.opacity(0.26))
             }
-            .frame(width: scaled(54), height: scaled(28))
+            .padding(.horizontal, scaled(8))
+            .frame(width: scaled(110), height: scaled(40), alignment: .leading)
+            .background(
+                ZStack {
+                    if selected {
+                        RoundedRectangle(cornerRadius: scaled(13), style: .continuous)
+                            .fill(item.accent.opacity(0.24))
+                            .matchedGeometryEffect(id: "languageSelection", in: languageNamespace)
+                    } else {
+                        RoundedRectangle(cornerRadius: scaled(13), style: .continuous)
+                            .fill(Color.white.opacity(0.045))
+                    }
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: scaled(13), style: .continuous)
+                    .stroke(selected ? item.accent.opacity(0.44) : Color.white.opacity(0.08), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: scaled(13), style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: scaled(13), style: .continuous))
         }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.90, hoverScale: 1.045, glow: accent, glowOpacity: 0.26))
-        .foregroundStyle(selected ? .white : .white.opacity(0.68))
-        .background(selected ? accent : Color.white.opacity(0.06))
-        .clipShape(Capsule())
-        .shadow(color: selected ? accent.opacity(0.22) : .clear, radius: 8, x: 0, y: 4)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94, hoverScale: 1.025, glow: item.accent, glowOpacity: selected ? 0.20 : 0.11))
+        .foregroundStyle(selected ? .white : .white.opacity(0.78))
+    }
+
+    private func setLanguage(_ item: AppLanguage) {
+        guard selectedLanguage != item else {
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
+                showLanguageMenu = false
+            }
+            return
+        }
+
+        let oldLanguage = selectedLanguage
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+            showLanguageMenu = false
+            languageTransitionActive = true
+            languagePulse.toggle()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                language = item.rawValue
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.74) {
+            withAnimation(.easeInOut(duration: 0.24)) {
+                languageTransitionActive = false
+            }
+        }
+        statusText = AppTextLocalizer.localized("語言已切換：\(item.displayTitle)", "Language: \(item.displayTitle)", language: oldLanguage)
+    }
+
+    private var languageTransitionOverlay: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.08))
+                .ignoresSafeArea()
+
+            VStack(spacing: scaled(12)) {
+                ZStack {
+                    ForEach(0..<3, id: \.self) { index in
+                        Circle()
+                            .stroke(selectedLanguage.accent.opacity(0.34 - Double(index) * 0.08), lineWidth: scaled(1.2))
+                            .frame(width: scaled(CGFloat(42 + index * 16)), height: scaled(CGFloat(42 + index * 16)))
+                            .scaleEffect(languagePulse ? 1.10 : 0.88)
+                            .opacity(languagePulse ? 0.16 : 0.72)
+                            .animation(
+                                .easeInOut(duration: 0.62)
+                                    .delay(Double(index) * 0.07),
+                                value: languagePulse
+                            )
+                    }
+
+                    HStack(spacing: scaled(5)) {
+                        ForEach(0..<4, id: \.self) { index in
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [selectedLanguage.accent, themeSecondary, Color.white.opacity(0.88)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: scaled(5), height: scaled(languagePulse ? 18 + CGFloat((index % 2) * 8) : 10 + CGFloat((index % 2) * 6)))
+                                .animation(
+                                    .easeInOut(duration: 0.34)
+                                        .repeatCount(2, autoreverses: true)
+                                        .delay(Double(index) * 0.055),
+                                    value: languagePulse
+                                )
+                        }
+                    }
+                }
+                .frame(width: scaled(92), height: scaled(74))
+
+                Text(tr("切換語言...", "Switching language..."))
+                    .font(appFont(size: 13, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .padding(.horizontal, scaled(22))
+            .padding(.vertical, scaled(18))
+            .background(.ultraThinMaterial)
+            .background(selectedLanguage.accent.opacity(0.18))
+            .overlay(
+                RoundedRectangle(cornerRadius: scaled(24), style: .continuous)
+                    .stroke(selectedLanguage.accent.opacity(0.34), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: scaled(24), style: .continuous))
+            .shadow(color: selectedLanguage.accent.opacity(0.18), radius: 26, x: 0, y: 12)
+            .shadow(color: .black.opacity(0.22), radius: 24, x: 0, y: 14)
+        }
+        .allowsHitTesting(false)
     }
 
     private var sidebarSettings: some View {
         VStack(alignment: .leading, spacing: scaled(9)) {
-            VStack(alignment: .leading, spacing: scaled(8)) {
+            dailyUsagePanel
+
+            sidebarDisclosureSection(
+                title: tr("自動化", "Automation"),
+                systemName: "bolt.fill",
+                subtitle: tr("同步：\(lastAutoSyncLabel)", "Sync: \(lastAutoSyncLabel)"),
+                accent: Color(red: 0.28, green: 0.70, blue: 1.00),
+                expanded: $sidebarAutomationExpanded
+            ) {
                 HStack(spacing: scaled(6)) {
-                    Text(tr("自動化", "Automation"))
-                        .font(appFont(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.66))
+                    Text(tr("功能說明", "Help"))
+                        .font(appFont(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.48))
                     syncInfoIcon
                     Spacer(minLength: 0)
                 }
@@ -1645,45 +2556,49 @@ struct AccountsRootView: View {
                     miniButton(tr("立即同步", "Sync now")) { syncMemories() }
                     miniButton(tr("共享全部", "Share all")) { shareAll() }
                 }
-
-                Text(tr("上次同步：\(lastAutoSyncLabel)", "Last sync: \(lastAutoSyncLabel)"))
-                    .font(appFont(size: 10))
-                    .foregroundStyle(.white.opacity(0.42))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
             }
 
-            Divider().background(Color.white.opacity(0.12))
-
-            remoteBridgePanel
-
-            Divider().background(Color.white.opacity(0.12))
-
-            HStack(spacing: scaled(10)) {
-                VStack(alignment: .leading, spacing: scaled(3)) {
-                    HStack(spacing: scaled(5)) {
-                        Text(tr("防睡眠", "Keep Awake"))
-                            .font(appFont(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.70))
-                            .lineLimit(1)
-                        keepAwakeInfoIcon
-                    }
-                    Text(keepAwake.isAwake ? tr("已開", "On") : tr("已關", "Off"))
-                        .font(appFont(size: 12, weight: .semibold))
-                        .foregroundStyle(keepAwake.isAwake ? Color(red: 0.00, green: 0.95, blue: 0.48) : Color(red: 1.00, green: 0.16, blue: 0.20))
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: scaled(8))
-
-                keepAwakeGlassButton
+            sidebarDisclosureSection(
+                title: tr("系統工具", "System Tools"),
+                systemName: "switch.2",
+                subtitle: systemToolsSummary,
+                accent: keepAwake.isAwake || keyboardClean.isLocked ? Color(red: 0.00, green: 0.88, blue: 0.68) : Color.white.opacity(0.62),
+                expanded: $sidebarToolsExpanded
+            ) {
+                keepAwakePanel
+                Divider().background(Color.white.opacity(0.10))
+                keyboardCleanPanel
             }
 
-            Divider().background(Color.white.opacity(0.12))
+            sidebarDisclosureSection(
+                title: tr("手機遠端", "Mobile Remote"),
+                systemName: "iphone.radiowaves.left.and.right",
+                subtitle: remoteBridgeRunning ? tr("已啟動", "Running") : tr("未啟動", "Stopped"),
+                accent: remoteBridgeRunning ? Color(red: 0.00, green: 0.92, blue: 0.70) : Color(red: 1.00, green: 0.58, blue: 0.16),
+                expanded: $sidebarRemoteExpanded
+            ) {
+                remoteBridgePanel
+            }
 
-            dailyUsagePanel
+            sidebarDisclosureSection(
+                title: tr("外觀", "Appearance"),
+                systemName: "paintpalette.fill",
+                subtitle: themeTitle,
+                accent: themePrimary,
+                expanded: $sidebarAppearanceExpanded
+            ) {
+                themeSelector
+            }
 
-            Divider().background(Color.white.opacity(0.12))
+            sidebarDisclosureSection(
+                title: tr("更新", "Updates"),
+                systemName: updater.updateAvailable ? "arrow.down.app.fill" : "checkmark.seal.fill",
+                subtitle: updateSummaryText,
+                accent: updater.updateAvailable ? Color(red: 0.00, green: 0.90, blue: 0.78) : Color.white.opacity(0.62),
+                expanded: $sidebarUpdatesExpanded
+            ) {
+                updatePanel
+            }
 
             Text(statusText)
                 .font(appFont(size: 10, weight: .medium))
@@ -1702,6 +2617,142 @@ struct AccountsRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: scaled(16), style: .continuous))
     }
 
+    private var systemToolsSummary: String {
+        let awake = keepAwake.isAwake ? tr("防睡眠開", "Awake on") : tr("防睡眠關", "Awake off")
+        let clean = keyboardClean.isLocked ? tr("清潔開", "Clean on") : tr("清潔關", "Clean off")
+        return "\(awake) · \(clean)"
+    }
+
+    private func sidebarDisclosureSection<Content: View>(
+        title: String,
+        systemName: String,
+        subtitle: String,
+        accent: Color,
+        expanded: Binding<Bool>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: scaled(8)) {
+            Button {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                    expanded.wrappedValue.toggle()
+                }
+            } label: {
+                HStack(spacing: scaled(8)) {
+                    Image(systemName: systemName)
+                        .font(.system(size: scaled(11), weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(accent)
+                        .frame(width: scaled(18), height: scaled(18))
+
+                    VStack(alignment: .leading, spacing: scaled(1)) {
+                        Text(title)
+                            .font(appFont(size: 12, weight: .heavy))
+                            .foregroundStyle(.white.opacity(0.82))
+                            .lineLimit(1)
+                        Text(subtitle)
+                            .font(appFont(size: 9, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.42))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: scaled(4))
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: scaled(9), weight: .bold))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .rotationEffect(.degrees(expanded.wrappedValue ? 180 : 0))
+                }
+                .padding(.horizontal, scaled(9))
+                .padding(.vertical, scaled(8))
+                .background(.ultraThinMaterial)
+                .background(accent.opacity(expanded.wrappedValue ? 0.105 : 0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: scaled(11), style: .continuous)
+                        .stroke(accent.opacity(expanded.wrappedValue ? 0.28 : 0.12), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: scaled(11), style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: scaled(11), style: .continuous))
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.94, hoverScale: 1.018, glow: accent, glowOpacity: 0.14))
+
+            if expanded.wrappedValue {
+                VStack(alignment: .leading, spacing: scaled(8)) {
+                    content()
+                }
+                .padding(.horizontal, scaled(2))
+                .transition(
+                    .asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.985, anchor: .top)),
+                        removal: .opacity.combined(with: .move(edge: .top))
+                    )
+                )
+            }
+        }
+    }
+
+    private var updateSummaryText: String {
+        if updater.isInstalling {
+            return tr("正在安裝", "Installing")
+        }
+        if updater.isChecking {
+            return tr("檢查中", "Checking")
+        }
+        if let release = updater.availableRelease, updater.updateAvailable {
+            return tr("可更新至 \(release.tagName)", "\(release.tagName) available")
+        }
+        return tr("目前 \(updater.currentVersion)", "Current \(updater.currentVersion)")
+    }
+
+    private var updatePanel: some View {
+        VStack(alignment: .leading, spacing: scaled(8)) {
+            HStack(spacing: scaled(8)) {
+                VStack(alignment: .leading, spacing: scaled(2)) {
+                    Text(tr("目前版本", "Current"))
+                        .font(appFont(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.46))
+                    Text("V\(updater.currentVersion)")
+                        .font(appFont(size: 13, weight: .heavy, monospaced: true))
+                        .foregroundStyle(.white.opacity(0.86))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: scaled(8))
+
+                VStack(alignment: .trailing, spacing: scaled(2)) {
+                    Text(tr("更新通道", "Channel"))
+                        .font(appFont(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.46))
+                    Text("GitHub")
+                        .font(appFont(size: 13, weight: .heavy))
+                        .foregroundStyle(Color(red: 0.00, green: 0.90, blue: 0.78))
+                        .lineLimit(1)
+                }
+            }
+
+            if !updater.statusText.isEmpty {
+                Text(updater.statusText)
+                    .font(appFont(size: 10, weight: .medium))
+                    .foregroundStyle(updater.updateAvailable ? Color(red: 0.00, green: 0.90, blue: 0.78) : .white.opacity(0.48))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.72)
+            }
+
+            HStack(spacing: scaled(8)) {
+                miniButton(tr("檢查更新", "Check")) {
+                    updater.checkForUpdates(presentNoUpdate: true, notifyIfAvailable: true)
+                }
+                .disabled(updater.isChecking || updater.isInstalling)
+
+                miniButton(updater.updateAvailable ? tr("下載並更新", "Install") : tr("自動更新", "Auto update")) {
+                    updater.installAvailableUpdate()
+                }
+                .disabled(updater.isChecking || updater.isInstalling || !updater.updateAvailable)
+                .opacity(updater.updateAvailable ? 1 : 0.56)
+            }
+        }
+    }
+
     private var keepAwakeHelpText: String {
         tr(
             "防止 Mac 自動睡眠。打開後合蓋會盡量保持任務運行，內置屏幕亮度會降到 0；開蓋或關閉功能會恢復亮度。",
@@ -1711,28 +2762,9 @@ struct AccountsRootView: View {
 
     private var remoteBridgePanel: some View {
         let running = remoteBridgeRunning
-        let accent = running ? Color(red: 0.00, green: 0.92, blue: 0.70) : Color(red: 1.00, green: 0.58, blue: 0.16)
-        let stateText = running ? tr("已啟動", "Running") : tr("未啟動", "Stopped")
         let userText = tr("\(remoteBridgeUsersCount) 個手機帳號", "\(remoteBridgeUsersCount) mobile users")
 
         return VStack(alignment: .leading, spacing: scaled(8)) {
-            HStack(spacing: scaled(6)) {
-                Text(tr("手機遠端", "Mobile Remote"))
-                    .font(appFont(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.70))
-                    .lineLimit(1)
-                Spacer(minLength: scaled(8))
-                HStack(spacing: scaled(4)) {
-                    Circle()
-                        .fill(accent)
-                        .frame(width: scaled(7), height: scaled(7))
-                    Text(stateText)
-                        .font(appFont(size: 10, weight: .bold))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(accent)
-            }
-
             VStack(alignment: .leading, spacing: scaled(3)) {
                 Text(userText)
                     .font(appFont(size: 10, weight: .semibold))
@@ -1765,27 +2797,55 @@ struct AccountsRootView: View {
         }
     }
 
+    private var keepAwakePanel: some View {
+        HStack(spacing: scaled(10)) {
+            VStack(alignment: .leading, spacing: scaled(3)) {
+                HStack(spacing: scaled(5)) {
+                    Text(tr("防睡眠", "Keep Awake"))
+                        .font(appFont(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.70))
+                        .lineLimit(1)
+                    keepAwakeInfoIcon
+                }
+                Text(keepAwake.isAwake ? tr("已開", "On") : tr("已關", "Off"))
+                    .font(appFont(size: 12, weight: .semibold))
+                    .foregroundStyle(keepAwake.isAwake ? Color(red: 0.00, green: 0.95, blue: 0.48) : Color.white.opacity(0.46))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: scaled(8))
+
+            keepAwakeGlassButton
+        }
+    }
+
     private var keepAwakeGlassButton: some View {
         let active = keepAwake.isAwake
-        let accent = active ? Color(red: 0.00, green: 0.95, blue: 0.48) : Color(red: 1.00, green: 0.16, blue: 0.20)
+        let accent = active ? Color(red: 0.00, green: 0.95, blue: 0.48) : Color(red: 0.52, green: 0.58, blue: 0.66)
 
         return Button {
             keepAwake.toggle()
         } label: {
             HStack(spacing: scaled(6)) {
-                Image(systemName: active ? "sun.max.fill" : "moon.zzz.fill")
-                    .font(.system(size: scaled(12), weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                Text(active ? "ON" : "OFF")
-                    .font(appFont(size: 10, weight: .heavy, monospaced: true))
-                    .monospacedDigit()
+                if keepAwake.isSwitching {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: scaled(14), height: scaled(14))
+                } else {
+                    Image(systemName: active ? "sun.max.fill" : "moon.zzz.fill")
+                        .font(.system(size: scaled(12), weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                    Text(active ? "ON" : "OFF")
+                        .font(appFont(size: 10, weight: .heavy, monospaced: true))
+                        .monospacedDigit()
+                }
             }
             .foregroundStyle(active ? Color.white : Color.white.opacity(0.82))
-            .frame(width: scaled(62), height: scaled(30))
+            .frame(width: scaled(68), height: scaled(30))
             .background(.ultraThinMaterial)
             .background(
                 LinearGradient(
-                    colors: [accent.opacity(active ? 0.34 : 0.22), Color.white.opacity(0.040)],
+                    colors: [accent.opacity(active ? 0.34 : 0.16), Color.white.opacity(0.040)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -1805,7 +2865,92 @@ struct AccountsRootView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.90, hoverScale: 1.04, glow: accent, glowOpacity: 0.18))
+        .disabled(keepAwake.isSwitching)
+        .opacity(keepAwake.isSwitching ? 0.72 : 1)
         .help(keepAwakeHelpText)
+    }
+
+    private var keyboardCleanHelpText: String {
+        tr(
+            "打開後會攔截鍵盤輸入，方便清潔鍵盤。滑鼠同觸控板仍然可以用，所以可以用滑鼠撳返呢粒掣關閉。",
+            "Blocks keyboard input for keyboard cleaning. Mouse and trackpad remain usable, so turn it off with the pointer."
+        )
+    }
+
+    private var keyboardCleanPanel: some View {
+        let active = keyboardClean.isLocked
+        let accent = active ? Color(red: 0.00, green: 0.88, blue: 0.72) : Color(red: 0.52, green: 0.58, blue: 0.66)
+
+        return HStack(spacing: scaled(10)) {
+            VStack(alignment: .leading, spacing: scaled(3)) {
+                HStack(spacing: scaled(5)) {
+                    Text(tr("電腦清潔", "Clean Mode"))
+                        .font(appFont(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.70))
+                        .lineLimit(1)
+                    keyboardCleanInfoIcon
+                }
+                Text(active ? tr("鍵盤已鎖", "Keyboard locked") : tr("鍵盤正常", "Keyboard normal"))
+                    .font(appFont(size: 12, weight: .semibold))
+                    .foregroundStyle(active ? Color(red: 0.00, green: 0.95, blue: 0.78) : Color.white.opacity(0.46))
+                    .lineLimit(1)
+                if !keyboardClean.lastError.isEmpty {
+                    Text(keyboardClean.lastError)
+                        .font(appFont(size: 9))
+                        .foregroundStyle(Color(red: 1.00, green: 0.35, blue: 0.32))
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.72)
+                }
+            }
+
+            Spacer(minLength: scaled(8))
+
+            Button {
+                keyboardClean.toggle()
+            } label: {
+                HStack(spacing: scaled(6)) {
+                    if keyboardClean.isSwitching {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: scaled(14), height: scaled(14))
+                    } else {
+                        Image(systemName: active ? "keyboard.badge.eye.fill" : "keyboard")
+                            .font(.system(size: scaled(12), weight: .semibold))
+                            .symbolRenderingMode(.hierarchical)
+                        Text(active ? "ON" : "OFF")
+                            .font(appFont(size: 10, weight: .heavy, monospaced: true))
+                            .monospacedDigit()
+                    }
+                }
+                .foregroundStyle(active ? Color.white : Color.white.opacity(0.78))
+                .frame(width: scaled(68), height: scaled(30))
+                .background(.ultraThinMaterial)
+                .background(
+                    LinearGradient(
+                        colors: [accent.opacity(active ? 0.34 : 0.16), Color.white.opacity(0.040)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.30), accent.opacity(active ? 0.58 : 0.30), Color.black.opacity(0.08)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                )
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.90, hoverScale: 1.04, glow: accent, glowOpacity: active ? 0.26 : 0.14))
+            .disabled(keyboardClean.isSwitching)
+            .opacity(keyboardClean.isSwitching ? 0.72 : 1)
+            .help(keyboardCleanHelpText)
+        }
     }
 
     private var dailyUsagePanel: some View {
@@ -1847,42 +2992,86 @@ struct AccountsRootView: View {
             .frame(height: scaled(8))
             .clipShape(Capsule())
             .animation(.spring(response: 0.34, dampingFraction: 0.82), value: usageTicker)
-
-            Menu {
-                Button(tr("石墨玻璃", "Graphite Glass")) { setTheme("graphite") }
-                Button(tr("極光玻璃", "Aurora Glass")) { setTheme("aurora") }
-                Button(tr("琥珀玻璃", "Amber Glass")) { setTheme("amber") }
-                Button(tr("紫晶玻璃", "Violet Glass")) { setTheme("violet") }
-            } label: {
-                HStack(spacing: scaled(6)) {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [themePrimary, themeSecondary],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: scaled(9), height: scaled(9))
-                    Text(tr("主題：\(themeTitle)", "Theme: \(themeTitle)"))
-                        .font(appFont(size: 10, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: scaled(8), weight: .bold))
-                }
-                .foregroundStyle(.white.opacity(0.66))
-                .padding(.horizontal, scaled(8))
-                .padding(.vertical, scaled(5))
-                .background(.ultraThinMaterial)
-                .background(themePrimary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: scaled(8), style: .continuous))
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .buttonStyle(PressScaleButtonStyle(scale: 0.92, hoverScale: 1.035, glow: themePrimary, glowOpacity: 0.16))
         }
+    }
+
+    private var themeSelector: some View {
+        VStack(alignment: .leading, spacing: scaled(6)) {
+            HStack(spacing: scaled(6)) {
+                Image(systemName: "circle.hexagongrid.fill")
+                    .font(.system(size: scaled(10), weight: .semibold))
+                    .foregroundStyle(themePrimary.opacity(0.92))
+                Text(tr("主題", "Theme"))
+                    .font(appFont(size: 10, weight: .heavy))
+                    .foregroundStyle(.white.opacity(0.72))
+                Spacer(minLength: scaled(6))
+                Text(themeTitle)
+                    .font(appFont(size: 10, weight: .semibold))
+                    .foregroundStyle(themePrimary.opacity(0.95))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+
+            HStack(spacing: scaled(6)) {
+                ForEach(themeOptions) { option in
+                    themeSwatchButton(option)
+                }
+            }
+        }
+        .padding(.horizontal, scaled(8))
+        .padding(.vertical, scaled(7))
+        .background(.ultraThinMaterial)
+        .background(
+            LinearGradient(
+                colors: [themePrimary.opacity(0.10), Color.white.opacity(0.035)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(11), style: .continuous)
+                .stroke(themePrimary.opacity(0.20), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(11), style: .continuous))
+        .animation(.spring(response: 0.30, dampingFraction: 0.78), value: appTheme)
+    }
+
+    private func themeSwatchButton(_ option: AppThemeOption) -> some View {
+        let selected = appTheme == option.id
+
+        return Button {
+            setTheme(option.id)
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: scaled(9), style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [option.primary, option.secondary, option.warm],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .overlay(Color.black.opacity(selected ? 0.0 : 0.10))
+
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: scaled(10), weight: .heavy))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.35), radius: 5, x: 0, y: 2)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: scaled(28))
+            .overlay(
+                RoundedRectangle(cornerRadius: scaled(9), style: .continuous)
+                    .stroke(selected ? Color.white.opacity(0.74) : Color.white.opacity(0.14), lineWidth: selected ? 1.4 : 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: scaled(9), style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: scaled(9), style: .continuous))
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.88, hoverScale: 1.08, glow: option.primary, glowOpacity: selected ? 0.28 : 0.18))
+        .help(option.zhTitle)
     }
 
     private func setTheme(_ theme: String) {
@@ -1905,6 +3094,10 @@ struct AccountsRootView: View {
 
     private var keepAwakeInfoIcon: some View {
         infoIcon(isPresented: $showKeepAwakeHelp, text: keepAwakeHelpText, width: 238)
+    }
+
+    private var keyboardCleanInfoIcon: some View {
+        infoIcon(isPresented: $showKeyboardCleanHelp, text: keyboardCleanHelpText, width: 238)
     }
 
     private func infoIcon(isPresented: Binding<Bool>, text: String, width: CGFloat) -> some View {
@@ -2096,7 +3289,7 @@ struct AccountsRootView: View {
     }
 
     private var profilesList: some View {
-        LazyVStack(spacing: scaled(7)) {
+        LazyVStack(spacing: 0) {
             sectionHeader(
                 id: "section-active",
                 systemName: "checkmark.circle.fill",
@@ -2137,6 +3330,12 @@ struct AccountsRootView: View {
         .padding(.leading, profileHoverPadding)
         .padding(.trailing, profileHoverPadding)
         .padding(.top, 4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if !hovering {
+                clearHoveredProfileSoon()
+            }
+        }
     }
 
     private func sectionHeader(id: String, systemName: String, title: String, accent: Color) -> some View {
@@ -2178,7 +3377,11 @@ struct AccountsRootView: View {
     }
 
     private func profileRow(_ profile: CodexProfile) -> some View {
-        GeometryReader { geometry in
+        let dockScale = profileDockScale(for: profile)
+        let dockGlowOpacity = profileDockGlowOpacity(for: profile)
+        let dockFocused = profileDockDistance(for: profile) == 0
+
+        return GeometryReader { geometry in
             let width = geometry.size.width
             let veryCompact = width < 620
             let compactQuota = width < 920
@@ -2244,10 +3447,19 @@ struct AccountsRootView: View {
                     lineWidth: scaled(2.2)
                 )
         )
-        .shadow(color: profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.08 : 0.14), radius: 10, x: 0, y: 4)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .modifier(HoverLiftGlow(glow: profileRowAccent(for: profile), scale: 1.006, opacity: 0.28, radius: 16, y: 3))
+        .shadow(color: profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.08 : 0.14), radius: 10, x: 0, y: 4)
+        .shadow(color: profileRowAccent(for: profile).opacity(dockGlowOpacity), radius: dockFocused ? 22 : 12, x: 0, y: dockFocused ? 8 : 4)
+        .brightness(dockFocused ? 0.035 : (dockScale > 1 ? 0.016 : 0))
+        .scaleEffect(dockScale, anchor: .center)
+        .padding(.vertical, scaled(6))
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            updateHoveredProfile(profile.id, hovering: hovering)
+        }
+        .zIndex(Double(dockScale * 1000))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: profile.quota)
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.72, blendDuration: 0.08), value: hoveredProfileID)
     }
 
     private func profileBadge(_ profile: CodexProfile) -> some View {
@@ -2588,8 +3800,8 @@ struct AccountsRootView: View {
     private func fullResetDateText(from text: String) -> String {
         guard let date = resetDate(from: text) else { return text }
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: language == "zh" ? "zh_Hant_HK" : "en_US_POSIX")
-        formatter.dateFormat = language == "zh" ? "M月d日 HH:mm" : "MMM d, HH:mm"
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = selectedLanguage == .en ? "MMM d, HH:mm" : "M月d日 HH:mm"
         return formatter.string(from: date)
     }
 
@@ -2641,6 +3853,79 @@ struct AccountsRootView: View {
             return 100
         }
         return quotaPercents(from: profile.quota).min()
+    }
+
+    private func isQuotaPoolCandidate(_ profile: CodexProfile) -> Bool {
+        isVisiblySignedIn(profile) && !isLoginNeeded(profile) && quotaPoolScore(for: profile) > 0
+    }
+
+    private func isQuotaDepleted(_ profile: CodexProfile) -> Bool {
+        guard profile.quota != "unlimited", profile.quota != "unknown" else { return false }
+        return (quotaRemainingPercent(for: profile) ?? 0) <= 0
+    }
+
+    private func quotaPoolScore(for profile: CodexProfile) -> Int {
+        if profile.quota == "unlimited" {
+            return 10_000
+        }
+        guard isVisiblySignedIn(profile), !isLoginNeeded(profile) else {
+            return -1
+        }
+        guard let percent = quotaRemainingPercent(for: profile) else {
+            return -1
+        }
+        guard percent > 0 else {
+            return 0
+        }
+        return quotaWindows(for: profile).contains(where: { $0.id == "5h" })
+            ? 1_000 + percent
+            : percent
+    }
+
+    private func bestQuotaPoolProfile(excluding excludedID: String? = nil) -> CodexProfile? {
+        profiles
+            .filter { profile in
+                profile.id != excludedID && isQuotaPoolCandidate(profile)
+            }
+            .sorted { lhs, rhs in
+                let leftScore = quotaPoolScore(for: lhs)
+                let rightScore = quotaPoolScore(for: rhs)
+                if leftScore != rightScore {
+                    return leftScore > rightScore
+                }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+            .first
+    }
+
+    private func bestQuotaPoolProfileIncludingRequested() -> CodexProfile? {
+        profiles
+            .filter(isQuotaPoolCandidate)
+            .sorted { lhs, rhs in
+                let leftScore = quotaPoolScore(for: lhs)
+                let rightScore = quotaPoolScore(for: rhs)
+                if leftScore != rightScore {
+                    return leftScore > rightScore
+                }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+            .first
+    }
+
+    private func quotaPoolRoute(for requestedID: String) -> QuotaPoolRouteDecision? {
+        guard let requested = profiles.first(where: { $0.id == requestedID }) else {
+            return nil
+        }
+        guard autoQuotaPool, isVisiblySignedIn(requested), !isLoginNeeded(requested) else {
+            return QuotaPoolRouteDecision(requested: requested, target: requested, didSwitch: false)
+        }
+        guard let target = bestQuotaPoolProfileIncludingRequested() else {
+            return QuotaPoolRouteDecision(requested: requested, target: requested, didSwitch: false)
+        }
+        guard target.id != requested.id else {
+            return QuotaPoolRouteDecision(requested: requested, target: requested, didSwitch: false)
+        }
+        return QuotaPoolRouteDecision(requested: requested, target: target, didSwitch: true)
     }
 
     private func quotaAccent(for percent: Int?) -> Color {
@@ -2946,11 +4231,16 @@ struct AccountsRootView: View {
             Spacer(minLength: scaled(8))
             Toggle("", isOn: isOn)
                 .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.regular)
-                .tint(tint)
-                .frame(width: scaled(48), height: scaled(30))
+                .toggleStyle(
+                    LiquidSwitchStyle(
+                        isOnColor: tint,
+                        isOffColor: Color(red: 0.42, green: 0.46, blue: 0.52),
+                        scale: layoutScale
+                    )
+                )
+                .frame(width: scaled(54), height: scaled(30))
         }
+        .animation(.spring(response: 0.26, dampingFraction: 0.78), value: isOn.wrappedValue)
     }
 
     private func runBackground(
@@ -3315,6 +4605,7 @@ struct AccountsRootView: View {
                 replayQuotaMeters()
             }
             statusText = tr("\(profiles.count) 個 profile 就緒", "\(profiles.count) profiles ready")
+            attemptQuotaPoolFailoverIfNeeded()
         }
     }
 
@@ -3527,27 +4818,40 @@ struct AccountsRootView: View {
     }
 
     private func openAccount(_ name: String, displayName: String? = nil) {
-        var arguments = ["launch-account", name]
-        if let displayName, !displayName.isEmpty {
-            arguments.append(displayName)
+        let requestedName = displayName ?? name
+        let route = quotaPoolRoute(for: name)
+        let targetID = route?.target.id ?? name
+        let targetName = route?.target.displayName ?? requestedName
+        var arguments = ["launch-account", targetID]
+        if !targetName.isEmpty {
+            arguments.append(targetName)
         }
-        let shownName = displayName ?? name
-        let profileID = sanitizedProfileId(name)
+        let requestedID = sanitizedProfileId(name)
+        let targetProfileID = sanitizedProfileId(targetID)
+        let busyIDs = Set([requestedID, targetProfileID])
         startUsageSession()
-        setProfileBusy(profileID, true)
-        runBackground(tr("正在同步對話紀錄，再打開 \(shownName)...", "Syncing chat history, then opening \(shownName)...")) {
+        busyIDs.forEach { setProfileBusy($0, true) }
+        let loadingText = tr("正在同步對話紀錄，再打開 \(targetName)...", "Syncing chat history, then opening \(targetName)...")
+        runBackground(loadingText) {
             let syncResult = runCodexScript(scriptPath, ["sync-once"], wait: true)
             guard syncResult.0 == 0 else { return syncResult }
             let shareResult = runCodexScript(scriptPath, ["link-all-history"], wait: true)
             guard shareResult.0 == 0 else { return shareResult }
+            if route?.didSwitch == true {
+                _ = runCodexScript(scriptPath, ["close-account", name], wait: true)
+            }
             return runCodexScript(scriptPath, arguments, wait: true)
         } completion: { result in
             let releaseDelay: TimeInterval = result.0 == 0 ? 1.45 : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + releaseDelay) {
-                setProfileBusy(profileID, false)
+                busyIDs.forEach { setProfileBusy($0, false) }
+            }
+            quotaPoolFailoverInProgress = false
+            if result.0 == 0 {
+                activeQuotaPoolProfileID = targetID
             }
             statusText = result.0 == 0
-                ? tr("已打開 \(shownName)", "Opened \(shownName)")
+                ? tr("已打開 \(targetName)", "Opened \(targetName)")
                 : tr("同步或打開失敗", "Sync or open failed")
         }
     }
@@ -3558,6 +4862,10 @@ struct AccountsRootView: View {
             runCodexScript(scriptPath, ["close-account", profile.id], wait: true)
         } completion: { result in
             setProfileBusy(profile.id, false)
+            if result.0 == 0, activeQuotaPoolProfileID == profile.id {
+                activeQuotaPoolProfileID = nil
+                quotaPoolFailoverInProgress = false
+            }
             statusText = result.0 == 0
                 ? tr("已關閉 \(profile.displayName)", "Closed \(profile.displayName)")
                 : tr("關閉失敗", "Close failed")
@@ -3570,11 +4878,33 @@ struct AccountsRootView: View {
         } completion: { result in
             if result.0 == 0 {
                 finishUsageSession()
+                activeQuotaPoolProfileID = nil
+                quotaPoolFailoverInProgress = false
             }
             statusText = result.0 == 0
                 ? tr("已關閉全部 Codex 視窗", "Closed all Codex windows")
                 : tr("關閉全部失敗", "Close all failed")
         }
+    }
+
+    private func attemptQuotaPoolFailoverIfNeeded() {
+        guard autoQuotaPool,
+              !quotaPoolFailoverInProgress,
+              activeOperationCount == 0,
+              let activeID = activeQuotaPoolProfileID,
+              let activeProfile = profiles.first(where: { $0.id == activeID }),
+              isQuotaDepleted(activeProfile),
+              bestQuotaPoolProfile(excluding: activeProfile.id) != nil
+        else {
+            return
+        }
+
+        quotaPoolFailoverInProgress = true
+        statusText = tr(
+            "\(activeProfile.displayName) quota 已用完",
+            "\(activeProfile.displayName) quota is depleted"
+        )
+        openAccount(activeProfile.id, displayName: activeProfile.displayName)
     }
 
     private func syncMemories(silent: Bool = false) {
@@ -3700,6 +5030,305 @@ struct AccountsRootView: View {
     }
 }
 
+private struct AppReleaseInfo {
+    let tagName: String
+    let version: String
+    let assetURL: URL
+    let htmlURL: URL?
+}
+
+private final class UpdateController: ObservableObject {
+    static let shared = UpdateController()
+
+    @Published private(set) var isChecking = false
+    @Published private(set) var isInstalling = false
+    @Published private(set) var availableRelease: AppReleaseInfo?
+    @Published private(set) var statusText = ""
+
+    private let owner = "siumiu1968"
+    private let repo = "codex-accounts"
+    private let assetName = "Codex-Accounts-macOS.zip"
+    private let bundleIdentifier = "local.codex.accounts"
+
+    private init() {}
+
+    var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    }
+
+    var updateAvailable: Bool {
+        guard let availableRelease else { return false }
+        return Self.compareVersions(availableRelease.version, currentVersion) == .orderedDescending
+    }
+
+    func checkForUpdates(presentNoUpdate: Bool = false, notifyIfAvailable: Bool = false) {
+        guard !isChecking else { return }
+        isChecking = true
+        statusText = localized("正在檢查更新...", "Checking for updates...")
+        notifyChanged()
+
+        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest")!
+        var request = URLRequest(url: url)
+        request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if let error {
+                self.finishCheck(errorMessage: error.localizedDescription, presentNoUpdate: presentNoUpdate)
+                return
+            }
+
+            guard let data,
+                  let release = self.parseRelease(from: data)
+            else {
+                self.finishCheck(errorMessage: self.localized("未能讀取 GitHub Release。", "Could not read the GitHub release."), presentNoUpdate: presentNoUpdate)
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.isChecking = false
+                self.availableRelease = release
+                if self.updateAvailable {
+                    self.statusText = self.localized("有新版本 \(release.tagName)", "Update available: \(release.tagName)")
+                    if notifyIfAvailable {
+                        self.presentUpdateAlert(release)
+                    }
+                } else {
+                    self.statusText = self.localized("已是最新版本 \(self.currentVersion)", "Up to date: \(self.currentVersion)")
+                    if presentNoUpdate {
+                        alertMessage(self.localized("已是最新版本", "You're Up to Date"), self.statusText)
+                    }
+                }
+                self.notifyChanged()
+            }
+        }.resume()
+    }
+
+    func installAvailableUpdate() {
+        guard !isInstalling else { return }
+        guard let release = availableRelease, updateAvailable else {
+            checkForUpdates(presentNoUpdate: true, notifyIfAvailable: true)
+            return
+        }
+
+        isInstalling = true
+        statusText = localized("正在下載 \(release.tagName)...", "Downloading \(release.tagName)...")
+        notifyChanged()
+
+        var request = URLRequest(url: release.assetURL)
+        request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.downloadTask(with: request) { temporaryURL, _, error in
+            if let error {
+                self.finishInstall(errorMessage: error.localizedDescription)
+                return
+            }
+            guard let temporaryURL else {
+                self.finishInstall(errorMessage: self.localized("下載檔案不存在。", "Downloaded file is missing."))
+                return
+            }
+
+            do {
+                let zipURL = try self.persistDownloadedZip(temporaryURL, release: release)
+                let validation = self.validateUpdateZip(zipURL, release: release)
+                guard validation.ok else {
+                    self.finishInstall(errorMessage: validation.message)
+                    return
+                }
+                try self.launchInstallHelper(zipURL: zipURL, release: release)
+                DispatchQueue.main.async {
+                    self.statusText = self.localized("正在安裝 \(release.tagName)，App 會重新開啟...", "Installing \(release.tagName). The app will reopen...")
+                    self.notifyChanged()
+                    NSApp.terminate(nil)
+                }
+            } catch {
+                self.finishInstall(errorMessage: error.localizedDescription)
+            }
+        }.resume()
+    }
+
+    private func parseRelease(from data: Data) -> AppReleaseInfo? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tagName = json["tag_name"] as? String,
+              let assets = json["assets"] as? [[String: Any]]
+        else {
+            return nil
+        }
+        let version = Self.normalizedVersion(tagName)
+        let asset = assets.first { ($0["name"] as? String) == assetName }
+        guard let assetURLText = asset?["browser_download_url"] as? String,
+              let assetURL = URL(string: assetURLText)
+        else {
+            return nil
+        }
+        let htmlURL = (json["html_url"] as? String).flatMap(URL.init(string:))
+        return AppReleaseInfo(tagName: tagName, version: version, assetURL: assetURL, htmlURL: htmlURL)
+    }
+
+    private func finishCheck(errorMessage: String, presentNoUpdate: Bool) {
+        DispatchQueue.main.async {
+            self.isChecking = false
+            self.statusText = self.localized("檢查更新失敗：\(errorMessage)", "Update check failed: \(errorMessage)")
+            if presentNoUpdate {
+                alertMessage(self.localized("檢查更新失敗", "Update Check Failed"), errorMessage)
+            }
+            self.notifyChanged()
+        }
+    }
+
+    private func finishInstall(errorMessage: String) {
+        DispatchQueue.main.async {
+            self.isInstalling = false
+            self.statusText = self.localized("更新失敗：\(errorMessage)", "Update failed: \(errorMessage)")
+            alertMessage(self.localized("更新失敗", "Update Failed"), errorMessage)
+            self.notifyChanged()
+        }
+    }
+
+    private func persistDownloadedZip(_ temporaryURL: URL, release: AppReleaseInfo) throws -> URL {
+        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let updateDirectory = cacheDirectory.appendingPathComponent("Codex Accounts/Updates", isDirectory: true)
+        try FileManager.default.createDirectory(at: updateDirectory, withIntermediateDirectories: true)
+        let zipURL = updateDirectory.appendingPathComponent("Codex-Accounts-\(release.version).zip")
+        try? FileManager.default.removeItem(at: zipURL)
+        try FileManager.default.moveItem(at: temporaryURL, to: zipURL)
+        return zipURL
+    }
+
+    private func validateUpdateZip(_ zipURL: URL, release: AppReleaseInfo) -> (ok: Bool, message: String) {
+        let validationDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("codex-accounts-validate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: validationDirectory) }
+
+        let extract = runProcess(
+            executable: "/usr/bin/ditto",
+            arguments: ["-x", "-k", zipURL.path, validationDirectory.path],
+            timeout: 60
+        )
+        guard extract.0 == 0 else {
+            return (false, extract.1.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard let appURL = findExtractedApp(in: validationDirectory) else {
+            return (false, localized("更新檔入面搵唔到 Codex Accounts.app。", "The update archive does not contain Codex Accounts.app."))
+        }
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        guard let info = NSDictionary(contentsOf: infoURL),
+              let foundBundleID = info["CFBundleIdentifier"] as? String,
+              foundBundleID == bundleIdentifier,
+              let foundVersion = info["CFBundleShortVersionString"] as? String
+        else {
+            return (false, localized("更新檔驗證失敗。", "The update archive failed validation."))
+        }
+        guard Self.compareVersions(foundVersion, currentVersion) == .orderedDescending,
+              Self.compareVersions(foundVersion, release.version) != .orderedAscending
+        else {
+            return (false, localized("更新檔版本不正確。", "The update archive version is not valid."))
+        }
+        return (true, "")
+    }
+
+    private func findExtractedApp(in directory: URL) -> URL? {
+        let direct = directory.appendingPathComponent("Codex Accounts.app", isDirectory: true)
+        if FileManager.default.fileExists(atPath: direct.path) {
+            return direct
+        }
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        for case let url as URL in enumerator {
+            if url.lastPathComponent == "Codex Accounts.app" {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func launchInstallHelper(zipURL: URL, release: AppReleaseInfo) throws {
+        let helperDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("codex-accounts-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: helperDirectory, withIntermediateDirectories: true)
+        let helperURL = helperDirectory.appendingPathComponent("install-update.zsh")
+        let targetPath = "/Applications/Codex Accounts.app"
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let script = """
+        #!/usr/bin/env zsh
+        set -euo pipefail
+        ZIP_PATH="$1"
+        TARGET_PATH="$2"
+        APP_PID="$3"
+        WORK_DIR="$(/usr/bin/mktemp -d /tmp/codex-accounts-install.XXXXXX)"
+        cleanup() { /bin/rm -rf "$WORK_DIR"; }
+        trap cleanup EXIT
+        while /bin/kill -0 "$APP_PID" 2>/dev/null; do
+          /bin/sleep 0.2
+        done
+        /usr/bin/ditto -x -k "$ZIP_PATH" "$WORK_DIR"
+        SOURCE_PATH="$WORK_DIR/Codex Accounts.app"
+        if [[ ! -d "$SOURCE_PATH" ]]; then
+          SOURCE_PATH="$(/usr/bin/find "$WORK_DIR" -maxdepth 3 -name 'Codex Accounts.app' -type d | /usr/bin/head -n 1)"
+        fi
+        if [[ -z "$SOURCE_PATH" || ! -d "$SOURCE_PATH" ]]; then
+          exit 12
+        fi
+        /usr/bin/ditto "$SOURCE_PATH" "$TARGET_PATH"
+        /usr/bin/open "$TARGET_PATH"
+        """
+        try script.write(to: helperURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperURL.path)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [helperURL.path, zipURL.path, targetPath, "\(pid)"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+    }
+
+    private func presentUpdateAlert(_ release: AppReleaseInfo) {
+        let alert = NSAlert()
+        alert.messageText = localized("有新版本 \(release.tagName)", "Update \(release.tagName) is available")
+        alert.informativeText = localized(
+            "目前版本：\(currentVersion)\n最新版本：\(release.version)\n\n可以直接下載並自動更新，唔需要打開 GitHub 網頁。",
+            "Current version: \(currentVersion)\nLatest version: \(release.version)\n\nCodex Accounts can download and install it directly without opening GitHub."
+        )
+        alert.addButton(withTitle: localized("下載並更新", "Download and Install"))
+        alert.addButton(withTitle: localized("稍後", "Later"))
+        if alert.runModal() == .alertFirstButtonReturn {
+            installAvailableUpdate()
+        }
+    }
+
+    private func localized(_ zh: String, _ en: String) -> String {
+        localizedText(zh, en, language: UserDefaults.standard.string(forKey: "language"))
+    }
+
+    private func notifyChanged() {
+        NotificationCenter.default.post(name: .updateStateChanged, object: nil)
+    }
+
+    private static func normalizedVersion(_ raw: String) -> String {
+        raw.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+    }
+
+    private static func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let left = normalizedVersion(lhs).split(separator: ".").map { Int($0) ?? 0 }
+        let right = normalizedVersion(rhs).split(separator: ".").map { Int($0) ?? 0 }
+        let count = max(left.count, right.count)
+        for index in 0..<count {
+            let l = index < left.count ? left[index] : 0
+            let r = index < right.count ? right[index] : 0
+            if l > r { return .orderedDescending }
+            if l < r { return .orderedAscending }
+        }
+        return .orderedSame
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var syncProcess: Process?
@@ -3732,12 +5361,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(languageChanged), name: Notification.Name("CodexAccountsLanguageChanged"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keepAwakeChanged), name: .keepAwakeStateChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardCleanChanged), name: .keyboardCleanStateChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateStateChanged), name: .updateStateChanged, object: nil)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private func appTr(_ zh: String, _ en: String) -> String {
-        (UserDefaults.standard.string(forKey: "language") ?? "zh") == "zh" ? zh : en
+        localizedText(zh, en, language: UserDefaults.standard.string(forKey: "language"))
     }
 
     @objc private func languageChanged() {
@@ -3747,6 +5378,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func keepAwakeChanged() {
+        rebuildMenu()
+    }
+
+    @objc private func keyboardCleanChanged() {
+        rebuildMenu()
+    }
+
+    @objc private func updateStateChanged() {
         rebuildMenu()
     }
 
@@ -3775,6 +5414,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let awakeItem = menuItem(awakeTitle, action: #selector(toggleKeepAwake), key: "k")
         awakeItem.state = KeepAwakeController.shared.isAwake ? .on : .off
         menu.addItem(awakeItem)
+        let cleanTitle = KeyboardCleanController.shared.isLocked
+            ? appTr("關閉清潔模式", "Turn Clean Mode Off")
+            : appTr("開啟清潔模式", "Turn Clean Mode On")
+        let cleanItem = menuItem(cleanTitle, action: #selector(toggleKeyboardClean), key: "")
+        cleanItem.state = KeyboardCleanController.shared.isLocked ? .on : .off
+        menu.addItem(cleanItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(menuItem(appTr("新增帳戶...", "New Account..."), action: #selector(newAccount), key: "n"))
         menu.addItem(menuItem(appTr("帳戶列表", "List Accounts"), action: #selector(listAccounts), key: "l"))
@@ -3794,6 +5439,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(menuItem(appTr("打開 Profile 資料夾", "Open Profiles Folder"), action: #selector(openProfilesFolder), key: "o"))
         menu.addItem(menuItem(appTr("打開 Script 資料夾", "Open Script Folder"), action: #selector(openScriptFolder), key: ""))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(menuItem(appTr("檢查更新...", "Check for Updates..."), action: #selector(checkForUpdates), key: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(menuItem(appTr("結束", "Quit"), action: #selector(quit), key: "q"))
 
         statusItem.menu = menu
@@ -3806,7 +5453,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.title = appTr("Codex 帳戶", "Codex Accounts")
         let appMenu = NSMenu(title: appTr("Codex 帳戶", "Codex Accounts"))
         appMenu.addItem(menuItem(appTr("關於 Codex 帳戶", "About Codex Accounts"), action: #selector(showAbout), key: ""))
+        appMenu.addItem(menuItem(appTr("檢查更新...", "Check for Updates..."), action: #selector(checkForUpdates), key: "u"))
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(menuItem(appTr("切換防睡眠", "Toggle Keep Awake"), action: #selector(toggleKeepAwake), key: "k"))
+        appMenu.addItem(menuItem(appTr("切換清潔模式", "Toggle Clean Mode"), action: #selector(toggleKeyboardClean), key: ""))
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(menuItem(appTr("結束 Codex 帳戶", "Quit Codex Accounts"), action: #selector(quit), key: "q"))
         appMenuItem.submenu = appMenu
@@ -3858,6 +5508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         accountMenu.addItem(menuItem(appTr("同步記憶一次", "Sync Memories Once"), action: #selector(syncOnce), key: "s"))
         accountMenu.addItem(menuItem(appTr("關閉全部 Codex 視窗", "Close All Codex Windows"), action: #selector(closeAllWindows), key: "w"))
         accountMenu.addItem(menuItem(appTr("切換防睡眠", "Toggle Keep Awake"), action: #selector(toggleKeepAwake), key: "k"))
+        accountMenu.addItem(menuItem(appTr("切換清潔模式", "Toggle Clean Mode"), action: #selector(toggleKeyboardClean), key: ""))
         accountMenu.addItem(NSMenuItem.separator())
         accountMenu.addItem(menuItem(appTr("共享全部對話紀錄", "Share All History"), action: #selector(linkAllHistory), key: ""))
     }
@@ -3957,11 +5608,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openAccount(_ name: String, displayName: String? = nil) {
-        var arguments = ["launch-account", name]
-        if let displayName, !displayName.isEmpty {
-            arguments.append(displayName)
+        let routed = quotaPoolRouteForMenu(requestedName: name)
+        var arguments = ["launch-account", routed.name]
+        if !routed.displayName.isEmpty {
+            arguments.append(routed.displayName)
         }
         runScript(arguments)
+    }
+
+    private func quotaPoolRouteForMenu(requestedName: String) -> Account {
+        let accounts = loadAccounts()
+        let requested = accounts.first { $0.name == requestedName }
+            ?? Account(name: requestedName, displayName: requestedName, home: "", keyEquivalent: "")
+        guard autoQuotaPoolMenuEnabled() else { return requested }
+
+        let statusResult = runScript(["list-accounts-status"], wait: true)
+        guard statusResult.0 == 0 else { return requested }
+
+        let displayByName = Dictionary(uniqueKeysWithValues: accounts.map { ($0.name, $0.displayName) })
+        let candidates = statusResult.1
+            .split(separator: "\n")
+            .compactMap { line -> (name: String, displayName: String, score: Int)? in
+                let parts = line.split(separator: "|", omittingEmptySubsequences: false)
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                guard parts.count >= 5 else { return nil }
+                let name = parts[0]
+                let status = parts[1]
+                let quota = parts[4]
+                let score = quotaPoolMenuScore(status: status, quota: quota)
+                guard score > 0 else { return nil }
+                return (name, displayByName[name] ?? name, score)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+
+        guard let best = candidates.first else { return requested }
+        return Account(name: best.name, displayName: best.displayName, home: requested.home, keyEquivalent: requested.keyEquivalent)
+    }
+
+    private func autoQuotaPoolMenuEnabled() -> Bool {
+        false
+    }
+
+    private func quotaPoolMenuScore(status: String, quota: String) -> Int {
+        guard status == "signed_in_local" else { return -1 }
+        if quota == "unlimited" { return 10_000 }
+        guard quota != "unknown" else { return -1 }
+
+        var values: [Int] = []
+        var digits = ""
+        for character in quota {
+            if character.isNumber {
+                digits.append(character)
+            } else if character == "%" {
+                if let value = Int(digits) {
+                    values.append(value)
+                }
+                digits = ""
+            } else {
+                digits = ""
+            }
+        }
+        guard let minimum = values.min(), minimum > 0 else { return 0 }
+        return quota.localizedCaseInsensitiveContains("5h") ? 1_000 + minimum : minimum
     }
 
     @objc private func openAccountFromMenu(_ sender: NSMenuItem) {
@@ -4014,6 +5727,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showMessage(appTr("Codex 帳戶", "Codex Accounts"), appTr("多帳戶登入，共用本機紀錄。", "Separate logins. Shared local history."))
     }
 
+    @objc private func checkForUpdates() {
+        UpdateController.shared.checkForUpdates(presentNoUpdate: true, notifyIfAvailable: true)
+    }
+
     @objc private func listAccounts() {
         let result = runScript(["list-accounts"], wait: true)
         showMessage(appTr("Codex 帳戶", "Codex Accounts"), result.1.isEmpty ? appTr("冇帳戶輸出。", "No account output.") : result.1)
@@ -4062,6 +5779,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeepAwakeController.shared.toggle()
     }
 
+    @objc private func toggleKeyboardClean() {
+        KeyboardCleanController.shared.toggle()
+    }
+
     @objc private func linkAllHistory() {
         let result = runScript(["link-all-history"], wait: true)
         showMessage(result.0 == 0 ? appTr("已共享對話紀錄", "History Sharing Enabled") : appTr("共享失敗", "History Sharing Failed"), result.1)
@@ -4078,12 +5799,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         syncProcess?.terminate()
+        KeyboardCleanController.shared.stop()
         KeepAwakeController.shared.stop()
         NSApp.terminate(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         syncProcess?.terminate()
+        KeyboardCleanController.shared.stop()
         KeepAwakeController.shared.stop()
     }
 }

@@ -2,19 +2,17 @@
 
 **Languages:** [繁體中文](#繁體中文) | [简体中文](#简体中文) | [English](#english)
 
-![Codex Accounts v2 overview](docs/assets/codex-accounts-v2-hero.png)
+![Codex Accounts V2.2 overview](docs/assets/codex-accounts-v2.2-real-zh-HK.png)
 
-> The screenshots use demo profile names and fake local paths. They do not expose real account names or local user paths.
+> The screenshots use an anonymized local user path. They do not expose the real macOS account name.
 
 ## Screenshots
 
-![Profile list with quota meters](docs/assets/codex-accounts-v2-profiles.png)
+![Codex Accounts V2.2 Traditional Chinese Hong Kong](docs/assets/codex-accounts-v2.2-real-zh-HK.png)
 
-![Automation, theme, and Keep Awake controls](docs/assets/codex-accounts-v2-sidebar.png)
+![Codex Accounts V2.2 Simplified Chinese](docs/assets/codex-accounts-v2.2-real-zh-CN.png)
 
-![Toolbar controls and signed-in grouping](docs/assets/codex-accounts-v2-toolbar.png)
-
-![Mobile Remote Bridge and Android control app](docs/assets/codex-accounts-v2-remote.png)
+![Codex Accounts V2.2 English](docs/assets/codex-accounts-v2.2-real-en.png)
 
 ---
 
@@ -24,9 +22,9 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
-### V2.1.0 更新介紹
+### V2.2.0 更新介紹
 
-V2.1.0 重點修正最細視窗嘅穩定性同狀態準確度：loading 提示會固定留喺可見視窗右下角，左側控制欄可以上下滾動，已登入 profile 會優先以本機 token 和最近 quota 判斷，避免 Plus 帳戶被誤顯示為未登入。今版亦加強防卡死處理，所有背景 script 都會持續讀取輸出並設 timeout，減少 app 用用吓無反應嘅情況。防睡眠功能新增合蓋支援，開啟後會盡量保持 Mac 任務運行，合蓋時把內置屏幕亮度降到 0，開蓋或關閉功能時恢復亮度。
+V2.2.0 重點加入 GitHub 更新通道，app 會檢查最新 release，並可直接下載同自動安裝，唔需要人手打開 GitHub 網頁。介面亦重新整理：左側功能改成可展開區塊，語言選單加入繁體中文香港、繁體中文台灣、簡體中文同英文，切換時有平滑過場。profile 卡片 hover 改成更接近 Dock 嘅放大效果，滑鼠經過卡片空隙時唔會閃爍，放大後亦會保留安全邊距避免裁切。防睡眠同電腦清潔模式加入切換保護，連續快速點擊時會避免重複啟停令 app 卡死。
 
 ### v2 主要功能
 
@@ -38,9 +36,11 @@ V2.1.0 重點修正最細視窗嘅穩定性同狀態準確度：loading 提示�
 - 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
 - 記憶同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
 - 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態；開啟時會監察合蓋狀態，合蓋降內置屏幕亮度，開蓋或關閉功能時恢復亮度。
+- 電腦清潔模式：暫停大部分鍵盤輸入，方便清潔鍵盤，保留滑鼠/觸控板操作去關閉模式。
 - 手機遠端 Bridge：可以喺 Mac app 建立手機登入帳號，Android app 用同一組 username/password 登入後控制 profile、同步、打開/關閉視窗和傳送 prompt。
 - 遠端安全選項：Bridge 預設只接受登入 session，支援配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
-- Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、中文和英文介面。
+- 更新通道：檢查 GitHub release，驗證下載檔版本同 bundle id，然後自動替換 `/Applications/Codex Accounts.app`。
+- Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、繁中香港 / 繁中台灣 / 簡中 / 英文介面。
 - 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
 
 ### 不會做的事
@@ -59,6 +59,8 @@ V2.1.0 重點修正最細視窗嘅穩定性同狀態準確度：loading 提示�
 3. 從 Finder 開啟 app。
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
+
+安裝 V2.2.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -123,9 +125,9 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
-### V2.1.0 更新介绍
+### V2.2.0 更新介绍
 
-V2.1.0 重点修正最小窗口下的稳定性和状态准确度：loading 提示会固定留在可见窗口右下角，左侧控制栏可以上下滚动，已登录 profile 会优先根据本地 token 和最近 quota 判断，避免 Plus 账号被误显示为未登录。本版也加强了防卡死处理，所有后台 script 都会持续读取输出并设置 timeout，减少 app 使用过程中无响应的情况。防睡眠功能新增合盖支持，开启后会尽量保持 Mac 任务运行，合盖时把内置屏幕亮度降到 0，开盖或关闭功能时恢复亮度。
+V2.2.0 重点加入 GitHub 更新通道，app 会检查最新 release，并可直接下载和自动安装，不需要手动打开 GitHub 网页。界面也重新整理：左侧功能改成可展开区块，语言菜单加入繁体中文香港、繁体中文台湾、简体中文和英文，切换时有平滑过场。profile 卡片 hover 改成更接近 Dock 的放大效果，鼠标经过卡片空隙时不会闪烁，放大后也会保留安全边距避免裁切。防睡眠和电脑清洁模式加入切换保护，连续快速点击时会避免重复启停导致 app 卡死。
 
 ### v2 主要功能
 
@@ -137,9 +139,11 @@ V2.1.0 重点修正最小窗口下的稳定性和状态准确度：loading 提�
 - 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
 - 记忆同步：可同步 `AGENTS.md`、`memories/`、`rules/`。
 - 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态；开启时会监测合盖状态，合盖降低内置屏幕亮度，开盖或关闭功能时恢复亮度。
+- 电脑清洁模式：暂停大部分键盘输入，方便清洁键盘，保留鼠标/触控板操作去关闭模式。
 - 手机远程 Bridge：可以在 Mac app 创建手机登录账号，Android app 用同一组 username/password 登录后控制 profile、同步、打开/关闭窗口和发送 prompt。
 - 远程安全选项：Bridge 默认只接受登录 session，支持配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
-- Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、中文和英文界面。
+- 更新通道：检查 GitHub release，验证下载文件版本和 bundle id，然后自动替换 `/Applications/Codex Accounts.app`。
+- Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、繁中香港 / 繁中台湾 / 简中 / 英文界面。
 - 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
 
 ### 它不会做什么
@@ -158,6 +162,8 @@ V2.1.0 重点修正最小窗口下的稳定性和状态准确度：loading 提�
 3. 从 Finder 打开 app。
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
+
+安装 V2.2.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -222,9 +228,9 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
-### V2.1.0 Update
+### V2.2.0 Update
 
-V2.1.0 focuses on stability and status accuracy in the smallest window size. The loading pill now stays inside the visible bottom-right corner, the left control column scrolls vertically, and signed-in profiles are resolved from local tokens plus recent quota data so Plus accounts are not mislabelled as logged out. Background scripts now drain output continuously and use timeouts, reducing cases where the app appears frozen. Keep Awake also gains lid-close support: when enabled, it keeps Mac tasks running where macOS allows it, dims the built-in display to 0 when the lid closes, and restores brightness when the lid opens or Keep Awake is turned off.
+V2.2.0 adds an in-app GitHub update channel. The app can check the latest release, download it, validate the bundle, and install it without sending the user to a browser. The interface is also cleaner: the left sidebar now uses collapsible sections, the language picker supports Traditional Chinese Hong Kong, Traditional Chinese Taiwan, Simplified Chinese, and English, and language changes animate smoothly. Profile card hover now behaves more like the Dock magnification effect, with stronger but bounded scaling, gap-tolerant hover tracking, and padding that prevents clipped cards. Keep Awake and Keyboard Clean Mode also guard against rapid repeated toggles so the app does not freeze while starting or stopping system-level helpers.
 
 ### v2 Highlights
 
@@ -236,9 +242,11 @@ V2.1.0 focuses on stability and status accuracy in the smallest window size. The
 - Optional local history sharing across profiles.
 - Optional memory sync for `AGENTS.md`, `memories/`, and `rules/`.
 - Keep Awake: uses `caffeinate` to stop macOS from sleeping, follows the real system process state, monitors lid state, dims the built-in display when the lid closes, and restores brightness when opened or turned off.
+- Keyboard Clean Mode: blocks most keyboard input while keeping mouse/trackpad control available so the mode can be turned off safely.
 - Mobile Remote Bridge: create a mobile login in the Mac app, then use the Android app with the same username/password to control profiles, sync, open/close windows, and send prompts.
 - Remote security options: the bridge requires signed-in bearer sessions and can sit behind Tailscale or Cloudflare Tunnel + Access service tokens.
-- Liquid Glass interface: multiple themes, hover glow, profile card animation, Chinese and English UI.
+- Update channel: checks GitHub releases, validates the downloaded app version and bundle id, then replaces `/Applications/Codex Accounts.app`.
+- Liquid Glass interface: multiple themes, hover glow, profile card animation, Traditional Chinese HK/TW, Simplified Chinese, and English UI.
 - Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
 
 ### What It Does Not Do
@@ -257,6 +265,8 @@ V2.1.0 focuses on stability and status accuracy in the smallest window size. The
 3. Open the app from Finder.
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
+
+After installing V2.2.0, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

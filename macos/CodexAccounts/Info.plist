@@ -15,12 +15,16 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.1.0</string>
+    <string>2.2.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>Codex Accounts needs Accessibility access to enable keyboard clean mode and control Codex account windows.</string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>Codex Accounts needs Input Monitoring access to block keyboard input while keyboard clean mode is enabled.</string>
 </dict>
 </plist>

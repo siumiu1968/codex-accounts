@@ -44,7 +44,16 @@ swiftc \
 chmod +x "$MACOS/Codex Accounts"
 
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$APP_PATH" >/dev/null 2>&1 || true
+  SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-}"
+  if [[ -z "$SIGN_IDENTITY" ]] && command -v security >/dev/null 2>&1; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/"Apple Development:|Developer ID Application:|Mac Developer:/{ print $2; exit }')"
+  fi
+
+  if [[ -n "$SIGN_IDENTITY" ]]; then
+    codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_PATH" >/dev/null
+  else
+    codesign --force --deep --sign - "$APP_PATH" >/dev/null 2>&1 || true
+  fi
 fi
 
 echo "Built $APP_PATH"

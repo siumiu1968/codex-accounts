@@ -4,6 +4,7 @@ import base64
 import glob
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -29,6 +30,19 @@ DEFAULT_MAX_CODEX_CHARS = 9000
 LOGIN_FAILURES = {}
 LOGIN_WINDOW_SECONDS = 10 * 60
 MAX_LOGIN_FAILURES = 8
+MAX_REQUEST_BYTES = 1024 * 1024
+
+
+class PayloadTooLarge(ValueError):
+    pass
+
+
+def ensure_private_app_support_dir():
+    APP_SUPPORT.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(APP_SUPPORT, 0o700)
+    except OSError:
+        pass
 
 
 def find_codex_script():
@@ -82,7 +96,7 @@ def load_json(path, fallback):
 
 
 def save_json(path, value):
-    APP_SUPPORT.mkdir(parents=True, exist_ok=True)
+    ensure_private_app_support_dir()
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -131,10 +145,22 @@ def clean_expired_sessions():
 
 
 def login_rate_key(handler):
-    forwarded = handler.headers.get("CF-Connecting-IP") or handler.headers.get("X-Forwarded-For") or ""
+    remote_address = handler.client_address[0] if handler.client_address else "unknown"
+    forwarded = ""
+    if should_trust_forwarded_headers(remote_address):
+        forwarded = handler.headers.get("CF-Connecting-IP") or handler.headers.get("X-Forwarded-For") or ""
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return handler.client_address[0] if handler.client_address else "unknown"
+    return remote_address
+
+
+def should_trust_forwarded_headers(remote_address):
+    if os.environ.get("CODEX_REMOTE_TRUST_FORWARDED_HEADERS") == "1":
+        return True
+    try:
+        return ipaddress.ip_address(remote_address).is_loopback
+    except ValueError:
+        return False
 
 
 def assert_login_allowed(key):
@@ -205,7 +231,7 @@ def list_local_users():
 
 
 def write_pid_file(path):
-    APP_SUPPORT.mkdir(parents=True, exist_ok=True)
+    ensure_private_app_support_dir()
     path.write_text(str(os.getpid()) + "\n", encoding="utf-8")
     try:
         os.chmod(path, 0o600)
@@ -618,6 +644,8 @@ class Handler(BaseHTTPRequestHandler):
             self.not_found()
         except StopIteration:
             return
+        except PayloadTooLarge as exc:
+            self.write_json({"ok": False, "error": str(exc)}, status=413)
         except PermissionError as exc:
             self.write_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
@@ -689,6 +717,8 @@ class Handler(BaseHTTPRequestHandler):
             self.not_found()
         except StopIteration:
             return
+        except PayloadTooLarge as exc:
+            self.write_json({"ok": False, "error": str(exc)}, status=413)
         except PermissionError as exc:
             status = 429 if "Too many failed login attempts" in str(exc) else 401
             self.write_json({"ok": False, "error": str(exc)}, status=status)
@@ -699,6 +729,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length == 0:
             return {}
+        if length > MAX_REQUEST_BYTES:
+            raise PayloadTooLarge("Request body is too large")
         data = self.rfile.read(length).decode("utf-8")
         return json.loads(data) if data else {}
 
@@ -755,6 +787,7 @@ def main():
     parser.add_argument("--list-users", action="store_true")
     args = parser.parse_args()
 
+    ensure_private_app_support_dir()
     script_path = args.script or find_codex_script()
 
     if args.create_user_stdin:
