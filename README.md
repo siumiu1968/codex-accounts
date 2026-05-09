@@ -22,9 +22,9 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
-### V2.2.0 更新介紹
+### V2.3.0 更新介紹
 
-V2.2.0 重點加入 GitHub 更新通道，app 會檢查最新 release，並可直接下載同自動安裝，唔需要人手打開 GitHub 網頁。介面亦重新整理：左側功能改成可展開區塊，語言選單加入繁體中文香港、繁體中文台灣、簡體中文同英文，切換時有平滑過場。profile 卡片 hover 改成更接近 Dock 嘅放大效果，滑鼠經過卡片空隙時唔會閃爍，放大後亦會保留安全邊距避免裁切。防睡眠同電腦清潔模式加入切換保護，連續快速點擊時會避免重複啟停令 app 卡死。
+V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script / 系統 helper 依家唔再用會累積卡住線程嘅等待方式，所有背景 Codex 工作會串行處理；自動刷新同自動同步亦會輪流執行，避免同一時間爭用 profile 檔案。防睡眠同手機 Bridge 狀態檢查加咗 in-flight guard 同節流，減少用耐之後背景 process 疊住跑。
 
 ### v2 主要功能
 
@@ -60,7 +60,7 @@ V2.2.0 重點加入 GitHub 更新通道，app 會檢查最新 release，並可�
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.2.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.3.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -125,9 +125,9 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
-### V2.2.0 更新介绍
+### V2.3.0 更新介绍
 
-V2.2.0 重点加入 GitHub 更新通道，app 会检查最新 release，并可直接下载和自动安装，不需要手动打开 GitHub 网页。界面也重新整理：左侧功能改成可展开区块，语言菜单加入繁体中文香港、繁体中文台湾、简体中文和英文，切换时有平滑过场。profile 卡片 hover 改成更接近 Dock 的放大效果，鼠标经过卡片空隙时不会闪烁，放大后也会保留安全边距避免裁切。防睡眠和电脑清洁模式加入切换保护，连续快速点击时会避免重复启停导致 app 卡死。
+V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script / 系统 helper 现在不再使用会累积卡住线程的等待方式，所有后台 Codex 工作会串行处理；自动刷新和自动同步也会轮流执行，避免同一时间争用 profile 文件。防睡眠和手机 Bridge 状态检查加入 in-flight guard 和节流，减少用久之后后台 process 叠加运行。
 
 ### v2 主要功能
 
@@ -163,7 +163,7 @@ V2.2.0 重点加入 GitHub 更新通道，app 会检查最新 release，并可�
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.2.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.3.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -228,9 +228,9 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
-### V2.2.0 Update
+### V2.3.0 Update
 
-V2.2.0 adds an in-app GitHub update channel. The app can check the latest release, download it, validate the bundle, and install it without sending the user to a browser. The interface is also cleaner: the left sidebar now uses collapsible sections, the language picker supports Traditional Chinese Hong Kong, Traditional Chinese Taiwan, Simplified Chinese, and English, and language changes animate smoothly. Profile card hover now behaves more like the Dock magnification effect, with stronger but bounded scaling, gap-tolerant hover tracking, and padding that prevents clipped cards. Keep Awake and Keyboard Clean Mode also guard against rapid repeated toggles so the app does not freeze while starting or stopping system-level helpers.
+V2.3.0 fixes an intermittent freeze that could appear after the app had been running for a while. External Codex scripts and system helpers no longer use a waiting path that can leak stuck worker threads, and Codex background work is now serialized. Auto refresh and auto sync alternate instead of competing for profile files at the same time. Keep Awake and Mobile Bridge status checks also use in-flight guards and throttling so background processes cannot pile up over time.
 
 ### v2 Highlights
 
@@ -266,7 +266,7 @@ V2.2.0 adds an in-app GitHub update channel. The app can check the latest releas
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.2.0, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.3.0, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

@@ -6,6 +6,26 @@ import Foundation
 import IOKit
 import SwiftUI
 
+private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .userInitiated)
+
+private final class ProcessFinishState {
+    private let lock = NSLock()
+    private var finished = false
+
+    func markFinished() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        let value = finished
+        lock.unlock()
+        return value
+    }
+}
+
 struct CodexProfile: Identifiable {
     let id: String
     let displayName: String
@@ -257,7 +277,8 @@ private func runProcess(
     let outputPipe = Pipe()
     let inputPipe = Pipe()
     let lock = NSLock()
-    let group = DispatchGroup()
+    let finished = DispatchSemaphore(value: 0)
+    let finishState = ProcessFinishState()
     var output = Data()
     var timedOut = false
 
@@ -270,6 +291,11 @@ private func runProcess(
     }
     if input != nil {
         process.standardInput = inputPipe
+    }
+
+    process.terminationHandler = { _ in
+        finishState.markFinished()
+        finished.signal()
     }
 
     outputPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -287,26 +313,23 @@ private func runProcess(
             inputPipe.fileHandleForWriting.closeFile()
         }
     } catch {
+        process.terminationHandler = nil
         outputPipe.fileHandleForReading.readabilityHandler = nil
         return (127, error.localizedDescription)
     }
 
-    group.enter()
-    DispatchQueue.global(qos: .utility).async {
-        process.waitUntilExit()
-        group.leave()
-    }
-
-    if group.wait(timeout: .now() + timeout) == .timedOut {
+    if finished.wait(timeout: .now() + timeout) == .timedOut {
         timedOut = true
         process.terminate()
-        if group.wait(timeout: .now() + 1.5) == .timedOut {
+        if finished.wait(timeout: .now() + 1.5) == .timedOut {
             Darwin.kill(process.processIdentifier, SIGKILL)
-            _ = group.wait(timeout: .now() + 1.0)
+            _ = finished.wait(timeout: .now() + 1.0)
         }
     }
 
-    let processExited = !process.isRunning
+    let processExited = finishState.isFinished || !process.isRunning
+
+    process.terminationHandler = nil
     outputPipe.fileHandleForReading.readabilityHandler = nil
     if processExited {
         let remaining = outputPipe.fileHandleForReading.readDataToEndOfFile()
@@ -1220,6 +1243,8 @@ final class KeepAwakeController: ObservableObject {
     private var jiggleTimer: Timer?
     private var clamshellTimer: Timer?
     private var stateMonitorTimer: Timer?
+    private var stateRefreshInFlight = false
+    private var lastStateRefreshAt = Date.distantPast
     private var storedBrightnessBeforeLidClose: Float?
     private var dimmedForClosedLid = false
     private let pidFileURL = URL(fileURLWithPath: NSHomeDirectory())
@@ -1230,28 +1255,38 @@ final class KeepAwakeController: ObservableObject {
         startStateMonitor()
     }
 
-    func refreshState() {
-        if isSwitching { return }
-        DispatchQueue.global(qos: .utility).async {
-            if let pid = self.readPid(), self.isRunningCaffeinate(pid) {
-                self.startMouseJiggle()
-                self.startClamshellMonitor()
-                self.updateState(true)
-                return
-            }
+    func refreshState(force: Bool = false) {
+        DispatchQueue.main.async {
+            guard !self.isSwitching else { return }
+            let now = Date()
+            guard force || now.timeIntervalSince(self.lastStateRefreshAt) >= 2.5 else { return }
+            guard !self.stateRefreshInFlight else { return }
+            self.stateRefreshInFlight = true
+            self.lastStateRefreshAt = now
 
-            if let pid = self.matchingCaffeinatePIDs().first {
-                self.writePid(pid)
-                self.startMouseJiggle()
-                self.startClamshellMonitor()
-                self.updateState(true)
-                return
-            }
+            DispatchQueue.global(qos: .utility).async {
+                defer { self.finishStateRefresh() }
 
-            self.stopMouseJiggle()
-            self.stopClamshellMonitor(restoreBrightness: true)
-            self.removePidFile()
-            self.updateState(false)
+                if let pid = self.readPid(), self.isRunningCaffeinate(pid) {
+                    self.startMouseJiggle()
+                    self.startClamshellMonitor()
+                    self.updateState(true)
+                    return
+                }
+
+                if let pid = self.matchingCaffeinatePIDs().first {
+                    self.writePid(pid)
+                    self.startMouseJiggle()
+                    self.startClamshellMonitor()
+                    self.updateState(true)
+                    return
+                }
+
+                self.stopMouseJiggle()
+                self.stopClamshellMonitor(restoreBrightness: true)
+                self.removePidFile()
+                self.updateState(false)
+            }
         }
     }
 
@@ -1317,13 +1352,13 @@ final class KeepAwakeController: ObservableObject {
     }
 
     private func recoverExistingCaffeinate() {
-        refreshState()
+        refreshState(force: true)
     }
 
     private func startStateMonitor() {
         DispatchQueue.main.async {
             self.stateMonitorTimer?.invalidate()
-            self.stateMonitorTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            self.stateMonitorTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
                 self.refreshState()
             }
         }
@@ -1414,7 +1449,13 @@ final class KeepAwakeController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
             self.isSwitching = false
             NotificationCenter.default.post(name: .keepAwakeStateChanged, object: nil)
-            self.refreshState()
+            self.refreshState(force: true)
+        }
+    }
+
+    private func finishStateRefresh() {
+        DispatchQueue.main.async {
+            self.stateRefreshInFlight = false
         }
     }
 
@@ -1561,11 +1602,14 @@ struct AccountsRootView: View {
     @State private var usageTicker = Date()
     @State private var remoteBridgeProcess: Process?
     @State private var remoteBridgeRunning = false
+    @State private var remoteBridgeRefreshInFlight = false
+    @State private var lastRemoteBridgeRefreshAt = Date.distantPast
     @State private var remoteBridgeUsersCount = 0
     @State private var remoteBridgeStatus = ""
     @State private var remoteBridgeLastOutput = ""
     @State private var activeQuotaPoolProfileID: String?
     @State private var quotaPoolFailoverInProgress = false
+    @State private var runAutoRefreshOnNextTick = true
     @State private var showLanguageMenu = false
     @State private var languageTransitionActive = false
     @State private var languagePulse = false
@@ -1637,8 +1681,8 @@ struct AccountsRootView: View {
             if autoQuotaPool {
                 autoQuotaPool = false
             }
-            keepAwake.refreshState()
-            refreshRemoteBridgeState()
+            keepAwake.refreshState(force: true)
+            refreshRemoteBridgeState(force: true)
             updater.checkForUpdates(presentNoUpdate: false, notifyIfAvailable: false)
             refreshProfiles(showLoading: true)
         }
@@ -1661,12 +1705,7 @@ struct AccountsRootView: View {
             }
         }
         .onReceive(timer) { _ in
-            if autoRefresh {
-                refreshProfiles(showLoading: false)
-            }
-            if autoSync {
-                syncMemories(silent: true)
-            }
+            runPeriodicMaintenance()
             keepAwake.refreshState()
             refreshRemoteBridgeState()
             usageTicker = Date()
@@ -2049,6 +2088,25 @@ struct AccountsRootView: View {
         let width = measured.width > 1 ? min(fallback.width, measured.width) : fallback.width
         let height = measured.height > 1 ? min(fallback.height, measured.height) : fallback.height
         return CGSize(width: max(1, width), height: max(1, height))
+    }
+
+    private func runPeriodicMaintenance() {
+        guard activeOperationCount == 0, !isRefreshing, !isSyncing else { return }
+
+        if autoRefresh && autoSync {
+            if runAutoRefreshOnNextTick {
+                refreshProfiles(showLoading: false)
+            } else {
+                syncMemories(silent: true)
+            }
+            runAutoRefreshOnNextTick.toggle()
+        } else if autoRefresh {
+            refreshProfiles(showLoading: false)
+            runAutoRefreshOnNextTick = false
+        } else if autoSync {
+            syncMemories(silent: true)
+            runAutoRefreshOnNextTick = true
+        }
     }
 
     private var loadingDisplayMessage: String {
@@ -4253,7 +4311,7 @@ struct AccountsRootView: View {
             loadingMessage = message
         }
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        codexAccountsWorkQueue.async {
             let result = work()
             DispatchQueue.main.async {
                 if message != nil {
@@ -4342,7 +4400,8 @@ struct AccountsRootView: View {
     }
 
     private func startRemoteBridge() {
-        refreshRemoteBridgeState()
+        refreshRemoteBridgeRunningFlag()
+        refreshRemoteBridgeState(force: true)
         guard !remoteBridgeRunning else {
             remoteBridgeStatus = tr("Bridge 已經運行緊", "Bridge is already running")
             return
@@ -4383,7 +4442,7 @@ struct AccountsRootView: View {
                 if let current = remoteBridgeProcess, current === process {
                     remoteBridgeProcess = nil
                 }
-                refreshRemoteBridgeState()
+                refreshRemoteBridgeState(force: true)
             }
         }
 
@@ -4393,7 +4452,7 @@ struct AccountsRootView: View {
             remoteBridgeRunning = true
             remoteBridgeStatus = tr("Bridge 啟動中...", "Bridge starting...")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
-                refreshRemoteBridgeState()
+                refreshRemoteBridgeState(force: true)
             }
         } catch {
             remoteBridgeStatus = error.localizedDescription
@@ -4428,25 +4487,27 @@ struct AccountsRootView: View {
         } completion: { result in
             guard result.0 == 0 else {
                 alertMessage(tr("帳號建立失敗", "Could Not Create Login"), result.1)
-                refreshRemoteBridgeState()
+                refreshRemoteBridgeState(force: true)
                 return
             }
             remoteBridgeStatus = tr("已建立手機登入帳號 \(credentials.username)", "Created mobile login \(credentials.username)")
-            refreshRemoteBridgeState()
+            refreshRemoteBridgeState(force: true)
         }
     }
 
-    private func refreshRemoteBridgeState() {
-        let processRunning = remoteBridgeProcess?.isRunning == true
-        let pidRunning = readRemoteBridgePID().map { isProcessRunning(pid: $0) } ?? false
-        remoteBridgeRunning = processRunning || pidRunning
-        if !remoteBridgeRunning {
-            removeRemoteBridgePIDIfStale()
-        }
+    private func refreshRemoteBridgeState(force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastRemoteBridgeRefreshAt) >= 25 else { return }
+        guard !remoteBridgeRefreshInFlight else { return }
+        lastRemoteBridgeRefreshAt = now
+        remoteBridgeRefreshInFlight = true
+
+        refreshRemoteBridgeRunningFlag()
 
         DispatchQueue.global(qos: .utility).async {
             let result = runRemoteBridgeUtility(["--list-users"], timeout: 8)
             DispatchQueue.main.async {
+                remoteBridgeRefreshInFlight = false
                 guard result.0 == 0,
                       let data = result.1.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -4460,6 +4521,15 @@ struct AccountsRootView: View {
                 }
                 remoteBridgeUsersCount = users.count
             }
+        }
+    }
+
+    private func refreshRemoteBridgeRunningFlag() {
+        let processRunning = remoteBridgeProcess?.isRunning == true
+        let pidRunning = readRemoteBridgePID().map { isProcessRunning(pid: $0) } ?? false
+        remoteBridgeRunning = processRunning || pidRunning
+        if !remoteBridgeRunning {
+            removeRemoteBridgePIDIfStale()
         }
     }
 
@@ -4508,7 +4578,7 @@ struct AccountsRootView: View {
         let loading = showLoading && hadProfiles ? tr("重新整理帳戶...", "Refreshing accounts...") : nil
 
         runBackground(loading) {
-            let accountsResult = runCodexScript(scriptPath, ["list-accounts"], wait: true)
+            let accountsResult = runCodexScript(scriptPath, ["list-accounts"], wait: true, timeout: 15)
             return accountsResult
         } completion: { result in
             guard result.0 == 0 else {
@@ -4567,7 +4637,7 @@ struct AccountsRootView: View {
         let previousProfiles = profiles
 
         runBackground(loading) {
-            let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true)
+            let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: 55)
             let profiles = parsedCodexProfiles(
                 accountsOutput: accountsOutput,
                 statusOutput: statusResult.0 == 0 ? statusResult.1 : "",
@@ -4777,7 +4847,7 @@ struct AccountsRootView: View {
             defaultName: defaultName
         ) else { return }
         runBackground(tr("建立帳戶...", "Creating account...")) {
-            runCodexScript(scriptPath, ["init-account", name], wait: true)
+            runCodexScript(scriptPath, ["init-account", name], wait: true, timeout: 60)
         } completion: { result in
             guard result.0 == 0 else {
                 alertMessage(tr("建立帳戶失敗", "Could Not Create Account"), result.1)
@@ -4833,14 +4903,14 @@ struct AccountsRootView: View {
         busyIDs.forEach { setProfileBusy($0, true) }
         let loadingText = tr("正在同步對話紀錄，再打開 \(targetName)...", "Syncing chat history, then opening \(targetName)...")
         runBackground(loadingText) {
-            let syncResult = runCodexScript(scriptPath, ["sync-once"], wait: true)
+            let syncResult = runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: 60)
             guard syncResult.0 == 0 else { return syncResult }
-            let shareResult = runCodexScript(scriptPath, ["link-all-history"], wait: true)
+            let shareResult = runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60)
             guard shareResult.0 == 0 else { return shareResult }
             if route?.didSwitch == true {
-                _ = runCodexScript(scriptPath, ["close-account", name], wait: true)
+                _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 25)
             }
-            return runCodexScript(scriptPath, arguments, wait: true)
+            return runCodexScript(scriptPath, arguments, wait: true, timeout: 45)
         } completion: { result in
             let releaseDelay: TimeInterval = result.0 == 0 ? 1.45 : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + releaseDelay) {
@@ -4859,7 +4929,7 @@ struct AccountsRootView: View {
     private func closeAccount(_ profile: CodexProfile) {
         setProfileBusy(profile.id, true)
         runBackground(tr("關閉 \(profile.displayName)...", "Closing \(profile.displayName)...")) {
-            runCodexScript(scriptPath, ["close-account", profile.id], wait: true)
+            runCodexScript(scriptPath, ["close-account", profile.id], wait: true, timeout: 25)
         } completion: { result in
             setProfileBusy(profile.id, false)
             if result.0 == 0, activeQuotaPoolProfileID == profile.id {
@@ -4874,7 +4944,7 @@ struct AccountsRootView: View {
 
     private func closeAllAccounts() {
         runBackground(tr("關閉全部 Codex 視窗...", "Closing all Codex windows...")) {
-            runCodexScript(scriptPath, ["close-all-accounts"], wait: true)
+            runCodexScript(scriptPath, ["close-all-accounts"], wait: true, timeout: 35)
         } completion: { result in
             if result.0 == 0 {
                 finishUsageSession()
@@ -4913,7 +4983,7 @@ struct AccountsRootView: View {
         let loading = silent ? nil : tr("同步記憶...", "Syncing memories...")
 
         runBackground(loading) {
-            runCodexScript(scriptPath, ["sync-once"], wait: true)
+            runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: 60)
         } completion: { result in
             isSyncing = false
             let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
@@ -4928,7 +4998,7 @@ struct AccountsRootView: View {
 
     private func shareAll() {
         runBackground(tr("共享對話紀錄...", "Sharing history...")) {
-            runCodexScript(scriptPath, ["link-all-history"], wait: true)
+            runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60)
         } completion: { result in
             statusText = result.0 == 0 ? tr("已同全部 profile 共享對話紀錄", "History shared with all profiles") : tr("共享失敗", "History share failed")
             refreshProfiles(showLoading: false)
@@ -4999,7 +5069,7 @@ struct AccountsRootView: View {
 
     private func shareHistory(_ profile: CodexProfile) {
         runBackground(tr("共享 \(profile.displayName) 對話紀錄...", "Sharing \(profile.displayName) history...")) {
-            runCodexScript(scriptPath, ["link-history", profile.id], wait: true)
+            runCodexScript(scriptPath, ["link-history", profile.id], wait: true, timeout: 45)
         } completion: { result in
             statusText = result.0 == 0 ? tr("已同 \(profile.displayName) 共享對話紀錄", "History shared with \(profile.displayName)") : tr("共享失敗", "History share failed")
             refreshProfiles(showLoading: false)
@@ -5016,7 +5086,7 @@ struct AccountsRootView: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         runBackground(tr("刪除 \(profile.displayName)...", "Deleting \(profile.displayName)...")) {
-            runCodexScript(scriptPath, ["delete-account", profile.id], wait: true)
+            runCodexScript(scriptPath, ["delete-account", profile.id], wait: true, timeout: 45)
         } completion: { result in
             if result.0 == 0 {
                 displayNames.removeValue(forKey: profile.id)
@@ -5562,7 +5632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadAccounts() -> [Account] {
-        let result = runScript(["list-accounts"], wait: true)
+        let result = runScript(["list-accounts"], wait: true, timeout: 8)
         guard result.0 == 0 else { return [] }
         let displayNames = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
 
@@ -5590,10 +5660,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func runScript(_ arguments: [String], wait: Bool = false) -> (Int32, String) {
+    private func runScript(_ arguments: [String], wait: Bool = false, timeout: TimeInterval = 90) -> (Int32, String) {
         let processArguments = [scriptPath] + arguments
         if wait {
-            return runProcess(executable: "/bin/zsh", arguments: processArguments, timeout: 90)
+            return runProcess(executable: "/bin/zsh", arguments: processArguments, timeout: timeout)
         }
         return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments)
     }
