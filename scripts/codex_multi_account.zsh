@@ -14,8 +14,15 @@ APP_DATA_ROOT="${APP_DATA_ROOT:-$HOME/Library/Application Support/Codex Accounts
 SHARED_MEMORY_DIR="${SHARED_MEMORY_DIR:-$HOME/.codex-shared-memory}"
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
 USAGE_API_URL="${USAGE_API_URL:-https://chatgpt.com/backend-api/wham/usage}"
+TOKEN_REFRESH_URL="${TOKEN_REFRESH_URL:-https://auth.openai.com/oauth/token}"
+CHATGPT_CLIENT_ID="${CHATGPT_CLIENT_ID:-app_EMoamEEZ73f0CkXaXp7hrann}"
 USAGE_CACHE_SECONDS="${USAGE_CACHE_SECONDS:-20}"
 USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache-v5}"
+USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS="${USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS:-1}"
+USAGE_DIRECT_TIMEOUT_SECONDS="${USAGE_DIRECT_TIMEOUT_SECONDS:-3}"
+TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS="${TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS:-3}"
+TOKEN_REFRESH_TIMEOUT_SECONDS="${TOKEN_REFRESH_TIMEOUT_SECONDS:-6}"
+APP_SERVER_USAGE_TIMEOUT_SECONDS="${APP_SERVER_USAGE_TIMEOUT_SECONDS:-4}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
@@ -266,6 +273,102 @@ read_cached_usage() {
   cat "$cache_file"
 }
 
+trim_usage_text() {
+  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+reset_epoch_from_text() {
+  local value
+  value="$(printf '%s' "${1:-}" | trim_usage_text)"
+  if [[ "$value" == "unknown" || "$value" == "none" || -z "$value" ]]; then
+    return 1
+  fi
+
+  if [[ "$value" =~ '^[0-9][0-9]:[0-9][0-9]$' ]]; then
+    date -j -f '%Y-%m-%d %H:%M' "$(date '+%Y-%m-%d') $value" '+%s' 2>/dev/null || return 1
+    return 0
+  fi
+
+  if [[ "$value" =~ '^[0-9][0-9]/[0-9][0-9][[:space:]][0-9][0-9]:[0-9][0-9]$' ]]; then
+    date -j -f '%Y/%m/%d %H:%M' "$(date '+%Y')/$value" '+%s' 2>/dev/null || return 1
+    return 0
+  fi
+
+  if [[ "$value" =~ '^[0-9][0-9]/[0-9][0-9]$' ]]; then
+    date -j -f '%Y/%m/%d %H:%M' "$(date '+%Y')/$value 23:59" '+%s' 2>/dev/null || return 1
+    return 0
+  fi
+
+  return 1
+}
+
+cached_reset_part_for_label() {
+  local reset="$1"
+  local label="$2"
+  local part reset_label
+
+  for part in ${(s: / :)reset}; do
+    part="$(printf '%s' "$part" | trim_usage_text)"
+    reset_label="${part%% *}"
+    if [[ "$reset_label" == "$label" ]]; then
+      printf '%s' "$part"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+cached_reset_has_elapsed() {
+  local reset="$1"
+  local label="$2"
+  local part reset_label reset_value reset_epoch now
+
+  now="$(date '+%s')"
+  for part in ${(s: / :)reset}; do
+    part="$(printf '%s' "$part" | trim_usage_text)"
+    reset_label="${part%% *}"
+    [[ "$reset_label" == "$label" ]] || continue
+
+    reset_value="${part#* }"
+    reset_epoch="$(reset_epoch_from_text "$reset_value" 2>/dev/null || true)"
+    [[ -n "$reset_epoch" ]] || return 1
+    (( reset_epoch <= now )) && return 0
+    return 1
+  done
+
+  return 1
+}
+
+cached_usage_has_elapsed_reset() {
+  local cached="$1"
+  local quota="${cached%%$'\t'*}"
+  local reset="${cached#*$'\t'}"
+  local part label
+
+  for part in ${(s: / :)quota}; do
+    part="$(printf '%s' "$part" | trim_usage_text)"
+    [[ -n "$part" ]] || continue
+    label="${part%% *}"
+    if cached_reset_has_elapsed "$reset" "$label"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+read_cached_usage_if_still_current() {
+  local cache_file="$1"
+  local max_age="$2"
+  local cached
+
+  cached="$(read_cached_usage "$cache_file" "$max_age" 2>/dev/null || true)"
+  [[ -n "$cached" ]] || return 1
+  cached_usage_has_elapsed_reset "$cached" && return 1
+  printf '%s\n' "$cached"
+}
+
 write_cached_usage() {
   local cache_file="$1"
   local quota="$2"
@@ -276,6 +379,79 @@ write_cached_usage() {
   tmp_file="${cache_file}.$$"
   printf '%s\t%s\n' "$quota" "$reset" > "$tmp_file"
   mv "$tmp_file" "$cache_file"
+}
+
+refresh_chatgpt_tokens_for() {
+  local auth_file="$1"
+  local refresh_token refresh_body tmp_file tmp_auth http_status now
+
+  [[ -f "$auth_file" ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+
+  refresh_token="$(jq -r '.tokens.refresh_token // empty' "$auth_file" 2>/dev/null || true)"
+  [[ -n "$refresh_token" ]] || return 1
+
+  refresh_body="$(jq -nc --arg client_id "$CHATGPT_CLIENT_ID" --arg refresh_token "$refresh_token" \
+    '{client_id: $client_id, grant_type: "refresh_token", refresh_token: $refresh_token}' 2>/dev/null || true)"
+  [[ -n "$refresh_body" ]] || return 1
+
+  tmp_file="$(mktemp)"
+  http_status="$(curl -sS --connect-timeout "$TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS" --max-time "$TOKEN_REFRESH_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+    -H 'Content-Type: application/json' \
+    --data "$refresh_body" \
+    "$TOKEN_REFRESH_URL" 2>/dev/null || true)"
+
+  if [[ "$http_status" != "200" ]]; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  if ! jq -e '.access_token? and (.access_token | type == "string")' "$tmp_file" >/dev/null 2>&1; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  tmp_auth="${auth_file}.$$"
+  if jq --slurpfile refreshed "$tmp_file" --arg now "$now" '
+    .tokens.access_token = $refreshed[0].access_token
+    | .tokens.refresh_token = ($refreshed[0].refresh_token // .tokens.refresh_token)
+    | .tokens.id_token = ($refreshed[0].id_token // .tokens.id_token)
+    | .tokens.account_id = ($refreshed[0].account_id // .tokens.account_id)
+    | .last_refresh = $now
+  ' "$auth_file" > "$tmp_auth" 2>/dev/null; then
+    mv "$tmp_auth" "$auth_file"
+    rm -f "$tmp_file"
+    return 0
+  fi
+
+  rm -f "$tmp_file" "$tmp_auth"
+  return 1
+}
+
+fetch_usage_http_status() {
+  local auth_file="$1"
+  local tmp_file="$2"
+  local token account_id
+  local -a usage_headers
+
+  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
+  [[ -n "$token" ]] || return 1
+  account_id="$(jq -r '.tokens.account_id // empty' "$auth_file" 2>/dev/null || true)"
+
+  usage_headers=(
+    -H "Authorization: Bearer $token"
+    -H 'Accept: application/json'
+    -H 'Content-Type: application/json'
+  )
+  if [[ -n "$account_id" && "$account_id" != "null" ]]; then
+    usage_headers+=(-H "ChatGPT-Account-Id: $account_id")
+  fi
+
+  curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+    "${usage_headers[@]}" \
+    "$USAGE_API_URL" 2>/dev/null || true
 }
 
 format_reset_epoch() {
@@ -299,6 +475,104 @@ format_reset_epoch() {
   fi
 }
 
+emit_usage_summary_from_raw() {
+  local cache_file="$1"
+  local raw_summary="$2"
+  local quota reset_epochs reset
+
+  quota="${raw_summary%%$'\t'*}"
+  reset_epochs="${raw_summary#*$'\t'}"
+  [[ -n "$quota" ]] || return 1
+  if [[ "$quota" == "unlimited" ]]; then
+    write_cached_usage "$cache_file" "$quota" "none"
+    printf '%s\t%s\n' "$quota" "none"
+    return 0
+  fi
+
+  reset=""
+  for part in ${(s: / :)reset_epochs}; do
+    local reset_label reset_epoch formatted_reset
+    reset_label="${part%% *}"
+    reset_epoch="${part#* }"
+    formatted_reset="$(format_reset_epoch "$reset_epoch")"
+    if [[ -n "$reset" ]]; then
+      reset="$reset / "
+    fi
+    reset="$reset$reset_label $formatted_reset"
+  done
+  [[ -n "$reset" ]] || reset="unknown"
+
+  write_cached_usage "$cache_file" "$quota" "$reset"
+  printf '%s\t%s\n' "$quota" "$reset"
+}
+
+fetch_usage_summary_via_app_server() {
+  local home_dir="$1"
+  local cache_file="$2"
+  local codex_bin="$CODEX_APP/Contents/Resources/codex"
+  local timeout_seconds="$APP_SERVER_USAGE_TIMEOUT_SECONDS"
+  local init_request initialized_notification rate_request line raw_summary server_pid
+
+  [[ -x "$codex_bin" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  initialized_notification='{"method":"initialized"}'
+  rate_request='{"method":"account/rateLimits/read","id":2}'
+
+  coproc env CODEX_HOME="$home_dir" "$codex_bin" app-server --listen stdio:// 2>/dev/null
+  server_pid=$!
+
+  print -p -- "$init_request" 2>/dev/null || true
+  print -p -- "$initialized_notification" 2>/dev/null || true
+  print -p -- "$rate_request" 2>/dev/null || true
+
+  while read -t "$timeout_seconds" -p line; do
+    raw_summary="$(printf '%s\n' "$line" | jq -r '
+      def clamp: if . < 0 then 0 elif . > 100 then 100 else . end;
+      def has_usage($w): $w != null and ($w.usedPercent != null);
+      def left($w): (((100 - ($w.usedPercent | tonumber)) | clamp | floor) | tostring) + "%";
+      def epoch($w):
+        if $w == null then "unknown"
+        elif ($w.resetsAt != null) then ($w.resetsAt | tostring)
+        elif ($w.resetAt != null) then ($w.resetAt | tostring)
+        else "unknown"
+        end;
+      def quota_label($fallback; $w):
+        if ($w.windowDurationMins == 300) then "5h"
+        elif ($w.windowDurationMins == 10080) then "7d"
+        else $fallback
+        end;
+      select(.id? == 2 and .result?.rateLimits?) |
+      .result.rateLimits as $l |
+      if (($l.credits.unlimited // false) == true) then
+        ["unlimited", "none"]
+      else
+        [
+          ([
+            if has_usage($l.primary) then quota_label("5h"; $l.primary) + " " + left($l.primary) else empty end,
+            if has_usage($l.secondary) then quota_label("7d"; $l.secondary) + " " + left($l.secondary) else empty end
+          ] | join(" / ")),
+          ([
+            if has_usage($l.primary) then quota_label("5h"; $l.primary) + " " + epoch($l.primary) else empty end,
+            if has_usage($l.secondary) then quota_label("7d"; $l.secondary) + " " + epoch($l.secondary) else empty end
+          ] | join(" / "))
+        ]
+      end | @tsv
+    ' 2>/dev/null || true)"
+    if [[ -n "$raw_summary" ]]; then
+      kill "$server_pid" 2>/dev/null || true
+      wait "$server_pid" 2>/dev/null || true
+      emit_usage_summary_from_raw "$cache_file" "$raw_summary"
+      return 0
+    fi
+  done
+
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  return 1
+}
+
 fetch_usage_summary_for() {
   local name="$1"
   local home_dir="$2"
@@ -314,30 +588,45 @@ fetch_usage_summary_for() {
   command -v jq >/dev/null 2>&1 || return 1
   [[ -f "$auth_file" ]] || return 1
 
-  local token tmp_file http_status raw_summary quota reset_epochs primary_epoch secondary_epoch
-  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
-  [[ -n "$token" ]] || return 1
+  local tmp_file http_status raw_summary quota reset_epochs primary_epoch secondary_epoch
 
   tmp_file="$(mktemp)"
-  http_status="$(curl -sS --connect-timeout 2 --max-time 5 -o "$tmp_file" -w '%{http_code}' \
-    -H "Authorization: Bearer $token" \
-    -H 'Accept: application/json' \
-    -H 'Content-Type: application/json' \
-    "$USAGE_API_URL" 2>/dev/null || true)"
+  http_status="$(fetch_usage_http_status "$auth_file" "$tmp_file")"
 
-  if [[ "$http_status" == "401" || "$http_status" == "403" ]]; then
+  if [[ "$http_status" == "401" ]]; then
     rm -f "$tmp_file"
-    # Codex may still be locally signed in even when the usage endpoint rejects
-    # one request. Prefer the last known usage value so 0% accounts stay visible.
-    read_cached_usage "$cache_file" 86400 2>/dev/null && return 0
+    if refresh_chatgpt_tokens_for "$auth_file"; then
+      tmp_file="$(mktemp)"
+      http_status="$(fetch_usage_http_status "$auth_file" "$tmp_file")"
+    else
+      fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
+      read_cached_usage_if_still_current "$cache_file" 600 2>/dev/null && return 0
+      printf '%s\t%s\n' "__auth_invalid__" "unknown"
+      return 0
+    fi
+  fi
+
+  if [[ "$http_status" == "403" ]]; then
+    rm -f "$tmp_file"
+    fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
+    read_cached_usage_if_still_current "$cache_file" 600 2>/dev/null && return 0
+    printf '%s\t%s\n' "__auth_invalid__" "unknown"
+    return 0
+  fi
+
+  if [[ "$http_status" == "401" ]]; then
+    rm -f "$tmp_file"
+    fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
+    read_cached_usage_if_still_current "$cache_file" 600 2>/dev/null && return 0
     printf '%s\t%s\n' "__auth_invalid__" "unknown"
     return 0
   fi
 
   if [[ "$http_status" != "200" ]]; then
     rm -f "$tmp_file"
+    fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
     # Keep a short stale fallback when the network/API is temporarily unavailable.
-    read_cached_usage "$cache_file" 600 2>/dev/null || return 1
+    read_cached_usage_if_still_current "$cache_file" 600 2>/dev/null || return 1
     return 0
   fi
 
@@ -391,30 +680,7 @@ fetch_usage_summary_for() {
   rm -f "$tmp_file"
   [[ -n "$raw_summary" ]] || return 1
 
-  quota="${raw_summary%%$'\t'*}"
-  reset_epochs="${raw_summary#*$'\t'}"
-  [[ -n "$quota" ]] || return 1
-  if [[ "$quota" == "unlimited" ]]; then
-    write_cached_usage "$cache_file" "$quota" "none"
-    printf '%s\t%s\n' "$quota" "none"
-    return 0
-  fi
-
-  reset=""
-  for part in ${(s: / :)reset_epochs}; do
-    local reset_label reset_epoch formatted_reset
-    reset_label="${part%% *}"
-    reset_epoch="${part#* }"
-    formatted_reset="$(format_reset_epoch "$reset_epoch")"
-    if [[ -n "$reset" ]]; then
-      reset="$reset / "
-    fi
-    reset="$reset$reset_label $formatted_reset"
-  done
-  [[ -n "$reset" ]] || reset="unknown"
-
-  write_cached_usage "$cache_file" "$quota" "$reset"
-  printf '%s\t%s\n' "$quota" "$reset"
+  emit_usage_summary_from_raw "$cache_file" "$raw_summary"
 }
 
 account_status_for() {
@@ -463,7 +729,7 @@ list_accounts_status() {
   local -a pids
   tmp_dir="$(mktemp -d)"
   index=0
-  status_parallelism="${STATUS_PARALLELISM:-4}"
+  status_parallelism="${STATUS_PARALLELISM:-8}"
   pids=()
 
   while read -r name; do

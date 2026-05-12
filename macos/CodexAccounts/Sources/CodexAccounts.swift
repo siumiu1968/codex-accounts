@@ -26,6 +26,14 @@ private final class ProcessFinishState {
     }
 }
 
+private struct ProfileRowCenterPreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
 struct CodexProfile: Identifiable {
     let id: String
     let displayName: String
@@ -1597,7 +1605,9 @@ struct AccountsRootView: View {
     @State private var pendingSectionScroll: String?
     @State private var quotaReplayActive = false
     @State private var resetScrambleActive = false
+    @State private var resetScrambleReturning = false
     @State private var resetScrambleSeed = 0
+    @State private var resetScrambleRunID = 0
     @State private var codexUsageSessionStart: Date?
     @State private var usageTicker = Date()
     @State private var remoteBridgeProcess: Process?
@@ -1614,6 +1624,8 @@ struct AccountsRootView: View {
     @State private var languageTransitionActive = false
     @State private var languagePulse = false
     @State private var hoveredProfileID: String?
+    @State private var profileRowCenters: [String: CGFloat] = [:]
+    @State private var profileDockHoverY: CGFloat?
     @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
     @AppStorage("sidebarRemoteExpanded") private var sidebarRemoteExpanded = false
@@ -1726,7 +1738,7 @@ struct AccountsRootView: View {
     }
 
     private var profileHoverPadding: CGFloat {
-        scaled(24)
+        scaled(42)
     }
 
     private var profileScrollBarReserve: CGFloat {
@@ -1959,33 +1971,64 @@ struct AccountsRootView: View {
         }
     }
 
-    private func profileDockDistance(for profile: CodexProfile) -> Int? {
+    private func profileDockDistance(for profile: CodexProfile) -> CGFloat? {
+        if let hoverY = profileDockHoverY,
+           let centerY = profileRowCenters[profile.id] {
+            return abs(centerY - hoverY)
+        }
+
+        if let hoveredProfileID,
+           let hoveredCenter = profileRowCenters[hoveredProfileID],
+           let centerY = profileRowCenters[profile.id] {
+            return abs(centerY - hoveredCenter)
+        }
+
         guard let hoveredProfileID,
               let hoveredIndex = visibleProfileIDsForDock.firstIndex(of: hoveredProfileID),
               let index = visibleProfileIDsForDock.firstIndex(of: profile.id)
         else {
             return nil
         }
-        return abs(index - hoveredIndex)
+        return CGFloat(abs(index - hoveredIndex)) * scaled(82)
+    }
+
+    private func profileDockInfluence(for profile: CodexProfile) -> CGFloat {
+        guard let distance = profileDockDistance(for: profile) else { return 0 }
+        let radius = max(scaled(230), 1)
+        let raw = max(0, 1 - distance / radius)
+        return CGFloat(pow(Double(raw), 1.18))
     }
 
     private func profileDockScale(for profile: CodexProfile) -> CGFloat {
-        guard let distance = profileDockDistance(for: profile) else { return 1 }
-        switch distance {
-        case 0: return 1.040
-        case 1: return 1.024
-        case 2: return 1.012
-        default: return 1
-        }
+        let influence = profileDockInfluence(for: profile)
+        guard influence > 0 else { return 1 }
+        return 1 + 0.058 * influence
     }
 
     private func profileDockGlowOpacity(for profile: CodexProfile) -> Double {
-        guard let distance = profileDockDistance(for: profile) else { return 0.12 }
-        switch distance {
-        case 0: return 0.32
-        case 1: return 0.18
-        case 2: return 0.10
-        default: return 0.08
+        let influence = Double(profileDockInfluence(for: profile))
+        return 0.08 + 0.28 * influence
+    }
+
+    private func isProfileDockFocused(_ profile: CodexProfile) -> Bool {
+        guard let distance = profileDockDistance(for: profile) else { return false }
+        return distance < scaled(40)
+    }
+
+    private func nearestProfileID(to hoverY: CGFloat) -> String? {
+        profileRowCenters.min { lhs, rhs in
+            abs(lhs.value - hoverY) < abs(rhs.value - hoverY)
+        }?.key
+    }
+
+    private func updateProfileDockHoverY(_ hoverY: CGFloat) {
+        if let current = profileDockHoverY, abs(current - hoverY) < 0.8 {
+            return
+        }
+
+        withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.76, blendDuration: 0.05)) {
+            profileDockHoverY = hoverY
+            hoveredProfileID = nearestProfileID(to: hoverY) ?? hoveredProfileID
         }
     }
 
@@ -1993,12 +2036,15 @@ struct AccountsRootView: View {
         if hovering {
             withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.70, blendDuration: 0.08)) {
                 hoveredProfileID = profileID
+                if profileDockHoverY == nil, let centerY = profileRowCenters[profileID] {
+                    profileDockHoverY = centerY
+                }
             }
             return
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
-            guard hoveredProfileID == profileID else { return }
+            guard hoveredProfileID == profileID, profileDockHoverY == nil else { return }
             withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.74, blendDuration: 0.08)) {
                 hoveredProfileID = nil
             }
@@ -2011,6 +2057,7 @@ struct AccountsRootView: View {
             guard hoveredProfileID == current else { return }
             withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.74, blendDuration: 0.08)) {
                 hoveredProfileID = nil
+                profileDockHoverY = nil
             }
         }
     }
@@ -2018,6 +2065,7 @@ struct AccountsRootView: View {
     private func setHoveredProfile(_ profileID: String?) {
         withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.70, blendDuration: 0.08)) {
             hoveredProfileID = profileID
+            profileDockHoverY = profileID.flatMap { profileRowCenters[$0] }
         }
     }
 
@@ -3185,26 +3233,51 @@ struct AccountsRootView: View {
     private var header: some View {
         GeometryReader { geometry in
             let compact = geometry.size.width < 720
-            let titleWidth = scaled(compact ? 170 : 300)
+            let compactReservedWidth = scaled(376) + profileRightAlignmentInset
+            let compactTitleWidth = min(scaled(270), max(scaled(218), geometry.size.width - compactReservedWidth))
+            let titleWidth = compact ? compactTitleWidth : scaled(300)
 
-            ZStack {
-                sectionJumpControls(compact: compact)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.horizontal, scaled(compact ? 174 : 216))
+            Group {
+                if compact {
+                    HStack(alignment: .center, spacing: scaled(9)) {
+                        sidebarToggleButton
 
-                HStack(alignment: .center, spacing: scaled(compact ? 10 : 14)) {
-                    sidebarToggleButton
+                        headerTitle
+                            .frame(width: titleWidth, alignment: .leading)
+                            .layoutPriority(3)
 
-                    headerTitle
-                        .frame(width: titleWidth, alignment: .leading)
-                        .layoutPriority(1)
+                        Spacer(minLength: scaled(8))
 
-                    Spacer(minLength: scaled(12))
+                        sectionJumpControls(compact: true)
+                            .layoutPriority(2)
 
-                    headerActions(compact: compact)
-                        .layoutPriority(5)
+                        Spacer(minLength: scaled(8))
+
+                        headerActions(compact: true)
+                            .layoutPriority(2)
+                    }
+                    .padding(.trailing, profileRightAlignmentInset)
+                } else {
+                    ZStack {
+                        sectionJumpControls(compact: false)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.horizontal, scaled(216))
+
+                        HStack(alignment: .center, spacing: scaled(14)) {
+                            sidebarToggleButton
+
+                            headerTitle
+                                .frame(width: titleWidth, alignment: .leading)
+                                .layoutPriority(1)
+
+                            Spacer(minLength: scaled(12))
+
+                            headerActions(compact: false)
+                                .layoutPriority(5)
+                        }
+                        .padding(.trailing, profileRightAlignmentInset)
+                    }
                 }
-                .padding(.trailing, profileRightAlignmentInset)
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
         }
@@ -3251,17 +3324,19 @@ struct AccountsRootView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.tail)
+            .minimumScaleFactor(0.82)
+            .allowsTightening(true)
         }
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
     }
 
     private func headerActions(compact: Bool) -> some View {
-        HStack(spacing: scaled(compact ? 8 : 12)) {
+        HStack(spacing: scaled(compact ? 7 : 12)) {
             glassIconButton(systemName: "plus", label: tr("新增帳戶", "New Account"), compact: compact, accent: Color(red: 0.34, green: 0.78, blue: 1.00)) {
                 createAccount()
             }
 
-            glassIconButton(systemName: "arrow.clockwise", label: tr("重新整理", "Refresh"), compact: compact, accent: Color(red: 0.24, green: 0.95, blue: 0.78)) {
+            glassIconButton(systemName: "arrow.clockwise", label: tr("重新整理", "Refresh"), compact: compact, accent: Color(red: 0.24, green: 0.95, blue: 0.78), isBusy: isRefreshing) {
                 refreshProfiles(showLoading: true, replayQuota: true)
             }
 
@@ -3327,9 +3402,9 @@ struct AccountsRootView: View {
             pendingSectionScroll = sectionID
         } label: {
             Image(systemName: systemName)
-                .font(.system(size: scaled(compact ? 14 : 16), weight: .semibold))
+                .font(.system(size: scaled(compact ? 15 : 16), weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
-                .frame(width: scaled(compact ? 38 : 48), height: scaled(34))
+                .frame(width: scaled(compact ? 38 : 48), height: scaled(compact ? 36 : 34))
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.88, hoverScale: 1.06, glow: accent, glowOpacity: 0.24))
@@ -3389,6 +3464,18 @@ struct AccountsRootView: View {
         .padding(.trailing, profileHoverPadding)
         .padding(.top, 4)
         .contentShape(Rectangle())
+        .coordinateSpace(name: "profilesDock")
+        .onPreferenceChange(ProfileRowCenterPreferenceKey.self) { centers in
+            profileRowCenters = centers
+        }
+        .onContinuousHover(coordinateSpace: .named("profilesDock")) { phase in
+            switch phase {
+            case .active(let location):
+                updateProfileDockHoverY(location.y)
+            case .ended:
+                clearHoveredProfileSoon()
+            }
+        }
         .onHover { hovering in
             if !hovering {
                 clearHoveredProfileSoon()
@@ -3437,7 +3524,7 @@ struct AccountsRootView: View {
     private func profileRow(_ profile: CodexProfile) -> some View {
         let dockScale = profileDockScale(for: profile)
         let dockGlowOpacity = profileDockGlowOpacity(for: profile)
-        let dockFocused = profileDockDistance(for: profile) == 0
+        let dockFocused = isProfileDockFocused(profile)
 
         return GeometryReader { geometry in
             let width = geometry.size.width
@@ -3481,6 +3568,14 @@ struct AccountsRootView: View {
             .frame(width: geometry.size.width, height: rowHeight, alignment: .center)
         }
         .frame(maxWidth: .infinity, minHeight: scaled(64), idealHeight: scaled(64), maxHeight: scaled(64), alignment: .leading)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ProfileRowCenterPreferenceKey.self,
+                    value: [profile.id: proxy.frame(in: .named("profilesDock")).midY]
+                )
+            }
+        )
         .background(Color.white.opacity(0.040))
         .background(themeRowTint.opacity(profile.quota == "unknown" ? 0.030 : 0.085))
         .background(profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.020 : 0.074))
@@ -3518,6 +3613,7 @@ struct AccountsRootView: View {
         .zIndex(Double(dockScale * 1000))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: profile.quota)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.72, blendDuration: 0.08), value: hoveredProfileID)
+        .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.78, blendDuration: 0.05), value: profileDockHoverY)
     }
 
     private func profileBadge(_ profile: CodexProfile) -> some View {
@@ -3644,7 +3740,7 @@ struct AccountsRootView: View {
 
     private func quotaMeterLine(_ window: QuotaWindow, profile: CodexProfile, accent: Color, compact: Bool, blockedByWeeklyZero: Bool = false, forcedReset: String? = nil) -> some View {
         let resetText = blockedByWeeklyZero
-            ? clockResetText(from: forcedReset)
+            ? resetCaption(forcedReset, windowID: "5h", profileID: profile.id)
             : resetCaption(window.reset, windowID: window.id, profileID: profile.id)
         let tint = window.id == "5h" ? Color(red: 0.28, green: 0.78, blue: 1.00) : Color(red: 1.00, green: 0.74, blue: 0.20)
         let labelWidth = window.id == "unknown" ? scaled(compact ? 46 : 54) : scaled(compact ? 24 : 28)
@@ -3763,38 +3859,67 @@ struct AccountsRootView: View {
     private func resetCaption(_ reset: String?, windowID: String, profileID: String) -> String {
         let text = shortResetText(reset)
         guard text != "--" else { return text }
-        if resetScrambleActive {
-            return scrambledResetText(windowID: windowID, profileID: profileID)
-        }
 
+        let finalText: String
         if windowID == "5h" {
-            return clockResetText(from: text)
+            finalText = clockResetText(from: text)
+        } else {
+            let key = "\(profileID):\(windowID)"
+            finalText = expandedResetKeys.contains(key)
+                ? relativeResetText(from: text)
+                : weeklyResetText(from: text)
         }
 
-        let key = "\(profileID):\(windowID)"
-        if expandedResetKeys.contains(key) {
-            return relativeResetText(from: text)
+        if resetScrambleActive {
+            return scrambledResetText(finalText: finalText, windowID: windowID, profileID: profileID)
         }
-        return weeklyResetText(from: text)
+        return finalText
     }
 
-    private func scrambledResetText(windowID: String, profileID: String) -> String {
+    private func scrambledResetText(finalText: String, windowID: String, profileID: String) -> String {
+        if resetScrambleReturning {
+            return risingResetText(to: finalText)
+        }
+
         let step = max(0, 10 - resetScrambleSeed)
         let base = abs(profileID.unicodeScalars.reduce(step * 31) { $0 + Int($1.value) })
-        if windowID == "5h" {
+        if windowID == "5h" || finalText.contains(":") {
             return String(format: "%02d:%02d", min(step * 2, 23), min(step * 6, 59))
         }
-        if step == 0 {
+        if finalText.contains("/") && step == 0 {
             return "00/00"
         }
+        if !finalText.contains("/") {
+            return fallingResetText(matching: finalText, step: step)
+        }
         return String(format: "%02d/%02d", max(1, step), max(1, min(28, step * 3 + base % 4)))
+    }
+
+    private func risingResetText(to finalText: String) -> String {
+        digitAnimatedResetText(finalText, progress: min(max(Double(resetScrambleSeed) / 10.0, 0), 1))
+    }
+
+    private func fallingResetText(matching finalText: String, step: Int) -> String {
+        digitAnimatedResetText(finalText, progress: min(max(Double(step) / 10.0, 0), 1))
+    }
+
+    private func digitAnimatedResetText(_ text: String, progress: Double) -> String {
+        String(text.map { character in
+            guard let target = character.wholeNumberValue else {
+                return character
+            }
+            let value = min(9, max(0, Int((Double(target) * progress).rounded())))
+            return Character(String(value))
+        })
     }
 
     private func replayPercent(_ percent: Int?) -> Int? {
         guard let percent else { return nil }
         guard quotaReplayActive else { return percent }
-        let step = max(0, 10 - resetScrambleSeed)
-        return min(max(Int((Double(percent) * Double(step) / 10.0).rounded()), 0), 100)
+        let progress = resetScrambleReturning
+            ? min(max(Double(resetScrambleSeed) / 10.0, 0), 1)
+            : min(max(Double(max(0, 10 - resetScrambleSeed)) / 10.0, 0), 1)
+        return min(max(Int((Double(percent) * progress).rounded()), 0), 100)
     }
 
     private func toggleResetExpansion(windowID: String, profileID: String) {
@@ -3904,6 +4029,53 @@ struct AccountsRootView: View {
         components.second = 0
         guard let date = calendar.date(from: components) else { return nil }
         return date < now ? calendar.date(byAdding: .day, value: 1, to: date) : date
+    }
+
+    private func shouldPreservePreviousUsage(_ previous: CodexProfile) -> Bool {
+        previous.quota != "unknown" && !cachedResetHasElapsed(previous.reset)
+    }
+
+    private func cachedResetHasElapsed(_ reset: String) -> Bool {
+        guard !reset.isEmpty, reset != "unknown", reset != "none" else { return false }
+        return reset.components(separatedBy: " / ").contains { part in
+            let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let separator = trimmed.firstIndex(of: " ") else { return false }
+            let value = String(trimmed[trimmed.index(after: separator)...])
+            guard let date = staleResetDate(from: value) else { return false }
+            return date <= Date().addingTimeInterval(-20)
+        }
+    }
+
+    private func staleResetDate(from text: String) -> Date? {
+        let calendar = Calendar.current
+        let now = Date()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let year = calendar.component(.year, from: now)
+
+        if trimmed.contains("/") {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy/MM/dd HH:mm"
+            if let date = formatter.date(from: "\(year)/\(trimmed)") {
+                return date
+            }
+            formatter.dateFormat = "yyyy/MM/dd"
+            return formatter.date(from: "\(year)/\(trimmed)")
+        }
+
+        let parts = trimmed.split(separator: ":")
+        guard parts.count == 2,
+              let hour = Int(parts[0]),
+              let minute = Int(parts[1])
+        else {
+            return nil
+        }
+
+        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        components.hour = hour
+        components.minute = minute
+        components.second = 0
+        return calendar.date(from: components)
     }
 
     private func quotaRemainingPercent(for profile: CodexProfile) -> Int? {
@@ -4217,17 +4389,27 @@ struct AccountsRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: scaled(8), style: .continuous))
     }
 
-    private func glassIconButton(systemName: String, label: String, danger: Bool = false, compact: Bool = false, accent customAccent: Color? = nil, action: @escaping () -> Void) -> some View {
+    private func glassIconButton(systemName: String, label: String, danger: Bool = false, compact: Bool = false, accent customAccent: Color? = nil, isBusy: Bool = false, action: @escaping () -> Void) -> some View {
         let accent = customAccent ?? (danger ? Color(red: 1.00, green: 0.22, blue: 0.18) : Color.white)
-        let side = scaled(compact ? 36 : 42)
-        let radius = scaled(compact ? 12 : 14)
+        let side = scaled(compact ? 38 : 42)
+        let radius = scaled(compact ? 13 : 14)
 
         return Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: scaled(compact ? 15 : 16), weight: .semibold))
-                .symbolRenderingMode(.hierarchical)
-                .frame(width: side, height: side)
-                .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            ZStack {
+                Image(systemName: systemName)
+                    .font(.system(size: scaled(compact ? 15 : 16), weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .opacity(isBusy ? 0.0 : 1.0)
+
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(compact ? 0.72 : 0.80)
+                        .tint(accent)
+                }
+            }
+            .frame(width: side, height: side)
+            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.86, hoverScale: 1.08, glow: accent, glowOpacity: 0.30))
         .foregroundStyle(danger ? accent.opacity(0.96) : accent.opacity(0.92))
@@ -4243,8 +4425,8 @@ struct AccountsRootView: View {
 
     private func closeAllIconButton(label: String, compact: Bool = false, action: @escaping () -> Void) -> some View {
         let accent = Color(red: 1.00, green: 0.18, blue: 0.14)
-        let side = scaled(compact ? 36 : 42)
-        let radius = scaled(compact ? 12 : 14)
+        let side = scaled(compact ? 38 : 42)
+        let radius = scaled(compact ? 13 : 14)
 
         return Button(action: action) {
             ZStack {
@@ -4254,7 +4436,7 @@ struct AccountsRootView: View {
 
                 Image(systemName: "xmark")
                     .font(.system(size: scaled(compact ? 15 : 16), weight: .heavy))
-                    .offset(x: scaled(5), y: scaled(5))
+                    .offset(x: scaled(compact ? 4 : 5), y: scaled(compact ? 4 : 5))
             }
             .frame(width: side, height: side)
             .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
@@ -4565,8 +4747,15 @@ struct AccountsRootView: View {
     }
 
     private func refreshProfiles(showLoading: Bool = true, replayQuota: Bool = false) {
-        guard !isRefreshing else { return }
-        isRefreshing = true
+        guard !isRefreshing else {
+            if showLoading {
+                showEphemeralLoading(tr("正在更新用量...", "Updating usage..."), duration: 0.55)
+            }
+            return
+        }
+        withAnimation(.easeOut(duration: 0.10)) {
+            isRefreshing = true
+        }
         if replayQuota {
             startResetScramble()
             withAnimation(.easeOut(duration: 0.18)) {
@@ -4606,6 +4795,7 @@ struct AccountsRootView: View {
                         reset: cachedProfile.reset
                     )
                 }
+                let preservePreviousUsage = shouldPreservePreviousUsage(previous)
                 return CodexProfile(
                     id: cachedProfile.id,
                     displayName: cachedProfile.displayName,
@@ -4613,8 +4803,8 @@ struct AccountsRootView: View {
                     authStatus: mergedAuthStatus(previous: previous.authStatus, current: cachedProfile.authStatus),
                     authMode: cachedProfile.authMode == "unknown" || cachedProfile.authMode == "checking" ? previous.authMode : cachedProfile.authMode,
                     lastRefresh: previous.lastRefresh,
-                    quota: previous.quota == "unknown" ? cachedProfile.quota : previous.quota,
-                    reset: previous.reset == "unknown" ? cachedProfile.reset : previous.reset
+                    quota: preservePreviousUsage ? previous.quota : cachedProfile.quota,
+                    reset: preservePreviousUsage ? previous.reset : cachedProfile.reset
                 )
             }
             statusText = tr("\(profiles.count) 個 profile 就緒", "\(profiles.count) profiles ready")
@@ -4680,21 +4870,44 @@ struct AccountsRootView: View {
     }
 
     private func replayQuotaMeters() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            startResetReturnFill()
+        }
+    }
+
+    private func startResetReturnFill() {
+        resetScrambleRunID += 1
+        let runID = resetScrambleRunID
+        resetScrambleActive = true
+        resetScrambleReturning = true
+        resetScrambleSeed = 0
+
+        for index in 0...10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.046) {
+                guard resetScrambleRunID == runID else { return }
+                resetScrambleSeed = index
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.56) {
+            guard resetScrambleRunID == runID else { return }
             withAnimation(.spring(response: 0.62, dampingFraction: 0.70)) {
                 quotaReplayActive = false
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
-                resetScrambleActive = false
-            }
+            resetScrambleActive = false
+            resetScrambleReturning = false
         }
     }
 
     private func startResetScramble() {
+        resetScrambleRunID += 1
+        let runID = resetScrambleRunID
         resetScrambleActive = true
+        resetScrambleReturning = false
         resetScrambleSeed = 0
         for index in 0...10 {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.055) {
+                guard resetScrambleRunID == runID else { return }
                 resetScrambleSeed = index
             }
         }
@@ -4724,6 +4937,7 @@ struct AccountsRootView: View {
             let previous = previousByID[profile.id]
 
             if profile.authStatus == "unknown", let previous {
+                let preservePreviousUsage = shouldPreservePreviousUsage(previous)
                 return CodexProfile(
                     id: profile.id,
                     displayName: profile.displayName,
@@ -4731,12 +4945,12 @@ struct AccountsRootView: View {
                     authStatus: mergedAuthStatus(previous: previous.authStatus, current: profile.authStatus),
                     authMode: previous.authMode,
                     lastRefresh: previous.lastRefresh,
-                    quota: previous.quota,
-                    reset: previous.reset
+                    quota: preservePreviousUsage ? previous.quota : profile.quota,
+                    reset: preservePreviousUsage ? previous.reset : profile.reset
                 )
             }
 
-            if profile.quota == "unknown", let previous, previous.quota != "unknown" {
+            if profile.quota == "unknown", let previous, shouldPreservePreviousUsage(previous) {
                 return CodexProfile(
                     id: profile.id,
                     displayName: profile.displayName,
