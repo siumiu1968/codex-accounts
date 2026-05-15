@@ -562,7 +562,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.4"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.5"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -1273,6 +1273,108 @@ stop_codex_servers_for_home() {
   stop_pids "Closing stale Codex app-server(s) for this profile" "${pids[@]}"
 }
 
+process_args_match_app_data_snapshot() {
+  local args="$1"
+  local app_data="$2"
+  args_has_user_data_dir "$args" "$app_data"
+}
+
+close_all_accounts_fast() {
+  local process_snapshot
+  process_snapshot="$(mktemp)"
+  ps axww -o pid= -o ppid= -o args= > "$process_snapshot"
+
+  local -A parent_by_pid args_by_pid active_ancestor close_window_seen close_server_seen
+  local line pid ppid args
+  while read -r pid ppid args; do
+    [[ -n "${pid:-}" && -n "${ppid:-}" && -n "${args:-}" ]] || continue
+    parent_by_pid[$pid]="$ppid"
+    args_by_pid[$pid]="$args"
+  done < "$process_snapshot"
+
+  for pid in "${(@k)args_by_pid}"; do
+    args="${args_by_pid[$pid]}"
+    if [[ "$args" == *"codex app-server --listen stdio://"* \
+          || "$args" == *"app-server proxy"* \
+          || "$args" == *"node_repl"* \
+          || "$args" == *"SkyComputerUseClient"* ]]; then
+      local current="$pid"
+      local hops=0
+      while [[ -n "$current" && "$current" != "0" && "$current" != "1" && $hops -lt 80 ]]; do
+        active_ancestor[$current]=1
+        current="${parent_by_pid[$current]:-}"
+        hops=$((hops + 1))
+      done
+    fi
+  done
+
+  local -a close_window_pids kept_window_pids close_server_pids kept_server_pids managed_homes
+  local previous_skip_active="${CODEX_SKIP_ACTIVE_AGENT_WINDOWS:-0}"
+  CODEX_SKIP_ACTIVE_AGENT_WINDOWS=1
+
+  while IFS='|' read -r raw_name _; do
+    local name
+    name="$(echo "$raw_name" | xargs)"
+    [[ -n "$name" ]] || continue
+    if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
+      echo "Keeping primary Codex window open: $name"
+      continue
+    fi
+
+    local home_dir app_data
+    home_dir="$(account_home_for "$name")"
+    app_data="$(account_app_data_for "$name")"
+    managed_homes+=("$home_dir")
+
+    for pid in "${(@k)args_by_pid}"; do
+      args="${args_by_pid[$pid]}"
+      [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* ]] || continue
+      process_args_match_app_data_snapshot "$args" "$app_data" || continue
+      if [[ -n "${active_ancestor[$pid]:-}" ]]; then
+        kept_window_pids+=("$pid")
+      elif [[ -z "${close_window_seen[$pid]:-}" ]]; then
+        close_window_seen[$pid]=1
+        close_window_pids+=("$pid")
+      fi
+    done
+  done < <(list_accounts)
+
+  local candidate_env
+  for pid in "${(@k)args_by_pid}"; do
+    args="${args_by_pid[$pid]}"
+    [[ "$args" == *"codex app-server"* ]] || continue
+    [[ "$args" == *"--listen stdio://"* ]] && continue
+    [[ "$args" == *"app-server proxy"* ]] && continue
+    candidate_env="$(ps eww -p "$pid" 2>/dev/null || true)"
+    for home_dir in "${managed_homes[@]}"; do
+      if [[ "$args" == *"--codex-home $home_dir"* \
+            || "$args" == *"--codex-home=$home_dir"* \
+            || "$candidate_env" == *"CODEX_HOME=$home_dir"* ]]; then
+        if [[ -n "${active_ancestor[$pid]:-}" ]]; then
+          kept_server_pids+=("$pid")
+        elif [[ -z "${close_server_seen[$pid]:-}" ]]; then
+          close_server_seen[$pid]=1
+          close_server_pids+=("$pid")
+        fi
+        break
+      fi
+    done
+  done
+
+  if (( ${#kept_window_pids[@]} > 0 )); then
+    echo "Keeping active Codex window(s): ${kept_window_pids[*]}"
+  fi
+  if (( ${#kept_server_pids[@]} > 0 )); then
+    echo "Keeping active Codex app-server(s): ${kept_server_pids[*]}"
+  fi
+
+  stop_pids "Closing existing Codex window(s) for managed profiles" "${close_window_pids[@]}"
+  stop_pids "Closing stale Codex app-server(s) for managed profiles" "${close_server_pids[@]}"
+
+  CODEX_SKIP_ACTIVE_AGENT_WINDOWS="$previous_skip_active"
+  rm -f "$process_snapshot"
+}
+
 launch_account() {
   local name="${1:-}" display_name="${2:-}"
   if [[ -z "$name" ]]; then
@@ -1346,25 +1448,7 @@ close_all_accounts() {
   ensure_dirs
 
   echo "Closing all Codex profile window(s)..."
-  local previous_skip_active="${CODEX_SKIP_ACTIVE_AGENT_WINDOWS:-0}"
-  CODEX_SKIP_ACTIVE_AGENT_WINDOWS=1
-  list_accounts | while IFS='|' read -r raw_name _; do
-    local name
-    name="$(echo "$raw_name" | xargs)"
-    [[ -n "$name" ]] || continue
-    if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
-      echo "Keeping primary Codex window open: $name"
-      continue
-    fi
-
-    local home_dir app_data
-    home_dir="$(account_home_for "$name")"
-    app_data="$(account_app_data_for "$name")"
-    stop_codex_windows_for_app_data "$app_data"
-    stop_codex_servers_for_home "$home_dir"
-  done
-  CODEX_SKIP_ACTIVE_AGENT_WINDOWS="$previous_skip_active"
-
+  close_all_accounts_fast
   echo "Closed all matching Codex profile window(s)."
 }
 
