@@ -562,7 +562,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.5"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.6"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 

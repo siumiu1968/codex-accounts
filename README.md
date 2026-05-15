@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.3.6 更新介紹
+
+V2.3.6 修復自動刷新唔會準確更新 quota 嘅問題。自動刷新而家會定時做低負荷 live quota refresh，效果等同背景撳 Reload，但唔會播 loading pill 或 quota 數字倒數動畫；背景查詢改用單一並行度串行跑，避免短時間開太多 Codex app-server 或令 Mac 負荷升高。
+
 ### V2.3.5 更新介紹
 
 V2.3.5 令右上角「關閉全部 Codex 視窗」反應快好多。底層 script 由逐個 profile 重複掃 `ps/pgrep`，改成一次 process snapshot 就計晒所有要關同要保留嘅 Codex 視窗；仍然會跳過 primary/default Codex，同埋保留有 active agent/app-server 工作嘅視窗，避免關到正在工作的對話。
@@ -80,7 +84,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.3.5 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.3.6 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -145,6 +149,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
+### V2.3.6 更新介绍
+
+V2.3.6 修复自动刷新不会准确更新 quota 的问题。自动刷新现在会定时做低负荷 live quota refresh，效果等同后台点击 Reload，但不会播放 loading pill 或 quota 数字倒数动画；后台查询改用单一并行度串行运行，避免短时间打开太多 Codex app-server 或让 Mac 负荷升高。
+
 ### V2.3.5 更新介绍
 
 V2.3.5 让右上角“关闭全部 Codex 窗口”反应快很多。底层 script 从逐个 profile 重复扫描 `ps/pgrep`，改成一次 process snapshot 就算出所有要关闭和要保留的 Codex 窗口；仍然会跳过 primary/default Codex，并保留有 active agent/app-server 工作的窗口，避免关掉正在工作的对话。
@@ -203,7 +211,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.3.5 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.3.6 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -268,6 +276,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
+### V2.3.6 Update
+
+V2.3.6 fixes automatic refresh not reliably updating quota. Auto refresh now performs a low-load live quota refresh on a schedule, equivalent to pressing Reload in the background, but without the loading pill or quota countdown animation. The background quota query runs with single-profile parallelism to avoid spawning too many Codex app-server processes or raising Mac load.
+
 ### V2.3.5 Update
 
 V2.3.5 makes the top-right Close All Codex Windows action much more responsive. The script now takes one process snapshot and computes all closable/kept Codex windows in one pass instead of repeatedly scanning `ps/pgrep` for every profile. It still skips primary/default Codex and keeps windows with active agent/app-server work so running conversations are not interrupted.
@@ -326,7 +338,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.3.5, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.3.6, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

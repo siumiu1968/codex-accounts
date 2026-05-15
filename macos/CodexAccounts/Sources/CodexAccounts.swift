@@ -1626,6 +1626,7 @@ struct AccountsRootView: View {
     @State private var activeQuotaPoolProfileID: String?
     @State private var quotaPoolFailoverInProgress = false
     @State private var runAutoRefreshOnNextTick = true
+    @State private var lastAutoQuotaRefreshAt = Date.distantPast
     @State private var showLanguageMenu = false
     @State private var languageTransitionActive = false
     @State private var languagePulse = false
@@ -1643,6 +1644,7 @@ struct AccountsRootView: View {
     @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+    private let autoQuotaLiveRefreshInterval: TimeInterval = 120
 
     var body: some View {
         ZStack {
@@ -2149,18 +2151,33 @@ struct AccountsRootView: View {
 
         if autoRefresh && autoSync {
             if runAutoRefreshOnNextTick {
-                refreshProfiles(showLoading: false)
+                refreshProfilesForAutoQuota()
             } else {
                 syncMemories(silent: true)
             }
             runAutoRefreshOnNextTick.toggle()
         } else if autoRefresh {
-            refreshProfiles(showLoading: false)
+            refreshProfilesForAutoQuota()
             runAutoRefreshOnNextTick = false
         } else if autoSync {
             syncMemories(silent: true)
             runAutoRefreshOnNextTick = true
         }
+    }
+
+    private func refreshProfilesForAutoQuota() {
+        let shouldUseLiveQuota = Date().timeIntervalSince(lastAutoQuotaRefreshAt) >= autoQuotaLiveRefreshInterval
+        if shouldUseLiveQuota {
+            lastAutoQuotaRefreshAt = Date()
+        }
+
+        refreshProfiles(
+            showLoading: false,
+            replayQuota: false,
+            liveUsage: shouldUseLiveQuota,
+            liveParallelism: shouldUseLiveQuota ? 1 : 8,
+            statusTimeout: shouldUseLiveQuota ? 150 : 18
+        )
     }
 
     private var loadingDisplayMessage: String {
@@ -4811,7 +4828,13 @@ struct AccountsRootView: View {
         return "127.0.0.1"
     }
 
-    private func refreshProfiles(showLoading: Bool = true, replayQuota: Bool = false, liveUsage: Bool = false) {
+    private func refreshProfiles(
+        showLoading: Bool = true,
+        replayQuota: Bool = false,
+        liveUsage: Bool = false,
+        liveParallelism: Int? = nil,
+        statusTimeout: TimeInterval? = nil
+    ) {
         guard !isRefreshing else {
             if showLoading {
                 showEphemeralLoading(tr("正在更新用量...", "Updating usage..."), duration: 0.55)
@@ -4878,7 +4901,9 @@ struct AccountsRootView: View {
                 displayNamesSnapshot: displayNamesSnapshot,
                 showLoading: showLoading && hadProfiles,
                 replayQuota: replayQuota,
-                liveUsage: liveUsage
+                liveUsage: liveUsage,
+                liveParallelism: liveParallelism,
+                statusTimeout: statusTimeout
             )
         }
     }
@@ -4888,16 +4913,20 @@ struct AccountsRootView: View {
         displayNamesSnapshot: [String: String],
         showLoading: Bool,
         replayQuota: Bool,
-        liveUsage: Bool
+        liveUsage: Bool,
+        liveParallelism: Int?,
+        statusTimeout: TimeInterval?
     ) {
         let loading = showLoading ? tr("更新用量...", "Updating usage...") : nil
         let previousProfiles = profiles
 
         runBackground(loading) {
             var environment = ProcessInfo.processInfo.environment
+            let resolvedParallelism = max(1, liveParallelism ?? (liveUsage ? 2 : 8))
+            let resolvedTimeout = statusTimeout ?? (liveUsage ? (resolvedParallelism <= 1 ? 150 : 70) : 18)
             environment["CODEX_USAGE_LIVE_LOOKUP"] = liveUsage ? "1" : "0"
-            environment["STATUS_PARALLELISM"] = liveUsage ? "2" : "8"
-            let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: liveUsage ? 70 : 18, environment: environment)
+            environment["STATUS_PARALLELISM"] = "\(resolvedParallelism)"
+            let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: resolvedTimeout, environment: environment)
             let profiles = parsedCodexProfiles(
                 accountsOutput: accountsOutput,
                 statusOutput: statusResult.0 == 0 ? statusResult.1 : "",
