@@ -5594,7 +5594,9 @@ private final class UpdateController: ObservableObject {
             .appendingPathComponent("codex-accounts-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: helperDirectory, withIntermediateDirectories: true)
         let helperURL = helperDirectory.appendingPathComponent("install-update.zsh")
-        let targetPath = "/Applications/Codex Accounts.app"
+        let targetPath = Bundle.main.bundleURL.path.hasSuffix(".app")
+            ? Bundle.main.bundleURL.path
+            : "/Applications/Codex Accounts.app"
         let pid = ProcessInfo.processInfo.processIdentifier
         let script = """
         #!/usr/bin/env zsh
@@ -5602,6 +5604,14 @@ private final class UpdateController: ObservableObject {
         ZIP_PATH="$1"
         TARGET_PATH="$2"
         APP_PID="$3"
+        LOG_DIR="$HOME/Library/Logs/Codex Accounts"
+        /bin/mkdir -p "$LOG_DIR"
+        LOG_FILE="$LOG_DIR/update-install.log"
+        exec >> "$LOG_FILE" 2>&1
+        echo "---- $(/bin/date '+%Y-%m-%d %H:%M:%S') installing update ----"
+        echo "zip=$ZIP_PATH"
+        echo "target=$TARGET_PATH"
+        echo "waiting for pid=$APP_PID"
         WORK_DIR="$(/usr/bin/mktemp -d /tmp/codex-accounts-install.XXXXXX)"
         cleanup() { /bin/rm -rf "$WORK_DIR"; }
         trap cleanup EXIT
@@ -5614,9 +5624,28 @@ private final class UpdateController: ObservableObject {
           SOURCE_PATH="$(/usr/bin/find "$WORK_DIR" -maxdepth 3 -name 'Codex Accounts.app' -type d | /usr/bin/head -n 1)"
         fi
         if [[ -z "$SOURCE_PATH" || ! -d "$SOURCE_PATH" ]]; then
+          echo "Codex Accounts.app not found in update archive"
           exit 12
         fi
-        /usr/bin/ditto "$SOURCE_PATH" "$TARGET_PATH"
+        SOURCE_VERSION="$(/usr/bin/defaults read "$SOURCE_PATH/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)"
+        echo "source=$SOURCE_PATH"
+        echo "source_version=$SOURCE_VERSION"
+        BACKUP_PATH="${TARGET_PATH}.previous-update"
+        /bin/rm -rf "$BACKUP_PATH"
+        if [[ -d "$TARGET_PATH" ]]; then
+          /bin/mv "$TARGET_PATH" "$BACKUP_PATH"
+        fi
+        if ! /usr/bin/ditto "$SOURCE_PATH" "$TARGET_PATH"; then
+          echo "ditto failed; restoring backup"
+          /bin/rm -rf "$TARGET_PATH"
+          if [[ -d "$BACKUP_PATH" ]]; then
+            /bin/mv "$BACKUP_PATH" "$TARGET_PATH"
+          fi
+          exit 13
+        fi
+        /bin/rm -rf "$BACKUP_PATH"
+        INSTALLED_VERSION="$(/usr/bin/defaults read "$TARGET_PATH/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)"
+        echo "installed_version=$INSTALLED_VERSION"
         /usr/bin/open "$TARGET_PATH"
         """
         try script.write(to: helperURL, atomically: true, encoding: .utf8)
@@ -5625,8 +5654,10 @@ private final class UpdateController: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = [helperURL.path, zipURL.path, targetPath, "\(pid)"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        if let nullOutput = FileHandle(forWritingAtPath: "/dev/null") {
+            process.standardOutput = nullOutput
+            process.standardError = nullOutput
+        }
         try process.run()
     }
 

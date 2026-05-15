@@ -528,7 +528,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.3"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -987,23 +987,20 @@ launch_account2() {
   launch_account "account2"
 }
 
-stop_codex_windows_for_app_data() {
-  local app_data="$1"
-  local pids=()
-  local pid args
-
-  while read -r pid args; do
-    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
-    [[ "$args" == *"$CODEX_APP/Contents/MacOS/Codex"* ]] || continue
-    [[ "$args" == *"--user-data-dir=$app_data"* ]] || continue
-    pids+=("$pid")
-  done < <(ps axww -o pid= -o args=)
+stop_pids() {
+  local label="$1"
+  shift || true
+  local pids=("$@")
 
   if (( ${#pids[@]} == 0 )); then
     return 0
   fi
 
-  echo "Closing existing Codex window(s) for this profile: ${pids[*]}"
+  echo "$label: ${pids[*]}"
+  if [[ "${CODEX_CLOSE_DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
+
   kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
   sleep 1
 
@@ -1014,10 +1011,36 @@ stop_codex_windows_for_app_data() {
   done
 }
 
+stop_codex_windows_for_app_data() {
+  local app_data="$1"
+  local pids=()
+  local pid args
+
+  while read -r pid args; do
+    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
+    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* ]] || continue
+    if args_has_user_data_dir "$args" "$app_data"; then
+      pids+=("$pid")
+      continue
+    fi
+    if [[ "$app_data" == "$HOME/Library/Application Support/Codex" && "$args" != *"--user-data-dir="* ]]; then
+      pids+=("$pid")
+    fi
+  done < <(ps axww -o pid= -o args=)
+
+  stop_pids "Closing existing Codex window(s) for this profile" "${pids[@]}"
+}
+
 process_env_contains() {
   local pid="$1"
   local needle="$2"
-  ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -Fq "$needle"
+  ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -Fxq "$needle"
+}
+
+args_has_user_data_dir() {
+  local args="$1"
+  local app_data="$2"
+  [[ "$args" == *"--user-data-dir=$app_data" || "$args" == *"--user-data-dir=$app_data --"* ]]
 }
 
 stop_codex_servers_for_home() {
@@ -1028,24 +1051,14 @@ stop_codex_servers_for_home() {
   while read -r pid args; do
     [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
     [[ "$args" == *"codex app-server"* ]] || continue
+    [[ "$args" == *"--listen stdio://"* ]] && continue
+    [[ "$args" == *"app-server proxy"* ]] && continue
     if [[ "$args" == *"--codex-home $home_dir"* || "$args" == *"--codex-home=$home_dir"* ]] || process_env_contains "$pid" "CODEX_HOME=$home_dir"; then
       pids+=("$pid")
     fi
   done < <(ps axww -o pid= -o args=)
 
-  if (( ${#pids[@]} == 0 )); then
-    return 0
-  fi
-
-  echo "Closing stale Codex app-server(s) for this profile: ${pids[*]}"
-  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
-  sleep 1
-
-  for pid in "${pids[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill -KILL "$pid" >/dev/null 2>&1 || true
-    fi
-  done
+  stop_pids "Closing stale Codex app-server(s) for this profile" "${pids[@]}"
 }
 
 launch_account() {
