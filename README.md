@@ -22,9 +22,13 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.3.4 更新介紹
+
+V2.3.4 修復多 profile 用耐之後出現紅色 timeout、模型設定更新失敗、記憶同步似乎消失嘅問題。打開 profile 前仍然會同步記憶，但同步策略改為「全部 profile 記憶 + 目標 profile payload」：`AGENTS.md`、`memories/`、`rules/` 和外掛啟用設定會掃晒全部 profile，`plugins/`、`skills/`、`vendor_imports/` 只補 primary 同即將打開嘅 profile，並跳過 `plugin-backup-*` / `plugin-install-*` 垃圾目錄。自動刷新亦改為快取優先，手動 reload 先查 live quota，避免背景開大量 app-server。
+
 ### V2.3.3 更新介紹
 
-V2.3.3 修復兩個阻塞問題：更新通道依家會寫入安裝 log、先備份舊 app 再替換，失敗會自動還原，亦會更新目前實際執行緊嘅 `Codex Accounts.app`。右上角「關閉全部 Codex 視窗」亦修正咗 primary Codex 無 `--user-data-dir` 時漏關嘅問題，同時避開 `--listen stdio://` / proxy 呢類背景 agent server，減少誤關工作中對話。
+V2.3.3 修復兩個阻塞問題：更新通道依家會寫入安裝 log、先備份舊 app 再替換，失敗會自動還原，亦會更新目前實際執行緊嘅 `Codex Accounts.app`。右上角「關閉全部 Codex 視窗」會跳過 primary/default Codex，只關 Codex Accounts 管理嘅 profile，同時避開 `--listen stdio://` / proxy 呢類背景 agent server，減少誤關工作中對話。
 
 ### V2.3.2 更新介紹
 
@@ -42,7 +46,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
 - 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
-- 打開 profile 前先同步：先同步本機記憶，再共享本機對話紀錄，之後才打開該帳戶視窗。
+- 打開 profile 前先同步：先同步本機記憶、rules、AGENTS 同外掛設定，之後才打開該帳戶視窗。
 - 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間，並支援快速 reload 動畫。
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
 - 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
@@ -72,7 +76,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.3.3 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.3.4 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -137,9 +141,13 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
+### V2.3.4 更新介绍
+
+V2.3.4 修复多 profile 用久之后出现红色 timeout、模型设置更新失败、记忆同步看似消失的问题。打开 profile 前仍然会同步记忆，但同步策略改为“全部 profile 记忆 + 目标 profile payload”：`AGENTS.md`、`memories/`、`rules/` 和插件启用设置会扫描所有 profile，`plugins/`、`skills/`、`vendor_imports/` 只补 primary 和即将打开的 profile，并跳过 `plugin-backup-*` / `plugin-install-*` 垃圾目录。自动刷新也改为快取优先，手动 reload 才查 live quota，避免后台打开大量 app-server。
+
 ### V2.3.3 更新介绍
 
-V2.3.3 修复两个阻塞问题：更新通道现在会写入安装 log、先备份旧 app 再替换，失败会自动还原，也会更新当前实际运行的 `Codex Accounts.app`。右上角“关闭全部 Codex 窗口”也修正了 primary Codex 没有 `--user-data-dir` 时漏关的问题，同时避开 `--listen stdio://` / proxy 这类后台 agent server，减少误关工作中的对话。
+V2.3.3 修复两个阻塞问题：更新通道现在会写入安装 log、先备份旧 app 再替换，失败会自动还原，也会更新当前实际运行的 `Codex Accounts.app`。右上角“关闭全部 Codex 窗口”会跳过 primary/default Codex，只关闭 Codex Accounts 管理的 profile，同时避开 `--listen stdio://` / proxy 这类后台 agent server，减少误关工作中的对话。
 
 ### V2.3.2 更新介绍
 
@@ -157,7 +165,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
 - 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
-- 打开 profile 前先同步：先同步本地记忆，再共享本地对话记录，然后才打开该账号窗口。
+- 打开 profile 前先同步：先同步本地记忆、rules、AGENTS 和插件设置，然后才打开该账号窗口。
 - 用量显示：显示 5H / 1W 额度、百分比和恢复时间，并支持快速 reload 动画。
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
 - 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
@@ -187,7 +195,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.3.3 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.3.4 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -252,9 +260,13 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
+### V2.3.4 Update
+
+V2.3.4 fixes red timeout toasts, model-setting update failures, and memory sync that could appear to disappear after long multi-profile use. Opening a profile still syncs memory first, but the sync now uses "all-profile memory + target-profile payloads": `AGENTS.md`, `memories/`, `rules/`, and enabled plugin settings are scanned across every profile, while `plugins/`, `skills/`, and `vendor_imports/` are refreshed only for the primary profile and the profile being opened. `plugin-backup-*` and `plugin-install-*` folders are skipped. Automatic refresh is cache-first; live quota checks only run on manual reload, preventing background app-server pileups.
+
 ### V2.3.3 Update
 
-V2.3.3 fixes two blocking issues. The update channel now writes an install log, backs up the old app before replacement, restores it on failure, and updates the exact `Codex Accounts.app` bundle that is currently running. The top-right Close All Codex Windows action also now closes the primary Codex window when it has no `--user-data-dir`, while avoiding `--listen stdio://` and proxy agent servers so active agent conversations are less likely to be interrupted.
+V2.3.3 fixes two blocking issues. The update channel now writes an install log, backs up the old app before replacement, restores it on failure, and updates the exact `Codex Accounts.app` bundle that is currently running. The top-right Close All Codex Windows action skips primary/default Codex and only closes profiles managed by Codex Accounts, while avoiding `--listen stdio://` and proxy agent servers so active agent conversations are less likely to be interrupted.
 
 ### V2.3.2 Update
 
@@ -272,7 +284,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
 - Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
-- Sync before opening: when opening a profile, the app syncs local memory and shares local chat history first, then opens the account window.
+- Sync before opening: when opening a profile, the app syncs local memory, rules, AGENTS, and plugin settings first, then opens the account window.
 - Usage meters: show 5H / 1W quota, percentage, and reset time with a fast reload animation.
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
 - Optional local history sharing across profiles.
@@ -302,7 +314,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.3.3, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.3.4, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

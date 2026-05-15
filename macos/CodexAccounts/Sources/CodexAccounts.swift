@@ -701,12 +701,18 @@ private struct LiquidSwitchStyle: ToggleStyle {
     }
 }
 
-private func runCodexScript(_ scriptPath: String, _ arguments: [String], wait: Bool = false, timeout: TimeInterval = 90) -> (Int32, String) {
+private func runCodexScript(
+    _ scriptPath: String,
+    _ arguments: [String],
+    wait: Bool = false,
+    timeout: TimeInterval = 90,
+    environment: [String: String]? = nil
+) -> (Int32, String) {
     let processArguments = [scriptPath] + arguments
     if wait {
-        return runProcess(executable: "/bin/zsh", arguments: processArguments, timeout: timeout)
+        return runProcess(executable: "/bin/zsh", arguments: processArguments, environment: environment, timeout: timeout)
     }
-    return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments)
+    return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments, environment: environment)
 }
 
 private func parsedCodexProfiles(
@@ -3343,7 +3349,7 @@ struct AccountsRootView: View {
             }
 
             glassIconButton(systemName: "arrow.clockwise", label: tr("重新整理", "Refresh"), compact: compact, accent: Color(red: 0.24, green: 0.95, blue: 0.78), isBusy: isRefreshing) {
-                refreshProfiles(showLoading: true, replayQuota: true)
+                refreshProfiles(showLoading: true, replayQuota: true, liveUsage: true)
             }
 
             glassIconButton(systemName: "folder", label: tr("Profile 資料夾", "Profiles Folder"), compact: compact, accent: Color(red: 1.00, green: 0.74, blue: 0.26)) {
@@ -4805,7 +4811,7 @@ struct AccountsRootView: View {
         return "127.0.0.1"
     }
 
-    private func refreshProfiles(showLoading: Bool = true, replayQuota: Bool = false) {
+    private func refreshProfiles(showLoading: Bool = true, replayQuota: Bool = false, liveUsage: Bool = false) {
         guard !isRefreshing else {
             if showLoading {
                 showEphemeralLoading(tr("正在更新用量...", "Updating usage..."), duration: 0.55)
@@ -4871,7 +4877,8 @@ struct AccountsRootView: View {
                 accountsOutput: result.1,
                 displayNamesSnapshot: displayNamesSnapshot,
                 showLoading: showLoading && hadProfiles,
-                replayQuota: replayQuota
+                replayQuota: replayQuota,
+                liveUsage: liveUsage
             )
         }
     }
@@ -4880,13 +4887,17 @@ struct AccountsRootView: View {
         accountsOutput: String,
         displayNamesSnapshot: [String: String],
         showLoading: Bool,
-        replayQuota: Bool
+        replayQuota: Bool,
+        liveUsage: Bool
     ) {
         let loading = showLoading ? tr("更新用量...", "Updating usage...") : nil
         let previousProfiles = profiles
 
         runBackground(loading) {
-            let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: 55)
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_USAGE_LIVE_LOOKUP"] = liveUsage ? "1" : "0"
+            environment["STATUS_PARALLELISM"] = liveUsage ? "2" : "8"
+            let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: liveUsage ? 70 : 18, environment: environment)
             let profiles = parsedCodexProfiles(
                 accountsOutput: accountsOutput,
                 statusOutput: statusResult.0 == 0 ? statusResult.1 : "",
@@ -5174,14 +5185,12 @@ struct AccountsRootView: View {
         let busyIDs = Set([requestedID, targetProfileID])
         startUsageSession()
         busyIDs.forEach { setProfileBusy($0, true) }
-        let loadingText = tr("正在同步對話紀錄，再打開 \(targetName)...", "Syncing chat history, then opening \(targetName)...")
+        let loadingText = tr("正在同步記憶，再打開 \(targetName)...", "Syncing memory, then opening \(targetName)...")
         runBackground(loadingText) {
-            _ = runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: 15)
-            _ = runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 35)
             if route?.didSwitch == true {
                 _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 25)
             }
-            return runCodexScript(scriptPath, arguments, wait: true, timeout: 45)
+            return runCodexScript(scriptPath, arguments, wait: true, timeout: 65)
         } completion: { result in
             let releaseDelay: TimeInterval = result.0 == 0 ? 1.45 : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + releaseDelay) {

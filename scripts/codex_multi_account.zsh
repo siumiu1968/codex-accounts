@@ -24,6 +24,11 @@ TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS="${TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS:-
 TOKEN_REFRESH_TIMEOUT_SECONDS="${TOKEN_REFRESH_TIMEOUT_SECONDS:-6}"
 APP_SERVER_USAGE_TIMEOUT_SECONDS="${APP_SERVER_USAGE_TIMEOUT_SECONDS:-4}"
 CODEX_SYNC_PLUGIN_PAYLOADS="${CODEX_SYNC_PLUGIN_PAYLOADS:-0}"
+CODEX_FAST_SYNC_PLUGIN_PAYLOADS="${CODEX_FAST_SYNC_PLUGIN_PAYLOADS:-1}"
+CODEX_PRELAUNCH_SYNC="${CODEX_PRELAUNCH_SYNC:-1}"
+CODEX_USAGE_LIVE_LOOKUP="${CODEX_USAGE_LIVE_LOOKUP:-0}"
+USAGE_CACHE_STALE_SECONDS="${USAGE_CACHE_STALE_SECONDS:-86400}"
+SYNC_LOCK_DIR="${SYNC_LOCK_DIR:-$APP_DATA_ROOT/.sync.lock}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
@@ -43,6 +48,7 @@ Usage:
   scripts/codex_multi_account.zsh init
   scripts/codex_multi_account.zsh launch-account2
   scripts/codex_multi_account.zsh sync-once
+  scripts/codex_multi_account.zsh sync-account <account-name>
   scripts/codex_multi_account.zsh sync-loop
   scripts/codex_multi_account.zsh init-account <account-name>
   scripts/codex_multi_account.zsh launch-account <account-name> [display-name]
@@ -72,8 +78,10 @@ Environment overrides:
 Notes:
   - Login separately inside the second Codex window.
   - This syncs local shared state: AGENTS.md, memories/, rules/,
-    and enabled plugin config entries. Set CODEX_SYNC_PLUGIN_PAYLOADS=1
-    to also copy heavy plugins/, skills/, and vendor_imports/ payloads.
+    enabled plugin config entries, skills/, vendor_imports/, and current
+    plugin payloads. It skips plugin backup/install folders so pre-open
+    sync stays fast. Set CODEX_SYNC_PLUGIN_PAYLOADS=1 to copy every
+    plugins/, skills/, and vendor_imports/ payload.
   - Plugin enablement is merged across accounts from config.toml
     [plugins."..."] sections without copying the full config file.
   - link-account2-history is experimental: it makes Account 2 use Account 1's
@@ -95,6 +103,32 @@ require_rsync() {
 
 ensure_dirs() {
   mkdir -p "$PRIMARY_CODEX_HOME" "$SECOND_CODEX_HOME" "$SECOND_APP_DATA" "$ACCOUNTS_ROOT" "$APP_DATA_ROOT" "$SHARED_MEMORY_DIR" "$USAGE_CACHE_ROOT"
+}
+
+with_sync_lock() {
+  local waited=0
+  while ! mkdir "$SYNC_LOCK_DIR" 2>/dev/null; do
+    local lock_mtime now lock_age
+    lock_mtime="$(stat -f '%m' "$SYNC_LOCK_DIR" 2>/dev/null || echo 0)"
+    now="$(date '+%s')"
+    lock_age=$(( now - lock_mtime ))
+    if (( lock_age > 60 )); then
+      rmdir "$SYNC_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    if (( waited >= 20 )); then
+      echo "Sync is already running; continuing with existing synced state." >&2
+      return 0
+    fi
+    sleep 0.25
+    waited=$(( waited + 1 ))
+  done
+  trap 'rmdir "$SYNC_LOCK_DIR" 2>/dev/null || true' EXIT
+  "$@"
+  local command_status=$?
+  rmdir "$SYNC_LOCK_DIR" 2>/dev/null || true
+  trap - EXIT
+  return "$command_status"
 }
 
 sanitize_account_name() {
@@ -528,7 +562,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.3"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.4"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -592,7 +626,11 @@ fetch_usage_summary_for() {
   local cache_file
   cache_file="$(usage_cache_file_for "$name")"
 
-  if read_cached_usage "$cache_file"; then
+  if read_cached_usage_if_still_current "$cache_file" "$USAGE_CACHE_SECONDS"; then
+    return 0
+  fi
+  if [[ "$CODEX_USAGE_LIVE_LOOKUP" != "1" ]]; then
+    read_cached_usage_if_still_current "$cache_file" "$USAGE_CACHE_STALE_SECONDS" 2>/dev/null || return 1
     return 0
   fi
 
@@ -913,6 +951,7 @@ rsync_shared_payload_direct() {
     rsync -a --update \
       --exclude '.DS_Store' \
       --exclude 'plugin-install-*' \
+      --exclude 'plugin-backup-*' \
       "$src/" "$dst/"
   else
     mkdir -p "$(dirname "$dst")"
@@ -942,18 +981,64 @@ sync_plugin_payloads_direct() {
   done
 }
 
-sync_once() {
-  require_rsync
-  ensure_dirs
+rsync_fast_plugin_payload_direct() {
+  local source_home="$1"
+  local target_home="$2"
+  local item="$3"
+  local src="$source_home/$item"
+  local dst="$target_home/$item"
 
-  local homes=()
+  [[ "$source_home" != "$target_home" ]] || return 0
+  [[ -e "$src" ]] || return 0
+
+  if [[ -d "$src" ]]; then
+    mkdir -p "$dst"
+    rsync -a --update \
+      --exclude '.DS_Store' \
+      --exclude 'plugin-install-*' \
+      --exclude 'plugin-backup-*' \
+      "$src/" "$dst/"
+  else
+    mkdir -p "$(dirname "$dst")"
+    rsync -a --update "$src" "$dst"
+  fi
+}
+
+sync_fast_plugin_payloads_direct() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+
+  local hub_home item home_dir
+  local -a fast_items
+  hub_home="$PRIMARY_CODEX_HOME"
+  if [[ ! -d "$hub_home" ]]; then
+    hub_home="${homes[1]}"
+  fi
+  [[ -n "$hub_home" ]] || return 0
+
+  fast_items=(
+    "skills"
+    "vendor_imports"
+    "plugins"
+  )
+
+  for item in "${fast_items[@]}"; do
+    for home_dir in "${homes[@]}"; do
+      rsync_fast_plugin_payload_direct "$home_dir" "$hub_home" "$item"
+    done
+    for home_dir in "${homes[@]}"; do
+      rsync_fast_plugin_payload_direct "$hub_home" "$home_dir" "$item"
+    done
+  done
+}
+
+sync_memory_and_config_for_homes() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+
   local home_dir
-  while IFS='|' read -r _ raw_home _; do
-    home_dir="$(echo "$raw_home" | xargs)"
-    [[ -n "$home_dir" ]] || continue
-    homes+=("$home_dir")
-  done < <(list_accounts)
-
   for item in "${SYNC_ITEMS[@]}"; do
     for home_dir in "${homes[@]}"; do
       rsync_item_to_shared "$home_dir" "$item"
@@ -962,17 +1047,96 @@ sync_once() {
       rsync_item_from_shared "$home_dir" "$item"
     done
   done
+  sync_plugin_config_entries "${homes[@]}"
+}
+
+sync_plugin_payloads_for_homes() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
 
   if [[ "$CODEX_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
     sync_plugin_payloads_direct "${homes[@]}"
+  elif [[ "$CODEX_FAST_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
+    sync_fast_plugin_payloads_direct "${homes[@]}"
   fi
-  sync_plugin_config_entries "${homes[@]}"
+}
 
+sync_message() {
   if [[ "$CODEX_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
     echo "Synced local Codex memory, plugin payloads, skills, and config at $(date '+%Y-%m-%d %H:%M:%S')."
+  elif [[ "$CODEX_FAST_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
+    echo "Synced local Codex memory, current plugin payloads, skills, and config at $(date '+%Y-%m-%d %H:%M:%S')."
   else
     echo "Synced local Codex memory and plugin config at $(date '+%Y-%m-%d %H:%M:%S')."
   fi
+}
+
+sync_selected_homes() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+
+  sync_memory_and_config_for_homes "${homes[@]}"
+  sync_plugin_payloads_for_homes "${homes[@]}"
+  sync_message
+}
+
+collect_account_homes() {
+  local home_dir raw_home
+  while IFS='|' read -r _ raw_home _; do
+    home_dir="$(echo "$raw_home" | xargs)"
+    [[ -n "$home_dir" ]] || continue
+    printf '%s\n' "$home_dir"
+  done < <(list_accounts)
+}
+
+sync_once() {
+  require_rsync
+  ensure_dirs
+
+  local homes=()
+  local home_dir
+  while read -r home_dir; do
+    homes+=("$home_dir")
+  done < <(collect_account_homes)
+
+  with_sync_lock sync_selected_homes "${homes[@]}"
+}
+
+sync_account_unlocked() {
+  local name="$1"
+  local target_home home_dir
+  local -a all_homes payload_homes
+  target_home="$(account_home_for "$name")"
+  mkdir -p "$target_home"
+
+  all_homes=()
+  while read -r home_dir; do
+    all_homes+=("$home_dir")
+  done < <(collect_account_homes)
+
+  payload_homes=("$PRIMARY_CODEX_HOME")
+  if [[ "$target_home" != "$PRIMARY_CODEX_HOME" ]]; then
+    payload_homes+=("$target_home")
+  fi
+
+  sync_memory_and_config_for_homes "${all_homes[@]}"
+  sync_plugin_payloads_for_homes "${payload_homes[@]}"
+  sync_message
+}
+
+sync_account() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "sync-account requires an account name." >&2
+    exit 2
+  fi
+
+  require_rsync
+  ensure_dirs
+
+  with_sync_lock sync_account_unlocked "$name"
 }
 
 sync_loop() {
@@ -1011,6 +1175,34 @@ stop_pids() {
   done
 }
 
+process_has_active_agent_descendant() {
+  local root_pid="$1"
+  local current_pid child_pid args seen_count
+  local -a queue children
+  queue=("$root_pid")
+  seen_count=0
+
+  while (( ${#queue[@]} > 0 && seen_count < 300 )); do
+    current_pid="${queue[1]}"
+    queue=("${queue[@]:1}")
+    seen_count=$(( seen_count + 1 ))
+    children=("${(@f)$(pgrep -P "$current_pid" 2>/dev/null || true)}")
+    for child_pid in "${children[@]}"; do
+      [[ -n "$child_pid" ]] || continue
+      args="$(ps -p "$child_pid" -o args= 2>/dev/null || true)"
+      if [[ "$args" == *"codex app-server --listen stdio://"* \
+            || "$args" == *"app-server proxy"* \
+            || "$args" == *"node_repl"* \
+            || "$args" == *"SkyComputerUseClient"* ]]; then
+        return 0
+      fi
+      queue+=("$child_pid")
+    done
+  done
+
+  return 1
+}
+
 stop_codex_windows_for_app_data() {
   local app_data="$1"
   local pids=()
@@ -1027,6 +1219,22 @@ stop_codex_windows_for_app_data() {
       pids+=("$pid")
     fi
   done < <(ps axww -o pid= -o args=)
+
+  if [[ "${CODEX_SKIP_ACTIVE_AGENT_WINDOWS:-0}" == "1" && ${#pids[@]} -gt 0 ]]; then
+    local kept_pids=()
+    local close_pids=()
+    for pid in "${pids[@]}"; do
+      if process_has_active_agent_descendant "$pid"; then
+        kept_pids+=("$pid")
+      else
+        close_pids+=("$pid")
+      fi
+    done
+    if (( ${#kept_pids[@]} > 0 )); then
+      echo "Keeping active Codex window(s): ${kept_pids[*]}"
+    fi
+    pids=("${close_pids[@]}")
+  fi
 
   stop_pids "Closing existing Codex window(s) for this profile" "${pids[@]}"
 }
@@ -1054,6 +1262,10 @@ stop_codex_servers_for_home() {
     [[ "$args" == *"--listen stdio://"* ]] && continue
     [[ "$args" == *"app-server proxy"* ]] && continue
     if [[ "$args" == *"--codex-home $home_dir"* || "$args" == *"--codex-home=$home_dir"* ]] || process_env_contains "$pid" "CODEX_HOME=$home_dir"; then
+      if [[ "${CODEX_SKIP_ACTIVE_AGENT_WINDOWS:-0}" == "1" ]] && process_has_active_agent_descendant "$pid"; then
+        echo "Keeping active Codex app-server: $pid"
+        continue
+      fi
       pids+=("$pid")
     fi
   done < <(ps axww -o pid= -o args=)
@@ -1082,6 +1294,9 @@ launch_account() {
 
   if [[ "$home_dir" != "$PRIMARY_CODEX_HOME" && ! -e "$home_dir/config.toml" ]]; then
     copy_initial_profile_to "$home_dir"
+  fi
+  if [[ "$CODEX_PRELAUNCH_SYNC" == "1" ]]; then
+    sync_account "$name" >/dev/null
   fi
 
   echo "Launching Codex profile..."
@@ -1131,10 +1346,16 @@ close_all_accounts() {
   ensure_dirs
 
   echo "Closing all Codex profile window(s)..."
+  local previous_skip_active="${CODEX_SKIP_ACTIVE_AGENT_WINDOWS:-0}"
+  CODEX_SKIP_ACTIVE_AGENT_WINDOWS=1
   list_accounts | while IFS='|' read -r raw_name _; do
     local name
     name="$(echo "$raw_name" | xargs)"
     [[ -n "$name" ]] || continue
+    if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
+      echo "Keeping primary Codex window open: $name"
+      continue
+    fi
 
     local home_dir app_data
     home_dir="$(account_home_for "$name")"
@@ -1142,6 +1363,7 @@ close_all_accounts() {
     stop_codex_windows_for_app_data "$app_data"
     stop_codex_servers_for_home "$home_dir"
   done
+  CODEX_SKIP_ACTIVE_AGENT_WINDOWS="$previous_skip_active"
 
   echo "Closed all matching Codex profile window(s)."
 }
@@ -1261,6 +1483,7 @@ main() {
     init) copy_initial_profile ;;
     launch-account2) launch_account2 ;;
     sync-once) sync_once ;;
+    sync-account) sync_account "${2:-}" ;;
     sync-loop) sync_loop ;;
     init-account) init_account "${2:-}" ;;
     launch-account) launch_account "${2:-}" "${3:-}" ;;
