@@ -438,7 +438,7 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onError(String message) {
-                setLoading(false, message);
+                setLoading(false, connectionHelp(message));
                 heroMetric.setText("Offline");
                 heroMetric.setTextColor(Color.rgb(255, 69, 92));
             }
@@ -707,7 +707,7 @@ public final class MainActivity extends Activity {
                 URL url = new URL(baseUrl + path);
                 connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod(method);
-                connection.setConnectTimeout(4500);
+                connection.setConnectTimeout(6500);
                 connection.setReadTimeout(15000);
                 connection.setRequestProperty("Accept", "application/json");
                 String accessClientId = prefs.getString("cfAccessClientId", "").trim();
@@ -739,7 +739,8 @@ public final class MainActivity extends Activity {
                 JSONObject json = body.isEmpty() ? new JSONObject() : new JSONObject(body);
                 main.post(() -> callback.onSuccess(json));
             } catch (Exception error) {
-                main.post(() -> callback.onError(error.getMessage() == null ? "Connection failed" : error.getMessage()));
+                String friendly = friendlyNetworkError(error, baseUrl);
+                main.post(() -> callback.onError(friendly));
             } finally {
                 if (connection != null) connection.disconnect();
             }
@@ -768,8 +769,42 @@ public final class MainActivity extends Activity {
 
     private String cleanBaseUrl() {
         String text = urlInput.getText().toString().trim();
+        if (!text.isEmpty() && !text.contains("://")) {
+            text = "http://" + text;
+        }
         while (text.endsWith("/")) text = text.substring(0, text.length() - 1);
+        try {
+            URL url = new URL(text);
+            StringBuilder builder = new StringBuilder();
+            builder.append(url.getProtocol()).append("://").append(url.getHost());
+            if (url.getPort() > 0) {
+                builder.append(":").append(url.getPort());
+            }
+            return builder.toString();
+        } catch (Exception ignored) {
+        }
         return text;
+    }
+
+    private String friendlyNetworkError(Exception error, String baseUrl) {
+        String raw = error.getMessage() == null ? "Connection failed" : error.getMessage();
+        String lower = raw.toLowerCase(Locale.US);
+        if (lower.contains("failed to connect")
+            || lower.contains("connection refused")
+            || lower.contains("timed out")
+            || lower.contains("no route")
+            || lower.contains("unable to resolve host")) {
+            return "Cannot reach Mac bridge at " + baseUrl
+                + ". On the Mac, open Codex Accounts > Mobile Remote > Start Bridge, then use the LAN URL shown there. Keep the phone and Mac on the same Wi-Fi/VPN.";
+        }
+        return raw;
+    }
+
+    private String connectionHelp(String message) {
+        if (message == null || message.trim().isEmpty()) {
+            return "Connection failed. Start the bridge on your Mac and use the LAN URL shown in Codex Accounts.";
+        }
+        return message;
     }
 
     private boolean isAllowedBridgeUrl(String baseUrl) {

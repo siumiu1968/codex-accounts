@@ -23,11 +23,18 @@ USAGE_DIRECT_TIMEOUT_SECONDS="${USAGE_DIRECT_TIMEOUT_SECONDS:-3}"
 TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS="${TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS:-3}"
 TOKEN_REFRESH_TIMEOUT_SECONDS="${TOKEN_REFRESH_TIMEOUT_SECONDS:-6}"
 APP_SERVER_USAGE_TIMEOUT_SECONDS="${APP_SERVER_USAGE_TIMEOUT_SECONDS:-4}"
+CODEX_SYNC_PLUGIN_PAYLOADS="${CODEX_SYNC_PLUGIN_PAYLOADS:-0}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
   "memories"
   "rules"
+)
+
+PLUGIN_SYNC_ITEMS=(
+  "plugins"
+  "skills"
+  "vendor_imports"
 )
 
 usage() {
@@ -48,6 +55,7 @@ Usage:
   scripts/codex_multi_account.zsh link-history <account-name>
   scripts/codex_multi_account.zsh unlink-history <account-name>
   scripts/codex_multi_account.zsh link-all-history
+  CODEX_SYNC_PLUGIN_PAYLOADS=1 scripts/codex_multi_account.zsh sync-once
   scripts/codex_multi_account.zsh link-account2-history
   scripts/codex_multi_account.zsh unlink-account2-history
 
@@ -63,12 +71,16 @@ Environment overrides:
 
 Notes:
   - Login separately inside the second Codex window.
-  - This syncs local memory files only: AGENTS.md, memories/, rules/.
+  - This syncs local shared state: AGENTS.md, memories/, rules/,
+    and enabled plugin config entries. Set CODEX_SYNC_PLUGIN_PAYLOADS=1
+    to also copy heavy plugins/, skills/, and vendor_imports/ payloads.
+  - Plugin enablement is merged across accounts from config.toml
+    [plugins."..."] sections without copying the full config file.
   - link-account2-history is experimental: it makes Account 2 use Account 1's
     local Codex history files through symlinks, while keeping auth/cookies
     separate. Quit the second Codex profile before running it.
   - It does not sync cloud conversation history, ChatGPT account memory,
-    auth.json, or cookies.
+    auth.json, cookies, SQLite logs, or per-account app state.
   - Usage status is fetched per profile from Codex's authenticated usage
     endpoint. Tokens are only read for the request and are not cached.
 USAGE
@@ -516,7 +528,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -790,6 +802,146 @@ rsync_item_from_shared() {
   fi
 }
 
+collect_enabled_plugins_from_config() {
+  local config_file="$1"
+  [[ -f "$config_file" ]] || return 0
+
+  awk '
+    /^\[plugins\."/ {
+      if (in_plugin && enabled && plugin != "") {
+        print plugin
+      }
+      plugin = $0
+      sub(/^\[plugins\."/,"",plugin)
+      sub(/"\]$/,"",plugin)
+      in_plugin = 1
+      enabled = 0
+      next
+    }
+    /^\[/ {
+      if (in_plugin && enabled && plugin != "") {
+        print plugin
+      }
+      in_plugin = 0
+      plugin = ""
+      enabled = 0
+      next
+    }
+    in_plugin && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
+      enabled = 1
+    }
+    END {
+      if (in_plugin && enabled && plugin != "") {
+        print plugin
+      }
+    }
+  ' "$config_file"
+}
+
+write_config_with_synced_plugins() {
+  local config_file="$1"
+  local plugins_file="$2"
+  local tmp_file
+
+  mkdir -p "$(dirname "$config_file")"
+  tmp_file="${config_file}.$$"
+
+  if [[ -f "$config_file" ]]; then
+    awk '
+      /^\[plugins\."/ { skip = 1; next }
+      /^\[/ { skip = 0 }
+      !skip { print }
+    ' "$config_file" > "$tmp_file"
+  else
+    : > "$tmp_file"
+  fi
+
+  {
+    printf '\n'
+    while read -r plugin_name; do
+      [[ -n "$plugin_name" ]] || continue
+      printf '[plugins."%s"]\n' "$plugin_name"
+      printf 'enabled = true\n\n'
+    done < "$plugins_file"
+  } >> "$tmp_file"
+
+  if [[ -f "$config_file" ]] && cmp -s "$tmp_file" "$config_file"; then
+    rm -f "$tmp_file"
+    return 0
+  fi
+
+  chmod 600 "$tmp_file" 2>/dev/null || true
+  mv "$tmp_file" "$config_file"
+}
+
+sync_plugin_config_entries() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+
+  local plugins_file home_dir
+  plugins_file="$(mktemp)"
+
+  for home_dir in "${homes[@]}"; do
+    collect_enabled_plugins_from_config "$home_dir/config.toml"
+  done | sort -u > "$plugins_file"
+
+  if [[ ! -s "$plugins_file" ]]; then
+    rm -f "$plugins_file"
+    return 0
+  fi
+
+  for home_dir in "${homes[@]}"; do
+    write_config_with_synced_plugins "$home_dir/config.toml" "$plugins_file"
+  done
+
+  rm -f "$plugins_file"
+}
+
+rsync_shared_payload_direct() {
+  local source_home="$1"
+  local target_home="$2"
+  local item="$3"
+  local src="$source_home/$item"
+  local dst="$target_home/$item"
+
+  [[ "$source_home" != "$target_home" ]] || return 0
+  [[ -e "$src" ]] || return 0
+
+  if [[ -d "$src" ]]; then
+    mkdir -p "$dst"
+    rsync -a --update \
+      --exclude '.DS_Store' \
+      --exclude 'plugin-install-*' \
+      "$src/" "$dst/"
+  else
+    mkdir -p "$(dirname "$dst")"
+    rsync -a --update "$src" "$dst"
+  fi
+}
+
+sync_plugin_payloads_direct() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+
+  local hub_home item home_dir
+  hub_home="$PRIMARY_CODEX_HOME"
+  if [[ ! -d "$hub_home" ]]; then
+    hub_home="${homes[1]}"
+  fi
+  [[ -n "$hub_home" ]] || return 0
+
+  for item in "${PLUGIN_SYNC_ITEMS[@]}"; do
+    for home_dir in "${homes[@]}"; do
+      rsync_shared_payload_direct "$home_dir" "$hub_home" "$item"
+    done
+    for home_dir in "${homes[@]}"; do
+      rsync_shared_payload_direct "$hub_home" "$home_dir" "$item"
+    done
+  done
+}
+
 sync_once() {
   require_rsync
   ensure_dirs
@@ -811,7 +963,16 @@ sync_once() {
     done
   done
 
-  echo "Synced local Codex memory files at $(date '+%Y-%m-%d %H:%M:%S')."
+  if [[ "$CODEX_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
+    sync_plugin_payloads_direct "${homes[@]}"
+  fi
+  sync_plugin_config_entries "${homes[@]}"
+
+  if [[ "$CODEX_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
+    echo "Synced local Codex memory, plugin payloads, skills, and config at $(date '+%Y-%m-%d %H:%M:%S')."
+  else
+    echo "Synced local Codex memory and plugin config at $(date '+%Y-%m-%d %H:%M:%S')."
+  fi
 }
 
 sync_loop() {

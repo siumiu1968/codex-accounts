@@ -37,6 +37,10 @@ class PayloadTooLarge(ValueError):
     pass
 
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 def ensure_private_app_support_dir():
     APP_SUPPORT.mkdir(parents=True, exist_ok=True)
     try:
@@ -808,7 +812,7 @@ def main():
         return
 
     Handler.state = BridgeState(script_path)
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     pid_file = Path(args.pid_file).expanduser()
     write_pid_file(pid_file)
 

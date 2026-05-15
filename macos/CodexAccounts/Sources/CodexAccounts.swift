@@ -3233,8 +3233,12 @@ struct AccountsRootView: View {
     private var header: some View {
         GeometryReader { geometry in
             let compact = geometry.size.width < 720
-            let compactReservedWidth = scaled(376) + profileRightAlignmentInset
-            let compactTitleWidth = min(scaled(270), max(scaled(218), geometry.size.width - compactReservedWidth))
+            let leadingInset = profileHoverPadding
+            let trailingInset = profileRightAlignmentInset
+            let compactContentWidth = max(0, geometry.size.width - leadingInset - trailingInset)
+            let showCompactSectionJumps = compactContentWidth >= scaled(608)
+            let compactReservedWidth = scaled(showCompactSectionJumps ? 374 : 232)
+            let compactTitleWidth = min(scaled(292), max(scaled(218), compactContentWidth - compactReservedWidth))
             let titleWidth = compact ? compactTitleWidth : scaled(300)
 
             Group {
@@ -3248,15 +3252,16 @@ struct AccountsRootView: View {
 
                         Spacer(minLength: scaled(8))
 
-                        sectionJumpControls(compact: true)
-                            .layoutPriority(2)
+                        if showCompactSectionJumps {
+                            sectionJumpControls(compact: true)
+                                .layoutPriority(2)
 
-                        Spacer(minLength: scaled(8))
+                            Spacer(minLength: scaled(8))
+                        }
 
                         headerActions(compact: true)
                             .layoutPriority(2)
                     }
-                    .padding(.trailing, profileRightAlignmentInset)
                 } else {
                     ZStack {
                         sectionJumpControls(compact: false)
@@ -3275,10 +3280,11 @@ struct AccountsRootView: View {
                             headerActions(compact: false)
                                 .layoutPriority(5)
                         }
-                        .padding(.trailing, profileRightAlignmentInset)
                     }
                 }
             }
+            .padding(.leading, leadingInset)
+            .padding(.trailing, trailingInset)
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
         }
         .frame(maxWidth: .infinity, minHeight: scaled(70), idealHeight: scaled(70), maxHeight: scaled(70), alignment: .center)
@@ -4581,14 +4587,49 @@ struct AccountsRootView: View {
         )
     }
 
+    private func checkRemoteBridgeLANHealth(timeout: TimeInterval = 2.0) -> (Int32, String) {
+        let url = "\(remoteBridgeURLLabel)/health"
+        let seconds = max(1, Int(timeout.rounded(.up)))
+        let result = runProcess(
+            executable: "/usr/bin/curl",
+            arguments: [
+                "--noproxy", "*",
+                "-fsS",
+                "--connect-timeout", "1",
+                "--max-time", "\(seconds)",
+                url
+            ],
+            timeout: timeout + 1.0
+        )
+        guard result.0 == 0, result.1.contains("\"ok\": true") else {
+            let output = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (result.0 == 0 ? 1 : result.0, output.isEmpty ? "LAN health check failed: \(url)" : output)
+        }
+        return (0, result.1)
+    }
+
     private func startRemoteBridge() {
         refreshRemoteBridgeRunningFlag()
         refreshRemoteBridgeState(force: true)
         guard !remoteBridgeRunning else {
-            remoteBridgeStatus = tr("Bridge 已經運行緊", "Bridge is already running")
+            runBackground(tr("檢查手機 Bridge...", "Checking mobile bridge...")) {
+                checkRemoteBridgeLANHealth(timeout: 2.0)
+            } completion: { result in
+                if result.0 == 0 {
+                    remoteBridgeStatus = tr("Bridge 已經運行緊：\(remoteBridgeURLLabel)", "Bridge is already running: \(remoteBridgeURLLabel)")
+                    return
+                }
+                remoteBridgeStatus = tr("偵測到舊 Bridge 只限本機，正在重啟...", "Detected a localhost-only bridge. Restarting...")
+                stopRemoteBridge()
+                launchRemoteBridgeProcess(forceRestart: true)
+            }
             return
         }
 
+        launchRemoteBridgeProcess(forceRestart: true)
+    }
+
+    private func launchRemoteBridgeProcess(forceRestart: Bool) {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -4596,8 +4637,10 @@ struct AccountsRootView: View {
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_ACCOUNTS_SCRIPT"] = scriptPath
         environment["CODEX_REMOTE_BRIDGE"] = remoteBridgeScriptPath
+        environment["CODEX_REMOTE_HOST"] = "0.0.0.0"
         environment["CODEX_REMOTE_PORT"] = "\(remoteBridgePort)"
         environment["CODEX_REMOTE_PID_FILE"] = remoteBridgePIDFileURL.path
+        environment["CODEX_REMOTE_RESTART"] = forceRestart ? "1" : "0"
         environment["PYTHONUNBUFFERED"] = "1"
         process.environment = environment
         process.standardOutput = pipe
@@ -4688,15 +4731,31 @@ struct AccountsRootView: View {
 
         DispatchQueue.global(qos: .utility).async {
             let result = runRemoteBridgeUtility(["--list-users"], timeout: 8)
+            let health = checkRemoteBridgeLANHealth(timeout: 2.0)
             DispatchQueue.main.async {
                 remoteBridgeRefreshInFlight = false
+                let processRunning = remoteBridgeProcess?.isRunning == true
+                let pidRunning = readRemoteBridgePID().map { isProcessRunning(pid: $0) } ?? false
+                let bridgeProcessExists = processRunning || pidRunning
+                let lanReachable = health.0 == 0
+                remoteBridgeRunning = bridgeProcessExists && lanReachable
+
+                if bridgeProcessExists && !lanReachable {
+                    remoteBridgeStatus = tr(
+                        "Bridge 未能被手機連接，請按「啟動 Bridge」自動修復。",
+                        "Bridge is not reachable from your phone. Press Start Bridge to repair it."
+                    )
+                } else if lanReachable {
+                    remoteBridgeStatus = tr("Bridge 可連接：\(remoteBridgeURLLabel)", "Bridge reachable: \(remoteBridgeURLLabel)")
+                }
+
                 guard result.0 == 0,
                       let data = result.1.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let users = json["users"] as? [Any]
                 else {
                     remoteBridgeUsersCount = 0
-                    if !result.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if !result.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && remoteBridgeStatus.isEmpty {
                         remoteBridgeStatus = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
                     }
                     return
@@ -5117,10 +5176,8 @@ struct AccountsRootView: View {
         busyIDs.forEach { setProfileBusy($0, true) }
         let loadingText = tr("正在同步對話紀錄，再打開 \(targetName)...", "Syncing chat history, then opening \(targetName)...")
         runBackground(loadingText) {
-            let syncResult = runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: 60)
-            guard syncResult.0 == 0 else { return syncResult }
-            let shareResult = runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60)
-            guard shareResult.0 == 0 else { return shareResult }
+            _ = runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: 15)
+            _ = runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 35)
             if route?.didSwitch == true {
                 _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 25)
             }
@@ -5647,8 +5704,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(keepAwakeChanged), name: .keepAwakeStateChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardCleanChanged), name: .keyboardCleanStateChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateStateChanged), name: .updateStateChanged, object: nil)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showAccountsWindow()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            showAccountsWindow()
+        }
+        return true
     }
 
     private func appTr(_ zh: String, _ en: String) -> String {
@@ -5813,6 +5876,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
+        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: AccountsRootView(scriptPath: scriptPath))
     }
 
@@ -6003,6 +6067,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showAccountsWindow() {
+        if window == nil {
+            buildWindow()
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
