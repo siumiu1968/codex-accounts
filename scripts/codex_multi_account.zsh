@@ -78,8 +78,8 @@ Environment overrides:
 Notes:
   - Login separately inside the second Codex window.
   - This syncs local shared state: AGENTS.md, memories/, rules/,
-    enabled plugin config entries, project/sidebar workspace roots, skills/,
-    vendor_imports/, and current plugin payloads. It skips plugin
+    enabled plugin config entries, project/sidebar workspace roots, goal
+    mode state, skills/, vendor_imports/, and current plugin payloads. It skips plugin
     backup/install folders so pre-open sync stays fast. Set
     CODEX_SYNC_PLUGIN_PAYLOADS=1 to copy every plugins/, skills/, and
     vendor_imports/ payload.
@@ -563,7 +563,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.4.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.4.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -1062,6 +1062,186 @@ sync_plugin_payloads_for_homes() {
   elif [[ "$CODEX_FAST_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
     sync_fast_plugin_payloads_direct "${homes[@]}"
   fi
+}
+
+sync_goal_state_for_homes() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  local homes_payload
+  homes_payload="$(printf '%s\n' "${homes[@]}")"
+
+  CODEX_GOAL_STATE_HOMES="$homes_payload" python3 - <<'PY'
+import os
+import sqlite3
+from pathlib import Path
+
+raw_homes = os.environ.get("CODEX_GOAL_STATE_HOMES", "")
+homes = []
+seen = set()
+for line in raw_homes.splitlines():
+    home = Path(line).expanduser()
+    key = str(home)
+    if key and key not in seen:
+        seen.add(key)
+        homes.append(home)
+
+def table_columns(con, table):
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return []
+    return [row[1] for row in rows]
+
+def bootstrap_goal_db(template_db, target_db):
+    if target_db.exists() or not template_db.exists():
+        return
+    target_db.parent.mkdir(parents=True, exist_ok=True)
+    source = None
+    dest = None
+    try:
+        source = sqlite3.connect(f"file:{template_db}?mode=ro", uri=True, timeout=3)
+        dest = sqlite3.connect(target_db, timeout=6)
+        source.execute("PRAGMA busy_timeout=3000")
+        dest.execute("PRAGMA busy_timeout=6000")
+
+        schema_rows = source.execute(
+            """
+            SELECT type, name, sql
+            FROM sqlite_master
+            WHERE sql IS NOT NULL
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY CASE type
+              WHEN 'table' THEN 0
+              WHEN 'index' THEN 1
+              WHEN 'trigger' THEN 2
+              ELSE 3
+            END, name
+            """
+        ).fetchall()
+        for _, _, sql in schema_rows:
+            dest.execute(sql)
+
+        if table_columns(source, "_sqlx_migrations") and table_columns(dest, "_sqlx_migrations"):
+            cols = table_columns(source, "_sqlx_migrations")
+            query_cols = ", ".join(f'"{col}"' for col in cols)
+            placeholders = ", ".join("?" for _ in cols)
+            for values in source.execute(f'SELECT {query_cols} FROM "_sqlx_migrations"'):
+                dest.execute(
+                    f'INSERT OR IGNORE INTO "_sqlx_migrations" ({query_cols}) VALUES ({placeholders})',
+                    values,
+                )
+        dest.commit()
+    except sqlite3.Error:
+        try:
+            if dest is not None:
+                dest.rollback()
+        except Exception:
+            pass
+        try:
+            target_db.unlink()
+        except Exception:
+            pass
+    finally:
+        try:
+            if source is not None:
+                source.close()
+        except Exception:
+            pass
+        try:
+            if dest is not None:
+                dest.close()
+        except Exception:
+            pass
+
+def goal_marker(row):
+    try:
+        return int(row.get("updated_at_ms") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+template_db = next((home / "goals_1.sqlite" for home in homes if (home / "goals_1.sqlite").exists()), None)
+if template_db is None:
+    raise SystemExit(0)
+
+for home in homes:
+    bootstrap_goal_db(template_db, home / "goals_1.sqlite")
+
+catalog = {}
+for home in homes:
+    db_path = home / "goals_1.sqlite"
+    if not db_path.exists():
+        continue
+    con = None
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        con.execute("PRAGMA busy_timeout=3000")
+        cols = table_columns(con, "thread_goals")
+        if not cols or "thread_id" not in cols:
+            con.close()
+            continue
+        query_cols = ", ".join(f'"{col}"' for col in cols)
+        for values in con.execute(f'SELECT {query_cols} FROM "thread_goals"'):
+            row = dict(zip(cols, values))
+            thread_id = row.get("thread_id")
+            if not thread_id:
+                continue
+            existing = catalog.get(thread_id)
+            if existing is None or goal_marker(row) >= goal_marker(existing):
+                catalog[thread_id] = row
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            if con is not None:
+                con.close()
+        except Exception:
+            pass
+
+if not catalog:
+    raise SystemExit(0)
+
+for home in homes:
+    db_path = home / "goals_1.sqlite"
+    if not db_path.exists() or db_path.is_symlink():
+        continue
+    con = None
+    try:
+        con = sqlite3.connect(db_path, timeout=6)
+        con.execute("PRAGMA busy_timeout=6000")
+        dest_cols = table_columns(con, "thread_goals")
+        if not dest_cols or "thread_id" not in dest_cols:
+            con.close()
+            continue
+
+        for row in catalog.values():
+            cols = [col for col in dest_cols if col in row]
+            if "thread_id" not in cols:
+                continue
+            quoted_cols = ", ".join(f'"{col}"' for col in cols)
+            placeholders = ", ".join("?" for _ in cols)
+            update_cols = [col for col in cols if col != "thread_id"]
+            updates = ", ".join(f'"{col}" = excluded."{col}"' for col in update_cols)
+            sql = (
+                f'INSERT INTO "thread_goals" ({quoted_cols}) VALUES ({placeholders}) '
+                f'ON CONFLICT("thread_id") DO UPDATE SET {updates}'
+            )
+            con.execute(sql, [row.get(col) for col in cols])
+        con.commit()
+    except sqlite3.Error:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            if con is not None:
+                con.close()
+        except Exception:
+            pass
+PY
 }
 
 sync_global_state_for_homes() {
@@ -1635,6 +1815,7 @@ sync_selected_homes() {
   sync_memory_and_config_for_homes "${homes[@]}"
   sync_plugin_payloads_for_homes "${homes[@]}"
   sync_thread_index_for_homes "${homes[@]}"
+  sync_goal_state_for_homes "${homes[@]}"
   sync_message
 }
 
@@ -1680,6 +1861,7 @@ sync_account_unlocked() {
   sync_memory_and_config_for_homes "${all_homes[@]}"
   sync_plugin_payloads_for_homes "${payload_homes[@]}"
   sync_thread_index_for_homes "${all_homes[@]}"
+  sync_goal_state_for_homes "${all_homes[@]}"
   sync_message
 }
 
@@ -2108,6 +2290,7 @@ link_history_for() {
   done
 
   sync_thread_index_for_homes "$PRIMARY_CODEX_HOME" "$account_home"
+  sync_goal_state_for_homes "$PRIMARY_CODEX_HOME" "$account_home"
 }
 
 unlink_history_for() {
