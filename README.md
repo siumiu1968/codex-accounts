@@ -22,6 +22,14 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.4.0 更新介紹
+
+V2.4.0 修復 project sidebar 同步缺口：除咗對話 DB，依家亦會同步 Codex frontend 用嘅 project/workspace roots，所以 `4229M Easystudio` 呢類「項目下面嘅對話」會喺其他 profile 側邊欄出返。今版亦優化 profile 卡片 hover / Dock-style 放大動畫，移除每一 pixel 滑鼠移動都觸發全列表重畫嘅路徑，並快取 profile icon 圖片，令上下滾動同 hover 動畫更順。
+
+### V2.3.7 更新介紹
+
+V2.3.7 修復新 profile 登入完成後無法保存本機 credentials 嘅問題。共享對話紀錄依家只會連結真正嘅對話資料，唔再把 `state_5.sqlite` 共享到其他 profile；打開 profile 前亦會自動移除舊版留下嘅 shared state symlink，避免 Codex 登入 server 寫入本機登入狀態時撞到 primary profile 嘅 state。
+
 ### V2.3.6 更新介紹
 
 V2.3.6 修復自動刷新唔會準確更新 quota 嘅問題。自動刷新而家會定時做低負荷 live quota refresh，效果等同背景撳 Reload，但唔會播 loading pill 或 quota 數字倒數動畫；背景查詢改用單一並行度串行跑，避免短時間開太多 Codex app-server 或令 Mac 負荷升高。
@@ -84,7 +92,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.3.6 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.4.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -149,6 +157,14 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
+### V2.4.0 更新介绍
+
+V2.4.0 修复 project sidebar 同步缺口：除了对话 DB，现在也会同步 Codex frontend 使用的 project/workspace roots，所以 `4229M Easystudio` 这类“项目下面的对话”会在其他 profile 侧边栏重新出现。本版也优化 profile 卡片 hover / Dock-style 放大动画，移除每一 pixel 鼠标移动都触发全列表重绘的路径，并缓存 profile icon 图片，让上下滚动和 hover 动画更顺。
+
+### V2.3.7 更新介绍
+
+V2.3.7 修复新 profile 登录完成后无法保存本机 credentials 的问题。共享对话记录现在只会链接真正的对话资料，不再把 `state_5.sqlite` 共享到其他 profile；打开 profile 前也会自动移除旧版留下的 shared state symlink，避免 Codex 登录 server 写入本机登录状态时撞到 primary profile 的 state。
+
 ### V2.3.6 更新介绍
 
 V2.3.6 修复自动刷新不会准确更新 quota 的问题。自动刷新现在会定时做低负荷 live quota refresh，效果等同后台点击 Reload，但不会播放 loading pill 或 quota 数字倒数动画；后台查询改用单一并行度串行运行，避免短时间打开太多 Codex app-server 或让 Mac 负荷升高。
@@ -211,7 +227,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.3.6 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.4.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -276,6 +292,14 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
 
+### V2.4.0 Update
+
+V2.4.0 fixes the project sidebar sync gap. In addition to the conversation database, Codex Accounts now syncs the project/workspace roots used by the Codex frontend, so project-scoped threads such as `4229M Easystudio` appear in other profiles' sidebars. This release also optimizes the profile-card hover / Dock-style magnification path by removing per-pixel whole-list invalidation and caching profile icon images, making scrolling and hover animations smoother.
+
+### V2.3.7 Update
+
+V2.3.7 fixes new profiles failing to save local credentials after sign-in completes. Shared history now links only the actual conversation data and no longer shares `state_5.sqlite` across profiles. Opening a profile also removes legacy shared state symlinks left by older builds so the Codex login server can write local sign-in state without colliding with the primary profile state.
+
 ### V2.3.6 Update
 
 V2.3.6 fixes automatic refresh not reliably updating quota. Auto refresh now performs a low-load live quota refresh on a schedule, equivalent to pressing Reload in the background, but without the loading pill or quota countdown animation. The background quota query runs with single-profile parallelism to avoid spawning too many Codex app-server processes or raising Mac load.
@@ -338,7 +362,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.3.6, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.4.0, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

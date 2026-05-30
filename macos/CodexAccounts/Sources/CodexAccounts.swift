@@ -6,7 +6,7 @@ import Foundation
 import IOKit
 import SwiftUI
 
-private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .userInitiated)
+private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .utility)
 
 private final class ProcessFinishState {
     private let lock = NSLock()
@@ -26,11 +26,26 @@ private final class ProcessFinishState {
     }
 }
 
-private struct ProfileRowCenterPreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
+private final class ProfileIconImageCache {
+    static let shared = ProfileIconImageCache()
 
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    private let lock = NSLock()
+    private var images: [String: NSImage] = [:]
+
+    func image(for key: String, load: () -> NSImage?) -> NSImage? {
+        lock.lock()
+        if let image = images[key] {
+            lock.unlock()
+            return image
+        }
+        lock.unlock()
+
+        guard let image = load() else { return nil }
+
+        lock.lock()
+        images[key] = image
+        lock.unlock()
+        return image
     }
 }
 
@@ -756,7 +771,8 @@ private func parsedCodexProfiles(
 
 private func profileWithCachedUsageFallback(_ profile: CodexProfile) -> CodexProfile {
     let quota = profile.quota.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard profile.authStatus != "login_needed" else {
+    let hasLocalTokens = localAuthTokensExist(in: profile.home)
+    guard profile.authStatus != "login_needed" || hasLocalTokens else {
         return profile
     }
     guard quota.isEmpty || quota == "unknown",
@@ -769,8 +785,8 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile) -> CodexPro
         id: profile.id,
         displayName: profile.displayName,
         home: profile.home,
-        authStatus: profile.authStatus,
-        authMode: profile.authMode,
+        authStatus: hasLocalTokens ? "signed_in_local" : profile.authStatus,
+        authMode: hasLocalTokens && profile.authMode == "unknown" ? "checking" : profile.authMode,
         lastRefresh: profile.lastRefresh,
         quota: cachedUsage.quota,
         reset: cachedUsage.reset
@@ -796,6 +812,20 @@ private func cachedUsage(for profileID: String) -> (quota: String, reset: String
     }
 
     return (parts[0], parts[1].isEmpty ? "unknown" : parts[1])
+}
+
+private func localAuthTokensExist(in home: String) -> Bool {
+    let authURL = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
+    guard let data = try? Data(contentsOf: authURL),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let tokens = json["tokens"] as? [String: Any],
+          let accessToken = tokens["access_token"] as? String,
+          let refreshToken = tokens["refresh_token"] as? String
+    else {
+        return false
+    }
+
+    return !accessToken.isEmpty && !refreshToken.isEmpty
 }
 
 private func promptForAccountName(title: String, message: String, defaultName: String? = nil) -> String? {
@@ -1625,14 +1655,11 @@ struct AccountsRootView: View {
     @State private var remoteBridgeLastOutput = ""
     @State private var activeQuotaPoolProfileID: String?
     @State private var quotaPoolFailoverInProgress = false
-    @State private var runAutoRefreshOnNextTick = true
     @State private var lastAutoQuotaRefreshAt = Date.distantPast
     @State private var showLanguageMenu = false
     @State private var languageTransitionActive = false
     @State private var languagePulse = false
     @State private var hoveredProfileID: String?
-    @State private var profileRowCenters: [String: CGFloat] = [:]
-    @State private var profileDockHoverY: CGFloat?
     @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
     @AppStorage("sidebarRemoteExpanded") private var sidebarRemoteExpanded = false
@@ -1644,7 +1671,7 @@ struct AccountsRootView: View {
     @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-    private let autoQuotaLiveRefreshInterval: TimeInterval = 120
+    private let autoQuotaLiveRefreshInterval: TimeInterval = 300
 
     var body: some View {
         ZStack {
@@ -1960,10 +1987,6 @@ struct AccountsRootView: View {
         sortedProfileList(profiles.filter { !isLoginNeeded($0) && isWaitingForRecovery($0) })
     }
 
-    private var visibleProfileIDsForDock: [String] {
-        (activeProfiles + loginProfiles + waitingProfiles).map(\.id)
-    }
-
     private func sortedProfileList(_ input: [CodexProfile]) -> [CodexProfile] {
         input.sorted { lhs, rhs in
             let leftRank = profileSortRank(lhs)
@@ -1979,80 +2002,38 @@ struct AccountsRootView: View {
         }
     }
 
-    private func profileDockDistance(for profile: CodexProfile) -> CGFloat? {
-        if let hoverY = profileDockHoverY,
-           let centerY = profileRowCenters[profile.id] {
-            return abs(centerY - hoverY)
-        }
-
-        if let hoveredProfileID,
-           let hoveredCenter = profileRowCenters[hoveredProfileID],
-           let centerY = profileRowCenters[profile.id] {
-            return abs(centerY - hoveredCenter)
-        }
-
-        guard let hoveredProfileID,
-              let hoveredIndex = visibleProfileIDsForDock.firstIndex(of: hoveredProfileID),
-              let index = visibleProfileIDsForDock.firstIndex(of: profile.id)
-        else {
-            return nil
-        }
-        return CGFloat(abs(index - hoveredIndex)) * scaled(82)
-    }
-
-    private func profileDockInfluence(for profile: CodexProfile) -> CGFloat {
-        guard let distance = profileDockDistance(for: profile) else { return 0 }
-        let radius = max(scaled(230), 1)
+    private func profileDockInfluence(forIndex index: Int, hoveredIndex: Int?) -> CGFloat {
+        guard let hoveredIndex else { return 0 }
+        let distance = CGFloat(abs(index - hoveredIndex)) * scaled(76)
+        let radius = max(scaled(220), 1)
         let raw = max(0, 1 - distance / radius)
-        return CGFloat(pow(Double(raw), 1.18))
+        return CGFloat(pow(Double(raw), 1.12))
     }
 
-    private func profileDockScale(for profile: CodexProfile) -> CGFloat {
-        let influence = profileDockInfluence(for: profile)
+    private func profileDockScale(forInfluence influence: CGFloat) -> CGFloat {
         guard influence > 0 else { return 1 }
-        return 1 + 0.058 * influence
+        return 1 + 0.074 * influence
     }
 
-    private func profileDockGlowOpacity(for profile: CodexProfile) -> Double {
-        let influence = Double(profileDockInfluence(for: profile))
-        return 0.08 + 0.28 * influence
+    private func profileDockGlowOpacity(forInfluence influence: CGFloat) -> Double {
+        return 0.24 * influence
     }
 
-    private func isProfileDockFocused(_ profile: CodexProfile) -> Bool {
-        guard let distance = profileDockDistance(for: profile) else { return false }
-        return distance < scaled(40)
-    }
-
-    private func nearestProfileID(to hoverY: CGFloat) -> String? {
-        profileRowCenters.min { lhs, rhs in
-            abs(lhs.value - hoverY) < abs(rhs.value - hoverY)
-        }?.key
-    }
-
-    private func updateProfileDockHoverY(_ hoverY: CGFloat) {
-        if let current = profileDockHoverY, abs(current - hoverY) < 0.8 {
-            return
-        }
-
-        withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.76, blendDuration: 0.05)) {
-            profileDockHoverY = hoverY
-            hoveredProfileID = nearestProfileID(to: hoverY) ?? hoveredProfileID
-        }
+    private func isProfileDockFocused(index: Int, hoveredIndex: Int?) -> Bool {
+        guard let hoveredIndex else { return false }
+        return index == hoveredIndex
     }
 
     private func updateHoveredProfile(_ profileID: String, hovering: Bool) {
         if hovering {
             withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.70, blendDuration: 0.08)) {
                 hoveredProfileID = profileID
-                if profileDockHoverY == nil, let centerY = profileRowCenters[profileID] {
-                    profileDockHoverY = centerY
-                }
             }
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
-            guard hoveredProfileID == profileID, profileDockHoverY == nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
+            guard hoveredProfileID == profileID else { return }
             withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.74, blendDuration: 0.08)) {
                 hoveredProfileID = nil
             }
@@ -2061,11 +2042,10 @@ struct AccountsRootView: View {
 
     private func clearHoveredProfileSoon() {
         let current = hoveredProfileID
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
             guard hoveredProfileID == current else { return }
             withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.74, blendDuration: 0.08)) {
                 hoveredProfileID = nil
-                profileDockHoverY = nil
             }
         }
     }
@@ -2073,7 +2053,6 @@ struct AccountsRootView: View {
     private func setHoveredProfile(_ profileID: String?) {
         withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.70, blendDuration: 0.08)) {
             hoveredProfileID = profileID
-            profileDockHoverY = profileID.flatMap { profileRowCenters[$0] }
         }
     }
 
@@ -2086,11 +2065,14 @@ struct AccountsRootView: View {
     }
 
     private func isLoginNeeded(_ profile: CodexProfile) -> Bool {
-        profile.authStatus == "login_needed" || profile.authStatus == "auth_incomplete"
+        if profileHasLocalAuthTokens(profile) {
+            return false
+        }
+        return profile.authStatus == "login_needed" || profile.authStatus == "auth_incomplete"
     }
 
     private func isVisiblySignedIn(_ profile: CodexProfile) -> Bool {
-        isSignedIn(profile) || (!isLoginNeeded(profile) && profile.quota != "unknown")
+        isSignedIn(profile) || profileHasLocalAuthTokens(profile) || (!isLoginNeeded(profile) && profile.quota != "unknown")
     }
 
     private func mergedAuthStatus(previous: String, current: String) -> String {
@@ -2147,21 +2129,14 @@ struct AccountsRootView: View {
     }
 
     private func runPeriodicMaintenance() {
-        guard activeOperationCount == 0, !isRefreshing, !isSyncing else { return }
+        guard activeOperationCount == 0 else { return }
 
-        if autoRefresh && autoSync {
-            if runAutoRefreshOnNextTick {
-                refreshProfilesForAutoQuota()
-            } else {
-                syncMemories(silent: true)
-            }
-            runAutoRefreshOnNextTick.toggle()
-        } else if autoRefresh {
-            refreshProfilesForAutoQuota()
-            runAutoRefreshOnNextTick = false
-        } else if autoSync {
+        if autoSync, !isSyncing {
             syncMemories(silent: true)
-            runAutoRefreshOnNextTick = true
+        }
+
+        if autoRefresh, !isRefreshing {
+            refreshProfilesForAutoQuota()
         }
     }
 
@@ -2175,8 +2150,8 @@ struct AccountsRootView: View {
             showLoading: false,
             replayQuota: false,
             liveUsage: shouldUseLiveQuota,
-            liveParallelism: shouldUseLiveQuota ? 1 : 8,
-            statusTimeout: shouldUseLiveQuota ? 150 : 18
+            liveParallelism: shouldUseLiveQuota ? 3 : 8,
+            statusTimeout: shouldUseLiveQuota ? 35 : 12
         )
     }
 
@@ -3451,7 +3426,13 @@ struct AccountsRootView: View {
     }
 
     private var profilesList: some View {
-        LazyVStack(spacing: 0) {
+        let active = activeProfiles
+        let login = loginProfiles
+        let waiting = waitingProfiles
+        let orderedProfileIDs = (active + login + waiting).map(\.id)
+        let hoveredIndex = hoveredProfileID.flatMap { orderedProfileIDs.firstIndex(of: $0) }
+
+        return LazyVStack(spacing: 0) {
             sectionHeader(
                 id: "section-active",
                 systemName: "checkmark.circle.fill",
@@ -3460,8 +3441,8 @@ struct AccountsRootView: View {
             )
             .padding(.top, scaled(2))
 
-            ForEach(activeProfiles) { profile in
-                profileRow(profile)
+            ForEach(Array(active.enumerated()), id: \.element.id) { index, profile in
+                profileRow(profile, dockIndex: index, hoveredIndex: hoveredIndex)
             }
 
             sectionHeader(
@@ -3470,10 +3451,10 @@ struct AccountsRootView: View {
                 title: tr("未登入", "Login needed"),
                 accent: Color(red: 1.00, green: 0.55, blue: 0.12)
             )
-            .padding(.top, scaled(activeProfiles.isEmpty ? 3 : 9))
+            .padding(.top, scaled(active.isEmpty ? 3 : 9))
 
-            ForEach(loginProfiles) { profile in
-                profileRow(profile)
+            ForEach(Array(login.enumerated()), id: \.element.id) { index, profile in
+                profileRow(profile, dockIndex: active.count + index, hoveredIndex: hoveredIndex)
             }
 
             sectionHeader(
@@ -3482,10 +3463,10 @@ struct AccountsRootView: View {
                 title: tr("等待恢復", "Waiting for Reset"),
                 accent: Color(red: 1.00, green: 0.74, blue: 0.20)
             )
-            .padding(.top, scaled(loginProfiles.isEmpty ? 3 : 9))
+            .padding(.top, scaled(login.isEmpty ? 3 : 9))
 
-            ForEach(waitingProfiles) { profile in
-                profileRow(profile)
+            ForEach(Array(waiting.enumerated()), id: \.element.id) { index, profile in
+                profileRow(profile, dockIndex: active.count + login.count + index, hoveredIndex: hoveredIndex)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3493,18 +3474,6 @@ struct AccountsRootView: View {
         .padding(.trailing, profileHoverPadding)
         .padding(.top, 4)
         .contentShape(Rectangle())
-        .coordinateSpace(name: "profilesDock")
-        .onPreferenceChange(ProfileRowCenterPreferenceKey.self) { centers in
-            profileRowCenters = centers
-        }
-        .onContinuousHover(coordinateSpace: .named("profilesDock")) { phase in
-            switch phase {
-            case .active(let location):
-                updateProfileDockHoverY(location.y)
-            case .ended:
-                clearHoveredProfileSoon()
-            }
-        }
         .onHover { hovering in
             if !hovering {
                 clearHoveredProfileSoon()
@@ -3550,10 +3519,11 @@ struct AccountsRootView: View {
         .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
-    private func profileRow(_ profile: CodexProfile) -> some View {
-        let dockScale = profileDockScale(for: profile)
-        let dockGlowOpacity = profileDockGlowOpacity(for: profile)
-        let dockFocused = isProfileDockFocused(profile)
+    private func profileRow(_ profile: CodexProfile, dockIndex: Int, hoveredIndex: Int?) -> some View {
+        let dockInfluence = profileDockInfluence(forIndex: dockIndex, hoveredIndex: hoveredIndex)
+        let dockScale = profileDockScale(forInfluence: dockInfluence)
+        let dockGlowOpacity = profileDockGlowOpacity(forInfluence: dockInfluence)
+        let dockFocused = isProfileDockFocused(index: dockIndex, hoveredIndex: hoveredIndex)
 
         return GeometryReader { geometry in
             let width = geometry.size.width
@@ -3597,14 +3567,6 @@ struct AccountsRootView: View {
             .frame(width: geometry.size.width, height: rowHeight, alignment: .center)
         }
         .frame(maxWidth: .infinity, minHeight: scaled(64), idealHeight: scaled(64), maxHeight: scaled(64), alignment: .leading)
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: ProfileRowCenterPreferenceKey.self,
-                    value: [profile.id: proxy.frame(in: .named("profilesDock")).midY]
-                )
-            }
-        )
         .background(Color.white.opacity(0.040))
         .background(themeRowTint.opacity(profile.quota == "unknown" ? 0.030 : 0.085))
         .background(profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.020 : 0.074))
@@ -3630,7 +3592,7 @@ struct AccountsRootView: View {
                 )
         )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.08 : 0.14), radius: 10, x: 0, y: 4)
+        .shadow(color: profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.04 : 0.08), radius: 5, x: 0, y: 2)
         .shadow(color: profileRowAccent(for: profile).opacity(dockGlowOpacity), radius: dockFocused ? 22 : 12, x: 0, y: dockFocused ? 8 : 4)
         .brightness(dockFocused ? 0.035 : (dockScale > 1 ? 0.016 : 0))
         .scaleEffect(dockScale, anchor: .center)
@@ -3642,7 +3604,6 @@ struct AccountsRootView: View {
         .zIndex(Double(dockScale * 1000))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: profile.quota)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.72, blendDuration: 0.08), value: hoveredProfileID)
-        .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.78, blendDuration: 0.05), value: profileDockHoverY)
     }
 
     private func profileBadge(_ profile: CodexProfile) -> some View {
@@ -3681,13 +3642,20 @@ struct AccountsRootView: View {
     }
 
     private func profileBadgeImage(for profile: CodexProfile) -> NSImage {
-        _ = iconVersion
-        if let customImage = NSImage(contentsOf: customIconURL(for: profile.id)) {
+        let customURL = customIconURL(for: profile.id)
+        let customCacheKey = "custom:\(iconVersion):\(profile.id)"
+        if let customImage = ProfileIconImageCache.shared.image(for: customCacheKey, load: {
+            NSImage(contentsOf: customURL)
+        }) {
             return customImage
         }
         let resourceName = "ProfileIcon-\(profileBadgeLetter(for: profile) ?? "Default")"
-        if let url = Bundle.main.url(forResource: resourceName, withExtension: "png", subdirectory: "ProfileLetterIcons"),
-           let image = NSImage(contentsOf: url) {
+        if let image = ProfileIconImageCache.shared.image(for: "bundle:\(resourceName)", load: {
+            guard let url = Bundle.main.url(forResource: resourceName, withExtension: "png", subdirectory: "ProfileLetterIcons") else {
+                return nil
+            }
+            return NSImage(contentsOf: url)
+        }) {
             return image
         }
         return NSImage(named: "AppIcon") ?? NSImage()
@@ -4923,9 +4891,16 @@ struct AccountsRootView: View {
         runBackground(loading) {
             var environment = ProcessInfo.processInfo.environment
             let resolvedParallelism = max(1, liveParallelism ?? (liveUsage ? 2 : 8))
-            let resolvedTimeout = statusTimeout ?? (liveUsage ? (resolvedParallelism <= 1 ? 150 : 70) : 18)
+            let resolvedTimeout = statusTimeout ?? (liveUsage ? (resolvedParallelism <= 1 ? 45 : 35) : 12)
             environment["CODEX_USAGE_LIVE_LOOKUP"] = liveUsage ? "1" : "0"
             environment["STATUS_PARALLELISM"] = "\(resolvedParallelism)"
+            if liveUsage {
+                environment["USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS"] = "1"
+                environment["USAGE_DIRECT_TIMEOUT_SECONDS"] = "2"
+                environment["TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS"] = "1"
+                environment["TOKEN_REFRESH_TIMEOUT_SECONDS"] = "3"
+                environment["APP_SERVER_USAGE_TIMEOUT_SECONDS"] = "1"
+            }
             let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: resolvedTimeout, environment: environment)
             let profiles = parsedCodexProfiles(
                 accountsOutput: accountsOutput,
@@ -5123,16 +5098,7 @@ struct AccountsRootView: View {
     }
 
     private func profileHasLocalAuthTokens(_ profile: CodexProfile) -> Bool {
-        let authURL = URL(fileURLWithPath: profile.home).appendingPathComponent("auth.json")
-        guard let data = try? Data(contentsOf: authURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tokens = json["tokens"] as? [String: Any],
-              let accessToken = tokens["access_token"] as? String,
-              let refreshToken = tokens["refresh_token"] as? String
-        else {
-            return false
-        }
-        return !accessToken.isEmpty && !refreshToken.isEmpty
+        localAuthTokensExist(in: profile.home)
     }
 
     private func profilePayload(from payload: String) -> [CodexProfile] {
@@ -5292,7 +5258,12 @@ struct AccountsRootView: View {
         let loading = silent ? nil : tr("同步記憶...", "Syncing memories...")
 
         runBackground(loading) {
-            runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: 60)
+            var environment = ProcessInfo.processInfo.environment
+            if silent {
+                environment["CODEX_FAST_SYNC_PLUGIN_PAYLOADS"] = "0"
+                environment["CODEX_SYNC_PLUGIN_PAYLOADS"] = "0"
+            }
+            return runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: silent ? 35 : 60, environment: environment)
         } completion: { result in
             isSyncing = false
             let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)

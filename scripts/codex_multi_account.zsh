@@ -78,17 +78,18 @@ Environment overrides:
 Notes:
   - Login separately inside the second Codex window.
   - This syncs local shared state: AGENTS.md, memories/, rules/,
-    enabled plugin config entries, skills/, vendor_imports/, and current
-    plugin payloads. It skips plugin backup/install folders so pre-open
-    sync stays fast. Set CODEX_SYNC_PLUGIN_PAYLOADS=1 to copy every
-    plugins/, skills/, and vendor_imports/ payload.
+    enabled plugin config entries, project/sidebar workspace roots, skills/,
+    vendor_imports/, and current plugin payloads. It skips plugin
+    backup/install folders so pre-open sync stays fast. Set
+    CODEX_SYNC_PLUGIN_PAYLOADS=1 to copy every plugins/, skills/, and
+    vendor_imports/ payload.
   - Plugin enablement is merged across accounts from config.toml
     [plugins."..."] sections without copying the full config file.
   - link-account2-history is experimental: it makes Account 2 use Account 1's
     local Codex history files through symlinks, while keeping auth/cookies
     separate. Quit the second Codex profile before running it.
   - It does not sync cloud conversation history, ChatGPT account memory,
-    auth.json, cookies, SQLite logs, or per-account app state.
+    auth.json, cookies, SQLite logs, or browser cookies/local storage.
   - Usage status is fetched per profile from Codex's authenticated usage
     endpoint. Tokens are only read for the request and are not cached.
 USAGE
@@ -562,7 +563,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.3.6"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.4.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -1048,6 +1049,7 @@ sync_memory_and_config_for_homes() {
     done
   done
   sync_plugin_config_entries "${homes[@]}"
+  sync_global_state_for_homes "${homes[@]}"
 }
 
 sync_plugin_payloads_for_homes() {
@@ -1060,6 +1062,559 @@ sync_plugin_payloads_for_homes() {
   elif [[ "$CODEX_FAST_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
     sync_fast_plugin_payloads_direct "${homes[@]}"
   fi
+}
+
+sync_global_state_for_homes() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  local homes_payload
+  homes_payload="$(printf '%s\n' "${homes[@]}")"
+
+  CODEX_GLOBAL_STATE_HOMES="$homes_payload" python3 - <<'PY'
+import json
+import os
+import shutil
+import sqlite3
+from pathlib import Path
+
+raw_homes = os.environ.get("CODEX_GLOBAL_STATE_HOMES", "")
+homes = []
+seen_homes = set()
+for line in raw_homes.splitlines():
+    home = Path(line).expanduser()
+    key = str(home)
+    if key and key not in seen_homes:
+        seen_homes.add(key)
+        homes.append(home)
+
+STATE_NAME = ".codex-global-state.json"
+ROOT_LIST_KEYS = (
+    "electron-saved-workspace-roots",
+    "project-order",
+)
+SOURCE_ROOT_LIST_KEYS = ROOT_LIST_KEYS + (
+    "active-workspace-roots",
+)
+DICT_KEYS = (
+    "electron-workspace-root-labels",
+    "thread-workspace-root-hints",
+    "thread-project-assignments",
+    "sidebar-project-thread-orders",
+    "sidebar-thread-metadata",
+    "thread-writable-roots",
+    "thread-projectless-output-directories",
+)
+
+def normalized_path(value):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+def load_state(path):
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else {}
+
+def write_state(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_name(f"{path.name}.bak")
+        if not backup.exists():
+            try:
+                shutil.copy2(path, backup)
+            except OSError:
+                pass
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+def thread_marker(row):
+    updated_ms, updated = row
+    if updated_ms is not None:
+        try:
+            return int(updated_ms)
+        except (TypeError, ValueError):
+            pass
+    if updated is not None:
+        try:
+            return int(updated) * 1000
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+states = []
+for home in homes:
+    path = home / STATE_NAME
+    data = load_state(path)
+    if data is None:
+        continue
+    states.append((home, path, data))
+
+if not states:
+    raise SystemExit(0)
+
+root_order = []
+root_seen = set()
+merged_dicts = {key: {} for key in DICT_KEYS}
+
+def add_root(value):
+    root = normalized_path(value)
+    if root and root not in root_seen:
+        root_seen.add(root)
+        root_order.append(root)
+
+for _, _, data in states:
+    for key in SOURCE_ROOT_LIST_KEYS:
+        values = data.get(key)
+        if isinstance(values, list):
+            for value in values:
+                add_root(value)
+    labels = data.get("electron-workspace-root-labels")
+    if isinstance(labels, dict):
+        for root in labels.keys():
+            add_root(root)
+    for key in DICT_KEYS:
+        value = data.get(key)
+        if not isinstance(value, dict):
+            continue
+        for item_key, item_value in value.items():
+            if isinstance(item_key, str) and item_key and item_key not in merged_dicts[key]:
+                merged_dicts[key][item_key] = item_value
+
+root_recency = {}
+thread_cwds = {}
+for home in homes:
+    db_path = home / "state_5.sqlite"
+    if not db_path.exists():
+        continue
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        con.execute("PRAGMA busy_timeout=2000")
+        rows = con.execute(
+            """
+            SELECT id, cwd, updated_at_ms, updated_at
+            FROM threads
+            WHERE cwd IS NOT NULL AND cwd <> ''
+            """
+        )
+        for thread_id, cwd, updated_ms, updated in rows:
+            root = normalized_path(cwd)
+            if not root:
+                continue
+            marker = thread_marker((updated_ms, updated))
+            if thread_id:
+                thread_cwds[str(thread_id)] = root
+            if marker > root_recency.get(root, 0):
+                root_recency[root] = marker
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+root_position = {root: index for index, root in enumerate(root_order)}
+merged_roots = sorted(
+    root_order,
+    key=lambda root: (-root_recency.get(root, 0), root_position.get(root, 0)),
+)
+merged_root_set = set(merged_roots)
+
+for _, path, data in states:
+    next_data = dict(data)
+    for key in ROOT_LIST_KEYS:
+        next_data[key] = merged_roots
+    for key in DICT_KEYS:
+        current = next_data.get(key)
+        merged = dict(merged_dicts[key])
+        if isinstance(current, dict):
+            merged.update(current)
+        if merged:
+            next_data[key] = merged
+
+    projectless = next_data.get("projectless-thread-ids")
+    if isinstance(projectless, list):
+        next_data["projectless-thread-ids"] = [
+            thread_id for thread_id in projectless
+            if thread_cwds.get(str(thread_id)) not in merged_root_set
+        ]
+
+    if next_data != data:
+        write_state(path, next_data)
+PY
+}
+
+sync_thread_index_for_homes() {
+  local -a homes
+  homes=("$@")
+  (( ${#homes[@]} > 0 )) || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  local homes_payload
+  homes_payload="$(printf '%s\n' "${homes[@]}")"
+
+  CODEX_THREAD_INDEX_HOMES="$homes_payload" python3 - <<'PY'
+import os
+import json
+import sqlite3
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+raw_homes = os.environ.get("CODEX_THREAD_INDEX_HOMES", "")
+homes = []
+seen = set()
+for line in raw_homes.splitlines():
+    home = Path(line).expanduser()
+    key = str(home)
+    if key and key not in seen:
+        seen.add(key)
+        homes.append(home)
+
+table_specs = [
+    ("threads", ("id",), ("updated_at_ms", "updated_at")),
+    ("thread_dynamic_tools", ("thread_id", "position"), ()),
+    ("thread_spawn_edges", ("child_thread_id",), ()),
+    ("stage1_outputs", ("thread_id",), ("source_updated_at",)),
+]
+
+def session_relative_path(rollout_path):
+    if not rollout_path:
+        return None
+    path = str(rollout_path)
+    marker = "/sessions/"
+    if marker not in path:
+        return None
+    return path.split(marker, 1)[1].lstrip("/")
+
+def normalize_thread_rollout_path(row, home):
+    rel = row.get("__session_rel")
+    if not rel:
+        rel = session_relative_path(row.get("rollout_path"))
+    if not rel:
+        return row.get("rollout_path")
+    return str(home / "sessions" / rel)
+
+def thread_updated_at_iso(row):
+    raw_ms = row.get("updated_at_ms")
+    raw_seconds = row.get("updated_at")
+    timestamp = None
+    if raw_ms is not None:
+        try:
+            timestamp = int(raw_ms) / 1000
+        except (TypeError, ValueError):
+            timestamp = None
+    if timestamp is None and raw_seconds is not None:
+        try:
+            timestamp = int(raw_seconds)
+        except (TypeError, ValueError):
+            timestamp = None
+    if timestamp is None:
+        timestamp = 0
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+def thread_index_name(row):
+    for key in ("title", "preview"):
+        value = str(row.get(key) or "").strip()
+        if not value:
+            continue
+        for line in value.splitlines():
+            name = " ".join(line.split())
+            if name:
+                if len(name) > 80:
+                    return name[:77].rstrip() + "..."
+                return name
+    return "Untitled"
+
+def session_index_records():
+    records = {}
+    for row in catalog.get("threads", {}).values():
+        thread_id = row.get("id")
+        if not thread_id:
+            continue
+        if row.get("rollout_path") is None:
+            continue
+        records[str(thread_id)] = {
+            "id": str(thread_id),
+            "thread_name": thread_index_name(row),
+            "updated_at": thread_updated_at_iso(row),
+        }
+    return records
+
+def session_index_paths_for_homes(homes):
+    paths = []
+    seen_paths = set()
+    for home in homes:
+        path = home / "session_index.jsonl"
+        try:
+            resolved = path.resolve(strict=False) if path.is_symlink() else path
+        except OSError:
+            resolved = path
+        key = str(resolved)
+        if key not in seen_paths:
+            seen_paths.add(key)
+            paths.append(resolved)
+    return paths
+
+def repair_session_index_files(homes):
+    thread_records = session_index_records()
+    if not thread_records:
+        return
+
+    for index_path in session_index_paths_for_homes(homes):
+        existing_lines = []
+        seen_ids = set()
+        changed = False
+        if index_path.exists():
+            try:
+                with index_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        raw_line = line.rstrip("\n")
+                        if not raw_line:
+                            continue
+                        try:
+                            record = json.loads(raw_line)
+                        except json.JSONDecodeError:
+                            existing_lines.append(raw_line)
+                            continue
+
+                        thread_id = str(record.get("id") or "")
+                        if thread_id:
+                            seen_ids.add(thread_id)
+                            fresh = thread_records.get(thread_id)
+                            if fresh:
+                                existing_updated = str(record.get("updated_at") or "")
+                                if fresh["updated_at"] > existing_updated:
+                                    record["updated_at"] = fresh["updated_at"]
+                                    changed = True
+                                existing_name = str(record.get("thread_name") or "").strip()
+                                if not existing_name or (len(existing_name) > 80 and len(fresh["thread_name"]) < len(existing_name)):
+                                    record["thread_name"] = fresh["thread_name"]
+                                    changed = True
+                        existing_lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            except OSError:
+                continue
+
+        missing_records = [record for thread_id, record in thread_records.items() if thread_id not in seen_ids]
+        if missing_records:
+            missing_records.sort(key=lambda record: record.get("updated_at", ""))
+            existing_lines.extend(json.dumps(record, ensure_ascii=False, separators=(",", ":")) for record in missing_records)
+            changed = True
+
+        if not changed:
+            continue
+
+        try:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = index_path.with_name(f".{index_path.name}.tmp-{os.getpid()}")
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                if existing_lines:
+                    handle.write("\n".join(existing_lines))
+                    handle.write("\n")
+            os.replace(tmp_path, index_path)
+        except OSError:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+def bootstrap_state_db(template_db, target_db):
+    if target_db.exists() or not template_db.exists():
+        return
+    target_db.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        source = sqlite3.connect(f"file:{template_db}?mode=ro", uri=True, timeout=3)
+        dest = sqlite3.connect(target_db, timeout=6)
+        source.execute("PRAGMA busy_timeout=3000")
+        dest.execute("PRAGMA busy_timeout=6000")
+
+        schema_rows = source.execute(
+            """
+            SELECT type, name, sql
+            FROM sqlite_master
+            WHERE sql IS NOT NULL
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY CASE type
+              WHEN 'table' THEN 0
+              WHEN 'index' THEN 1
+              WHEN 'trigger' THEN 2
+              ELSE 3
+            END, name
+            """
+        ).fetchall()
+        for _, _, sql in schema_rows:
+            dest.execute(sql)
+
+        if table_columns(source, "_sqlx_migrations") and table_columns(dest, "_sqlx_migrations"):
+            cols = table_columns(source, "_sqlx_migrations")
+            query_cols = ", ".join(f'"{col}"' for col in cols)
+            placeholders = ", ".join("?" for _ in cols)
+            for values in source.execute(f'SELECT {query_cols} FROM "_sqlx_migrations"'):
+                dest.execute(
+                    f'INSERT OR IGNORE INTO "_sqlx_migrations" ({query_cols}) VALUES ({placeholders})',
+                    values,
+                )
+        dest.commit()
+    except sqlite3.Error:
+        try:
+            dest.rollback()
+        except Exception:
+            pass
+        try:
+            target_db.unlink()
+        except Exception:
+            pass
+    finally:
+        try:
+            source.close()
+        except Exception:
+            pass
+        try:
+            dest.close()
+        except Exception:
+            pass
+
+def table_columns(con, table):
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return []
+    return [row[1] for row in rows]
+
+def row_marker(row, marker_cols):
+    for col in marker_cols:
+        value = row.get(col)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+def mark_backfill_complete(con):
+    if not table_columns(con, "backfill_state"):
+        return
+    now = int(time.time())
+    con.execute(
+        """
+        INSERT INTO backfill_state(id, status, last_watermark, last_success_at, updated_at)
+        VALUES (1, 'complete', NULL, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          status = 'complete',
+          last_success_at = ?,
+          updated_at = ?
+        """,
+        (now, now, now, now),
+    )
+
+catalog = {name: {} for name, _, _ in table_specs}
+
+template_db = next((home / "state_5.sqlite" for home in homes if (home / "state_5.sqlite").exists()), None)
+if template_db is not None:
+    for home in homes:
+        bootstrap_state_db(template_db, home / "state_5.sqlite")
+
+for home in homes:
+    db_path = home / "state_5.sqlite"
+    if not db_path.exists():
+        continue
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        con.execute("PRAGMA busy_timeout=3000")
+    except sqlite3.Error:
+        continue
+
+    try:
+        for table, key_cols, marker_cols in table_specs:
+            cols = table_columns(con, table)
+            if not cols or any(key not in cols for key in key_cols):
+                continue
+            query_cols = ", ".join(f'"{col}"' for col in cols)
+            for values in con.execute(f'SELECT {query_cols} FROM "{table}"'):
+                row = dict(zip(cols, values))
+                key = tuple(row.get(col) for col in key_cols)
+                if any(part is None for part in key):
+                    continue
+                if table == "threads":
+                    rel = session_relative_path(row.get("rollout_path"))
+                    if rel:
+                        row["__session_rel"] = rel
+                existing = catalog[table].get(key)
+                if existing is None:
+                    catalog[table][key] = row
+                elif marker_cols and row_marker(row, marker_cols) >= row_marker(existing, marker_cols):
+                    catalog[table][key] = row
+    except sqlite3.Error:
+        pass
+    finally:
+        con.close()
+
+for home in homes:
+    db_path = home / "state_5.sqlite"
+    if not db_path.exists() or db_path.is_symlink():
+        continue
+    try:
+        con = sqlite3.connect(db_path, timeout=6)
+        con.execute("PRAGMA busy_timeout=6000")
+        con.execute("PRAGMA foreign_keys=OFF")
+    except sqlite3.Error:
+        continue
+
+    try:
+        for table, key_cols, _ in table_specs:
+            dest_cols = table_columns(con, table)
+            if not dest_cols or any(key not in dest_cols for key in key_cols):
+                continue
+            for row in catalog[table].values():
+                write_row = dict(row)
+                if table == "threads" and "rollout_path" in dest_cols:
+                    write_row["rollout_path"] = normalize_thread_rollout_path(write_row, home)
+                cols = [col for col in dest_cols if col in write_row]
+                if any(key not in cols for key in key_cols):
+                    continue
+                placeholders = ", ".join("?" for _ in cols)
+                quoted_cols = ", ".join(f'"{col}"' for col in cols)
+                conflict_cols = ", ".join(f'"{col}"' for col in key_cols)
+                update_cols = [col for col in cols if col not in key_cols]
+                if update_cols:
+                    updates = ", ".join(f'"{col}" = excluded."{col}"' for col in update_cols)
+                    sql = (
+                        f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders}) '
+                        f'ON CONFLICT({conflict_cols}) DO UPDATE SET {updates}'
+                    )
+                else:
+                    sql = (
+                        f'INSERT OR IGNORE INTO "{table}" ({quoted_cols}) '
+                        f'VALUES ({placeholders})'
+                    )
+                con.execute(sql, [write_row.get(col) for col in cols])
+        mark_backfill_complete(con)
+        con.commit()
+    except sqlite3.Error:
+        con.rollback()
+    finally:
+        con.close()
+
+repair_session_index_files(homes)
+PY
 }
 
 sync_message() {
@@ -1079,6 +1634,7 @@ sync_selected_homes() {
 
   sync_memory_and_config_for_homes "${homes[@]}"
   sync_plugin_payloads_for_homes "${homes[@]}"
+  sync_thread_index_for_homes "${homes[@]}"
   sync_message
 }
 
@@ -1123,6 +1679,7 @@ sync_account_unlocked() {
 
   sync_memory_and_config_for_homes "${all_homes[@]}"
   sync_plugin_payloads_for_homes "${payload_homes[@]}"
+  sync_thread_index_for_homes "${all_homes[@]}"
   sync_message
 }
 
@@ -1400,6 +1957,7 @@ launch_account() {
   if [[ "$CODEX_PRELAUNCH_SYNC" == "1" ]]; then
     sync_account "$name" >/dev/null
   fi
+  prepare_profile_login_storage "$home_dir"
 
   echo "Launching Codex profile..."
   echo "  account=$(sanitize_account_name "$name")"
@@ -1487,12 +2045,38 @@ history_items() {
     "logs_2.sqlite" \
     "logs_2.sqlite-shm" \
     "logs_2.sqlite-wal" \
-    "state_5.sqlite" \
-    "state_5.sqlite-shm" \
-    "state_5.sqlite-wal" \
     "session_index.jsonl" \
     "sessions" \
     "shell_snapshots"
+}
+
+state_items() {
+  printf '%s\n' \
+    "state_5.sqlite" \
+    "state_5.sqlite-shm" \
+    "state_5.sqlite-wal"
+}
+
+remove_legacy_shared_state_links() {
+  local account_home="$1"
+  local item target source
+
+  [[ "$account_home" != "$PRIMARY_CODEX_HOME" ]] || return 0
+
+  state_items | while read -r item; do
+    target="$account_home/$item"
+    source="$PRIMARY_CODEX_HOME/$item"
+    if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
+      rm "$target"
+      echo "Removed legacy shared state link: $target"
+    fi
+  done
+}
+
+prepare_profile_login_storage() {
+  local account_home="$1"
+  mkdir -p "$account_home"
+  remove_legacy_shared_state_links "$account_home"
 }
 
 link_history_for() {
@@ -1512,6 +2096,7 @@ link_history_for() {
   fi
 
   mkdir -p "$account_home"
+  prepare_profile_login_storage "$account_home"
   echo "Linking $(sanitize_account_name "$name") to Account 1 local Codex history."
   echo "Keep auth separate:"
   echo "  Account 1: $PRIMARY_CODEX_HOME/auth.json"
@@ -1521,6 +2106,8 @@ link_history_for() {
   history_items | while read -r item; do
     replace_with_symlink "$account_home" "$item"
   done
+
+  sync_thread_index_for_homes "$PRIMARY_CODEX_HOME" "$account_home"
 }
 
 unlink_history_for() {
@@ -1534,7 +2121,7 @@ unlink_history_for() {
   local account_home
   account_home="$(account_home_for "$name")"
 
-  history_items | while read -r item; do
+  { history_items; state_items; } | while read -r item; do
     local target="$account_home/$item"
     if [[ -L "$target" ]]; then
       rm "$target"
