@@ -26,6 +26,7 @@ APP_SERVER_USAGE_TIMEOUT_SECONDS="${APP_SERVER_USAGE_TIMEOUT_SECONDS:-4}"
 CODEX_SYNC_PLUGIN_PAYLOADS="${CODEX_SYNC_PLUGIN_PAYLOADS:-0}"
 CODEX_FAST_SYNC_PLUGIN_PAYLOADS="${CODEX_FAST_SYNC_PLUGIN_PAYLOADS:-1}"
 CODEX_PRELAUNCH_SYNC="${CODEX_PRELAUNCH_SYNC:-1}"
+CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS="${CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS:-4}"
 CODEX_USAGE_LIVE_LOOKUP="${CODEX_USAGE_LIVE_LOOKUP:-0}"
 USAGE_CACHE_STALE_SECONDS="${USAGE_CACHE_STALE_SECONDS:-86400}"
 SYNC_LOCK_DIR="${SYNC_LOCK_DIR:-$APP_DATA_ROOT/.sync.lock}"
@@ -49,6 +50,7 @@ Usage:
   scripts/codex_multi_account.zsh launch-account2
   scripts/codex_multi_account.zsh sync-once
   scripts/codex_multi_account.zsh sync-account <account-name>
+  scripts/codex_multi_account.zsh sync-account-for-launch <account-name>
   scripts/codex_multi_account.zsh sync-loop
   scripts/codex_multi_account.zsh init-account <account-name>
   scripts/codex_multi_account.zsh launch-account <account-name> [display-name]
@@ -83,6 +85,9 @@ Notes:
     backup/install folders so pre-open sync stays fast. Set
     CODEX_SYNC_PLUGIN_PAYLOADS=1 to copy every plugins/, skills/, and
     vendor_imports/ payload.
+  - launch-account uses sync-account-for-launch: it reads shared state from all
+    profiles, but only writes the primary and target profile before opening so
+    account switching stays responsive. Use sync-once for a full fan-out sync.
   - Plugin enablement is merged across accounts from config.toml
     [plugins."..."] sections without copying the full config file.
   - link-account2-history is experimental: it makes Account 2 use Account 1's
@@ -108,6 +113,8 @@ ensure_dirs() {
 
 with_sync_lock() {
   local waited=0
+  local max_waits="${CODEX_SYNC_LOCK_MAX_WAITS:-20}"
+  local wait_interval="${CODEX_SYNC_LOCK_WAIT_SECONDS:-0.25}"
   while ! mkdir "$SYNC_LOCK_DIR" 2>/dev/null; do
     local lock_mtime now lock_age
     lock_mtime="$(stat -f '%m' "$SYNC_LOCK_DIR" 2>/dev/null || echo 0)"
@@ -117,11 +124,11 @@ with_sync_lock() {
       rmdir "$SYNC_LOCK_DIR" 2>/dev/null || true
       continue
     fi
-    if (( waited >= 20 )); then
+    if (( waited >= max_waits )); then
       echo "Sync is already running; continuing with existing synced state." >&2
       return 0
     fi
-    sleep 0.25
+    sleep "$wait_interval"
     waited=$(( waited + 1 ))
   done
   trap 'rmdir "$SYNC_LOCK_DIR" 2>/dev/null || true' EXIT
@@ -563,7 +570,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.4.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.4.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -937,6 +944,39 @@ sync_plugin_config_entries() {
   rm -f "$plugins_file"
 }
 
+sync_plugin_config_entries_to_selected_homes() {
+  local dest_count="$1"
+  shift || true
+
+  local -a dest_homes source_homes
+  local i home_dir plugins_file
+  dest_homes=()
+  for (( i = 1; i <= dest_count; i++ )); do
+    [[ $# -gt 0 ]] || break
+    dest_homes+=("$1")
+    shift
+  done
+  source_homes=("$@")
+  (( ${#dest_homes[@]} > 0 && ${#source_homes[@]} > 0 )) || return 0
+
+  plugins_file="$(mktemp)"
+
+  for home_dir in "${source_homes[@]}"; do
+    collect_enabled_plugins_from_config "$home_dir/config.toml"
+  done | sort -u > "$plugins_file"
+
+  if [[ ! -s "$plugins_file" ]]; then
+    rm -f "$plugins_file"
+    return 0
+  fi
+
+  for home_dir in "${dest_homes[@]}"; do
+    write_config_with_synced_plugins "$home_dir/config.toml" "$plugins_file"
+  done
+
+  rm -f "$plugins_file"
+}
+
 rsync_shared_payload_direct() {
   local source_home="$1"
   local target_home="$2"
@@ -1052,6 +1092,32 @@ sync_memory_and_config_for_homes() {
   sync_global_state_for_homes "${homes[@]}"
 }
 
+sync_memory_and_config_to_selected_homes() {
+  local dest_count="$1"
+  shift || true
+
+  local -a dest_homes source_homes
+  local i home_dir item
+  dest_homes=()
+  for (( i = 1; i <= dest_count; i++ )); do
+    [[ $# -gt 0 ]] || break
+    dest_homes+=("$1")
+    shift
+  done
+  source_homes=("$@")
+  (( ${#dest_homes[@]} > 0 && ${#source_homes[@]} > 0 )) || return 0
+
+  for item in "${SYNC_ITEMS[@]}"; do
+    for home_dir in "${source_homes[@]}"; do
+      rsync_item_to_shared "$home_dir" "$item"
+    done
+    for home_dir in "${dest_homes[@]}"; do
+      rsync_item_from_shared "$home_dir" "$item"
+    done
+  done
+  sync_plugin_config_entries_to_selected_homes "$dest_count" "${dest_homes[@]}" "${source_homes[@]}"
+}
+
 sync_plugin_payloads_for_homes() {
   local -a homes
   homes=("$@")
@@ -1072,21 +1138,30 @@ sync_goal_state_for_homes() {
 
   local homes_payload
   homes_payload="$(printf '%s\n' "${homes[@]}")"
+  local dest_payload
+  dest_payload="${CODEX_GOAL_STATE_DEST_HOMES:-}"
 
-  CODEX_GOAL_STATE_HOMES="$homes_payload" python3 - <<'PY'
+  CODEX_GOAL_STATE_HOMES="$homes_payload" CODEX_GOAL_STATE_DEST_HOMES="$dest_payload" python3 - <<'PY'
 import os
 import sqlite3
 from pathlib import Path
 
+def parse_home_lines(raw):
+    parsed = []
+    seen = set()
+    for line in raw.splitlines():
+        home = Path(line).expanduser()
+        key = str(home)
+        if key and key not in seen:
+            seen.add(key)
+            parsed.append(home)
+    return parsed
+
 raw_homes = os.environ.get("CODEX_GOAL_STATE_HOMES", "")
-homes = []
-seen = set()
-for line in raw_homes.splitlines():
-    home = Path(line).expanduser()
-    key = str(home)
-    if key and key not in seen:
-        seen.add(key)
-        homes.append(home)
+homes = parse_home_lines(raw_homes)
+dest_homes = parse_home_lines(os.environ.get("CODEX_GOAL_STATE_DEST_HOMES", ""))
+if not dest_homes:
+    dest_homes = homes
 
 def table_columns(con, table):
     try:
@@ -1166,7 +1241,7 @@ template_db = next((home / "goals_1.sqlite" for home in homes if (home / "goals_
 if template_db is None:
     raise SystemExit(0)
 
-for home in homes:
+for home in dest_homes:
     bootstrap_goal_db(template_db, home / "goals_1.sqlite")
 
 catalog = {}
@@ -1203,7 +1278,7 @@ for home in homes:
 if not catalog:
     raise SystemExit(0)
 
-for home in homes:
+for home in dest_homes:
     db_path = home / "goals_1.sqlite"
     if not db_path.exists() or db_path.is_symlink():
         continue
@@ -1252,23 +1327,33 @@ sync_global_state_for_homes() {
 
   local homes_payload
   homes_payload="$(printf '%s\n' "${homes[@]}")"
+  local dest_payload
+  dest_payload="${CODEX_GLOBAL_STATE_DEST_HOMES:-}"
 
-  CODEX_GLOBAL_STATE_HOMES="$homes_payload" python3 - <<'PY'
+  CODEX_GLOBAL_STATE_HOMES="$homes_payload" CODEX_GLOBAL_STATE_DEST_HOMES="$dest_payload" python3 - <<'PY'
 import json
 import os
 import shutil
 import sqlite3
 from pathlib import Path
 
+def parse_home_lines(raw):
+    parsed = []
+    seen_homes = set()
+    for line in raw.splitlines():
+        home = Path(line).expanduser()
+        key = str(home)
+        if key and key not in seen_homes:
+            seen_homes.add(key)
+            parsed.append(home)
+    return parsed
+
 raw_homes = os.environ.get("CODEX_GLOBAL_STATE_HOMES", "")
-homes = []
-seen_homes = set()
-for line in raw_homes.splitlines():
-    home = Path(line).expanduser()
-    key = str(home)
-    if key and key not in seen_homes:
-        seen_homes.add(key)
-        homes.append(home)
+homes = parse_home_lines(raw_homes)
+dest_homes = parse_home_lines(os.environ.get("CODEX_GLOBAL_STATE_DEST_HOMES", ""))
+if not dest_homes:
+    dest_homes = homes
+dest_home_keys = {str(home) for home in dest_homes}
 
 STATE_NAME = ".codex-global-state.json"
 ROOT_LIST_KEYS = (
@@ -1418,7 +1503,9 @@ merged_roots = sorted(
 )
 merged_root_set = set(merged_roots)
 
-for _, path, data in states:
+for home, path, data in states:
+    if str(home) not in dest_home_keys:
+        continue
     next_data = dict(data)
     for key in ROOT_LIST_KEYS:
         next_data[key] = merged_roots
@@ -1450,8 +1537,10 @@ sync_thread_index_for_homes() {
 
   local homes_payload
   homes_payload="$(printf '%s\n' "${homes[@]}")"
+  local dest_payload
+  dest_payload="${CODEX_THREAD_INDEX_DEST_HOMES:-}"
 
-  CODEX_THREAD_INDEX_HOMES="$homes_payload" python3 - <<'PY'
+  CODEX_THREAD_INDEX_HOMES="$homes_payload" CODEX_THREAD_INDEX_DEST_HOMES="$dest_payload" python3 - <<'PY'
 import os
 import json
 import sqlite3
@@ -1459,15 +1548,22 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+def parse_home_lines(raw):
+    parsed = []
+    seen = set()
+    for line in raw.splitlines():
+        home = Path(line).expanduser()
+        key = str(home)
+        if key and key not in seen:
+            seen.add(key)
+            parsed.append(home)
+    return parsed
+
 raw_homes = os.environ.get("CODEX_THREAD_INDEX_HOMES", "")
-homes = []
-seen = set()
-for line in raw_homes.splitlines():
-    home = Path(line).expanduser()
-    key = str(home)
-    if key and key not in seen:
-        seen.add(key)
-        homes.append(home)
+homes = parse_home_lines(raw_homes)
+dest_homes = parse_home_lines(os.environ.get("CODEX_THREAD_INDEX_DEST_HOMES", ""))
+if not dest_homes:
+    dest_homes = homes
 
 table_specs = [
     ("threads", ("id",), ("updated_at_ms", "updated_at")),
@@ -1709,7 +1805,7 @@ catalog = {name: {} for name, _, _ in table_specs}
 
 template_db = next((home / "state_5.sqlite" for home in homes if (home / "state_5.sqlite").exists()), None)
 if template_db is not None:
-    for home in homes:
+    for home in dest_homes:
         bootstrap_state_db(template_db, home / "state_5.sqlite")
 
 for home in homes:
@@ -1747,7 +1843,7 @@ for home in homes:
     finally:
         con.close()
 
-for home in homes:
+for home in dest_homes:
     db_path = home / "state_5.sqlite"
     if not db_path.exists() or db_path.is_symlink():
         continue
@@ -1793,7 +1889,7 @@ for home in homes:
     finally:
         con.close()
 
-repair_session_index_files(homes)
+repair_session_index_files(dest_homes)
 PY
 }
 
@@ -1817,6 +1913,66 @@ sync_selected_homes() {
   sync_thread_index_for_homes "${homes[@]}"
   sync_goal_state_for_homes "${homes[@]}"
   sync_message
+}
+
+dedupe_homes() {
+  local -A seen
+  local home_dir
+  for home_dir in "$@"; do
+    [[ -n "$home_dir" ]] || continue
+    if [[ -z "${seen[$home_dir]:-}" ]]; then
+      seen[$home_dir]=1
+      printf '%s\n' "$home_dir"
+    fi
+  done
+}
+
+sync_thread_index_to_selected_homes() {
+  local dest_count="$1"
+  shift || true
+  local -a dest_homes source_homes
+  local i
+  for (( i = 1; i <= dest_count; i++ )); do
+    [[ $# -gt 0 ]] || break
+    dest_homes+=("$1")
+    shift
+  done
+  source_homes=("$@")
+  local dest_payload
+  dest_payload="$(printf '%s\n' "${dest_homes[@]}")"
+  CODEX_THREAD_INDEX_DEST_HOMES="$dest_payload" sync_thread_index_for_homes "${source_homes[@]}"
+}
+
+sync_goal_state_to_selected_homes() {
+  local dest_count="$1"
+  shift || true
+  local -a dest_homes source_homes
+  local i
+  for (( i = 1; i <= dest_count; i++ )); do
+    [[ $# -gt 0 ]] || break
+    dest_homes+=("$1")
+    shift
+  done
+  source_homes=("$@")
+  local dest_payload
+  dest_payload="$(printf '%s\n' "${dest_homes[@]}")"
+  CODEX_GOAL_STATE_DEST_HOMES="$dest_payload" sync_goal_state_for_homes "${source_homes[@]}"
+}
+
+sync_global_state_to_selected_homes() {
+  local dest_count="$1"
+  shift || true
+  local -a dest_homes source_homes
+  local i
+  for (( i = 1; i <= dest_count; i++ )); do
+    [[ $# -gt 0 ]] || break
+    dest_homes+=("$1")
+    shift
+  done
+  source_homes=("$@")
+  local dest_payload
+  dest_payload="$(printf '%s\n' "${dest_homes[@]}")"
+  CODEX_GLOBAL_STATE_DEST_HOMES="$dest_payload" sync_global_state_for_homes "${source_homes[@]}"
 }
 
 collect_account_homes() {
@@ -1865,6 +2021,29 @@ sync_account_unlocked() {
   sync_message
 }
 
+sync_account_prelaunch_unlocked() {
+  local name="$1"
+  local target_home home_dir
+  local -a all_homes dest_homes payload_homes
+  target_home="$(account_home_for "$name")"
+  mkdir -p "$target_home"
+
+  all_homes=()
+  while read -r home_dir; do
+    all_homes+=("$home_dir")
+  done < <(collect_account_homes)
+
+  dest_homes=("${(@f)$(dedupe_homes "$PRIMARY_CODEX_HOME" "$target_home")}")
+  payload_homes=("${dest_homes[@]}")
+
+  sync_memory_and_config_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
+  sync_global_state_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
+  sync_plugin_payloads_for_homes "${payload_homes[@]}"
+  sync_thread_index_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
+  sync_goal_state_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
+  sync_message
+}
+
 sync_account() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
@@ -1876,6 +2055,19 @@ sync_account() {
   ensure_dirs
 
   with_sync_lock sync_account_unlocked "$name"
+}
+
+sync_account_for_launch() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "sync-account-for-launch requires an account name." >&2
+    exit 2
+  fi
+
+  require_rsync
+  ensure_dirs
+
+  CODEX_SYNC_LOCK_MAX_WAITS="$CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS" with_sync_lock sync_account_prelaunch_unlocked "$name"
 }
 
 sync_loop() {
@@ -2137,7 +2329,7 @@ launch_account() {
     copy_initial_profile_to "$home_dir"
   fi
   if [[ "$CODEX_PRELAUNCH_SYNC" == "1" ]]; then
-    sync_account "$name" >/dev/null
+    sync_account_for_launch "$name" >/dev/null
   fi
   prepare_profile_login_storage "$home_dir"
 
@@ -2338,6 +2530,7 @@ main() {
     launch-account2) launch_account2 ;;
     sync-once) sync_once ;;
     sync-account) sync_account "${2:-}" ;;
+    sync-account-for-launch) sync_account_for_launch "${2:-}" ;;
     sync-loop) sync_loop ;;
     init-account) init_account "${2:-}" ;;
     launch-account) launch_account "${2:-}" "${3:-}" ;;

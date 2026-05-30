@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.4.2 更新介紹
+
+V2.4.2 優化切換帳號時嘅 pre-launch 同步。打開 profile 前會先由所有 profile 收集最新記憶、project sidebar、thread index 同 goal mode state，但只寫返 primary 同即將打開嗰個 profile；手動「立即同步」仍然會做完整 fan-out。呢個版本大幅減少切換帳號後等待對話載入嘅時間，同時保留 project 對話同目標模式同步。
+
 ### V2.4.1 更新介紹
 
 V2.4.1 修復 Codex 目標模式跨 profile 失效嘅問題。同步流程依家會合併各 profile 嘅 `goals_1.sqlite` / `thread_goals`，所以暫停中或進行中嘅目標喺換帳號後都可以繼續，避免因為目標 row 只存在其中一個 profile 而出現「無法更新目標」或「建立任務 timeout」。
@@ -96,7 +100,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.4.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.4.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -160,6 +164,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.4.2 更新介绍
+
+V2.4.2 优化切换账号时的 pre-launch 同步。打开 profile 前会先从所有 profile 收集最新记忆、project sidebar、thread index 和 goal mode state，但只写回 primary 和即将打开的 profile；手动“立即同步”仍然会做完整 fan-out。这个版本大幅减少切换账号后等待对话加载的时间，同时保留 project 对话和目标模式同步。
 
 ### V2.4.1 更新介绍
 
@@ -235,7 +243,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.4.1 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.4.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -299,6 +307,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.4.2 Update
+
+V2.4.2 optimizes the pre-launch sync used when switching accounts. Before opening a profile, Codex Accounts still reads the latest memory, project sidebar, thread index, and goal mode state from every profile, but writes only the primary profile and the profile being opened. Manual "Sync now" still performs the full fan-out sync. This significantly reduces the wait before switched profiles finish loading conversations while preserving project-thread and goal-mode sync.
 
 ### V2.4.1 Update
 
@@ -374,7 +386,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.4.1, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.4.2, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 
