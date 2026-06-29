@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${APP_PATH:-/Applications/Codex Accounts.app}"
 SRC_DIR="$ROOT_DIR/macos/CodexAccounts"
+BUILD_ARCH="${BUILD_ARCH:-$(uname -m)}"
+MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-14.0}"
 CONTENTS="$APP_PATH/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -34,6 +36,7 @@ if [[ -d "$SRC_DIR/ProfileLetterIcons" ]]; then
 fi
 
 swiftc \
+  -target "$BUILD_ARCH-apple-macos$MACOS_DEPLOYMENT_TARGET" \
   "$SRC_DIR/Sources/CodexAccounts.swift" \
   -framework AppKit \
   -framework CoreGraphics \

@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.4.3 更新介紹
+
+V2.4.3 修復跨 profile 共享對話紀錄時，project 對話一撳就消失或載入過慢嘅問題。同步流程依家會補齊每個 profile 嘅 `state_5.sqlite` thread metadata，並會由 `backups/history-link-*` 復原漏咗嘅 rollout / shell snapshot 檔；同時清理空白 project sidebar cache，令不同帳戶打開時都見到同一套最新對話紀錄。
+
 ### V2.4.2 更新介紹
 
 V2.4.2 優化切換帳號時嘅 pre-launch 同步。打開 profile 前會先由所有 profile 收集最新記憶、project sidebar、thread index 同 goal mode state，但只寫返 primary 同即將打開嗰個 profile；手動「立即同步」仍然會做完整 fan-out。呢個版本大幅減少切換帳號後等待對話載入嘅時間，同時保留 project 對話同目標模式同步。
@@ -100,7 +104,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.4.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.4.3 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -164,6 +168,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.4.3 更新介绍
+
+V2.4.3 修复跨 profile 共享对话记录时，project 对话一点就消失或加载过慢的问题。同步流程现在会补齐每个 profile 的 `state_5.sqlite` thread metadata，并会从 `backups/history-link-*` 复原遗漏的 rollout / shell snapshot 文件；同时清理空白 project sidebar cache，让不同账号打开时都看到同一套最新对话记录。
 
 ### V2.4.2 更新介绍
 
@@ -243,7 +251,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.4.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.4.3 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -307,6 +315,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.4.3 Update
+
+V2.4.3 fixes disappearing or slow-loading project conversations when multiple profiles share one local history set. The sync flow now backfills each profile's `state_5.sqlite` thread metadata, restores missing rollout / shell snapshot files from `backups/history-link-*`, and prunes empty project sidebar cache so every account opens the same latest conversation history.
 
 ### V2.4.2 Update
 
@@ -386,7 +398,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.4.2, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.4.3, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

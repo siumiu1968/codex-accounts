@@ -6,8 +6,11 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import mimetypes
 import os
+import re
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -27,10 +30,52 @@ SESSION_SECONDS = 60 * 60 * 24 * 30
 PBKDF2_ROUNDS = 240_000
 DEFAULT_CODEX_TIMEOUT = 1800
 DEFAULT_MAX_CODEX_CHARS = 9000
+DEFAULT_REMOTE_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
+DEFAULT_REMOTE_ATTACHMENT_TTL_SECONDS = 60 * 60 * 24 * 14
+DEFAULT_VPS_HOST = os.environ.get("CODEX_REMOTE_VPS_HOST", "armjp")
+DEFAULT_VPS_HOME = os.environ.get("CODEX_REMOTE_VPS_HOME", "/home/ubuntu")
+DEFAULT_VPS_CODEX_ACCOUNTS_DIR = os.environ.get("CODEX_REMOTE_VPS_CODEX_ACCOUNTS_DIR", f"{DEFAULT_VPS_HOME}/.codex-accounts")
+DEFAULT_VPS_DEFAULT_CODEX_HOME = os.environ.get("CODEX_REMOTE_VPS_DEFAULT_CODEX_HOME", f"{DEFAULT_VPS_HOME}/.codex")
+DEFAULT_VPS_SSH_TIMEOUT = int(os.environ.get("CODEX_REMOTE_VPS_SSH_TIMEOUT", "8"))
+DEFAULT_VPS_LIST_TIMEOUT = int(os.environ.get("CODEX_REMOTE_VPS_LIST_TIMEOUT", "4"))
+DEFAULT_PROFILES_CACHE_SECONDS = float(os.environ.get("CODEX_REMOTE_PROFILES_CACHE_SECONDS", "8"))
+DEFAULT_ACCOUNT_HOME_CACHE_SECONDS = float(os.environ.get("CODEX_REMOTE_ACCOUNT_HOME_CACHE_SECONDS", "60"))
 LOGIN_FAILURES = {}
 LOGIN_WINDOW_SECONDS = 10 * 60
 MAX_LOGIN_FAILURES = 8
-MAX_REQUEST_BYTES = 1024 * 1024
+MAX_REQUEST_BYTES = 24 * 1024 * 1024
+REMOTE_ATTACHMENTS_DIR = APP_SUPPORT / "remote-attachments"
+SYNC_INCLUDE_NAMES = {
+    ".codex-global-state.json",
+    "AGENTS.md",
+    "auth.json",
+    "config.toml",
+    "goals_1.sqlite",
+    "goals_1.sqlite-shm",
+    "goals_1.sqlite-wal",
+    "installation_id",
+    "keybindings.json",
+    "logs_2.sqlite",
+    "logs_2.sqlite-shm",
+    "logs_2.sqlite-wal",
+    "memories_1.sqlite",
+    "memories_1.sqlite-shm",
+    "memories_1.sqlite-wal",
+    "models_cache.json",
+    "session_index.jsonl",
+    "state_5.sqlite",
+    "state_5.sqlite-shm",
+    "state_5.sqlite-wal",
+}
+SYNC_INCLUDE_DIRS = {
+    "bin",
+    "computer-use",
+    "memories",
+    "rules",
+    "sessions",
+    "shell_snapshots",
+    "sqlite",
+}
 
 
 class PayloadTooLarge(ValueError):
@@ -266,12 +311,146 @@ def parse_pipe_lines(text):
     return rows
 
 
+def shell_join(args):
+    return " ".join(shlex.quote(str(arg)) for arg in args)
+
+
+def run_ssh(host, remote_script, timeout=DEFAULT_VPS_SSH_TIMEOUT, input_text=None):
+    completed = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            host,
+            "sh -lc " + shlex.quote(remote_script),
+        ],
+        input=input_text,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+    output = completed.stdout.strip()
+    if completed.returncode != 0:
+        raise RuntimeError(output or f"ssh command failed on {host}")
+    return output
+
+
+def safe_remote_profile_id(profile_id):
+    value = str(profile_id or "").strip()
+    if not value:
+        raise ValueError("Missing profile id")
+    if not all(ch.isalnum() or ch in "._-" for ch in value):
+        raise ValueError("Invalid profile id")
+    return value
+
+
+def remote_codex_home(profile_id=""):
+    if profile_id:
+        return f"{DEFAULT_VPS_CODEX_ACCOUNTS_DIR.rstrip('/')}/{safe_remote_profile_id(profile_id)}"
+    return DEFAULT_VPS_DEFAULT_CODEX_HOME
+
+
 def truncate_text(text, max_chars=DEFAULT_MAX_CODEX_CHARS):
     text = (text or "").strip()
     if len(text) <= max_chars:
         return text
     keep = max_chars - 120
     return text[:keep].rstrip() + "\n\n[Output truncated by Codex Remote bridge.]"
+
+
+def short_error(exc, max_chars=220):
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"timeout after {exc.timeout}s"
+    return truncate_text(str(exc).replace("\n", " "), max_chars)
+
+
+def _attachment_max_bytes():
+    try:
+        return int(os.environ.get("CODEX_REMOTE_ATTACHMENT_MAX_BYTES", DEFAULT_REMOTE_ATTACHMENT_MAX_BYTES))
+    except ValueError:
+        return DEFAULT_REMOTE_ATTACHMENT_MAX_BYTES
+
+
+def _safe_attachment_name(name, mime_type, index):
+    raw = Path(str(name or f"attachment-{index}")).name
+    raw = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip(".-")
+    if not raw:
+        raw = f"attachment-{index}"
+    if not Path(raw).suffix:
+        guessed = mimetypes.guess_extension(str(mime_type or "").split(";", 1)[0].strip())
+        if guessed:
+            raw += guessed
+    return raw[:96]
+
+
+def materialize_remote_attachments(attachments):
+    if not isinstance(attachments, list) or not attachments:
+        return []
+    max_bytes = _attachment_max_bytes()
+    batch_dir = REMOTE_ATTACHMENTS_DIR / (time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4))
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    materialized = []
+    for index, item in enumerate(attachments[:8], start=1):
+        if not isinstance(item, dict):
+            continue
+        data_b64 = str(item.get("dataBase64") or "").strip()
+        if not data_b64:
+            continue
+        try:
+            data = base64.b64decode(data_b64, validate=True)
+        except Exception as exc:
+            raise ValueError(f"Attachment {index} is not valid base64") from exc
+        if len(data) > max_bytes:
+            raise ValueError(f"Attachment {index} is too large ({len(data)} bytes)")
+        mime_type = str(item.get("mimeType") or item.get("mime_type") or "application/octet-stream")
+        filename = _safe_attachment_name(item.get("name"), mime_type, index)
+        path = batch_dir / filename
+        path.write_bytes(data)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        materialized.append({"path": str(path), "name": filename, "mimeType": mime_type})
+    return materialized
+
+
+def prune_remote_attachments():
+    try:
+        ttl = int(os.environ.get("CODEX_REMOTE_ATTACHMENT_TTL_SECONDS", DEFAULT_REMOTE_ATTACHMENT_TTL_SECONDS))
+    except ValueError:
+        ttl = DEFAULT_REMOTE_ATTACHMENT_TTL_SECONDS
+    if ttl <= 0 or not REMOTE_ATTACHMENTS_DIR.exists():
+        return
+    cutoff = time.time() - ttl
+    for path in REMOTE_ATTACHMENTS_DIR.iterdir():
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def build_codex_prompt_with_attachments(text, attachments):
+    text = str(text or "").strip()
+    if not attachments:
+        return text
+    lines = [
+        text or "請分析我上傳嘅附件。",
+        "",
+        "Codex Remote 已經將手機附件同步到呢部 Mac；請直接檢視以下本機路徑。",
+    ]
+    for index, item in enumerate(attachments, start=1):
+        mime_type = str(item.get("mimeType") or "")
+        kind = "圖片" if mime_type.startswith("image/") else "附件"
+        lines.append(f"{index}. {kind}: {item.get('path')} ({mime_type or 'unknown'})")
+    return "\n".join(lines).strip()
 
 
 def parse_quota_score(quota):
@@ -319,6 +498,10 @@ def local_ip_hint():
 class BridgeState:
     def __init__(self, script_path):
         self.script_path = script_path
+        self._profiles_cache_at = 0.0
+        self._profiles_cache = []
+        self._account_homes_cache_at = 0.0
+        self._account_homes_cache = {}
 
     def has_users(self):
         return bool(load_json(USERS_PATH, {}).get("users", {}))
@@ -359,12 +542,34 @@ class BridgeState:
         save_json(SESSIONS_PATH, sessions)
         return "Logged out"
 
-    def profiles(self):
-        accounts_output = run_script(self.script_path, ["list-accounts"], timeout=20)
+    def account_homes(self, force=False):
+        now = time.time()
+        if (
+            not force
+            and self._account_homes_cache
+            and now - self._account_homes_cache_at < DEFAULT_ACCOUNT_HOME_CACHE_SECONDS
+        ):
+            return dict(self._account_homes_cache)
+
+        accounts_output = run_script(self.script_path, ["list-accounts"], timeout=12)
         homes = {}
         for row in parse_pipe_lines(accounts_output):
             if len(row) >= 2:
                 homes[row[0]] = row[1]
+        self._account_homes_cache_at = time.time()
+        self._account_homes_cache = dict(homes)
+        return homes
+
+    def profiles(self, force=False):
+        now = time.time()
+        if (
+            not force
+            and self._profiles_cache
+            and now - self._profiles_cache_at < DEFAULT_PROFILES_CACHE_SECONDS
+        ):
+            return [dict(profile) for profile in self._profiles_cache]
+
+        homes = self.account_homes(force=force)
 
         status_output = run_script(self.script_path, ["list-accounts-status"], timeout=45)
         statuses = {}
@@ -386,7 +591,21 @@ class BridgeState:
                 "quota": status[4] if len(status) > 4 else "unknown",
                 "reset": status[5] if len(status) > 5 else "unknown",
             })
+        self._profiles_cache_at = time.time()
+        self._profiles_cache = [dict(profile) for profile in profiles]
         return profiles
+
+    def targets(self):
+        return [
+            {
+                "id": "mac",
+                "name": "MacBook Codex",
+                "kind": "desktop",
+                "ready": True,
+                "detail": local_ip_hint(),
+            },
+            self.vps_status(raise_on_error=False, timeout=3),
+        ]
 
     def best_profile(self):
         signed = []
@@ -402,6 +621,52 @@ class BridgeState:
             signed.sort(key=lambda item: item[0], reverse=True)
             return signed[0][1]
         return fallback
+
+    def cached_best_profile(self):
+        if not self._profiles_cache:
+            return None
+        signed = []
+        fallback = self._profiles_cache[0] if self._profiles_cache else None
+        for profile in self._profiles_cache:
+            if profile.get("authStatus") == "signed_in_local":
+                signed.append((parse_quota_score(profile.get("quota")), profile))
+        if signed:
+            signed.sort(key=lambda item: item[0], reverse=True)
+            return dict(signed[0][1])
+        return dict(fallback) if fallback else None
+
+    def light_profile_by_id(self, profile_id):
+        wanted = str(profile_id or "").strip()
+        homes = self.account_homes()
+        if wanted and wanted in homes:
+            return {
+                "id": wanted,
+                "displayName": self.display_name_for(wanted),
+                "home": homes[wanted],
+                "authStatus": "unknown",
+                "authMode": "unknown",
+                "lastRefresh": "unknown",
+                "quota": "unknown",
+                "reset": "unknown",
+            }
+        if homes:
+            profile_id, home = next(iter(homes.items()))
+            return {
+                "id": profile_id,
+                "displayName": self.display_name_for(profile_id),
+                "home": home,
+                "authStatus": "unknown",
+                "authMode": "unknown",
+                "lastRefresh": "unknown",
+                "quota": "unknown",
+                "reset": "unknown",
+            }
+        return None
+
+    def conversation_profile(self, profile_id=""):
+        if profile_id:
+            return self.light_profile_by_id(profile_id)
+        return self.cached_best_profile() or self.light_profile_by_id("")
 
     def display_name_for(self, profile_id):
         if profile_id == "account1":
@@ -424,6 +689,103 @@ class BridgeState:
         run_script(self.script_path, ["sync-once"], timeout=45)
         return "Synced local memory"
 
+    def sync_vps(self, direction="push"):
+        direction = str(direction or "push").strip().lower()
+        if direction not in {"push", "pull", "two-way"}:
+            raise ValueError("direction must be push, pull, or two-way")
+        profiles = self.profiles()
+        run_ssh(
+            DEFAULT_VPS_HOST,
+            "mkdir -p "
+            + shlex.quote(DEFAULT_VPS_CODEX_ACCOUNTS_DIR)
+            + " "
+            + shlex.quote(DEFAULT_VPS_DEFAULT_CODEX_HOME),
+            timeout=DEFAULT_VPS_SSH_TIMEOUT,
+        )
+
+        copied = 0
+        if direction in {"pull", "two-way"}:
+            self._rsync_vps_home(DEFAULT_VPS_DEFAULT_CODEX_HOME + "/", str(Path.home() / ".codex") + "/", pull=True)
+            copied += 1
+            for profile in profiles:
+                profile_id = safe_remote_profile_id(profile.get("id"))
+                local_home = str(Path(str(profile.get("home") or "")).expanduser()) + "/"
+                self._rsync_vps_home(remote_codex_home(profile_id) + "/", local_home, pull=True)
+                copied += 1
+
+        if direction in {"push", "two-way"}:
+            self._rsync_vps_home(str(Path.home() / ".codex") + "/", DEFAULT_VPS_DEFAULT_CODEX_HOME + "/", pull=False)
+            copied += 1
+            for profile in profiles:
+                profile_id = safe_remote_profile_id(profile.get("id"))
+                local_home = str(Path(str(profile.get("home") or "")).expanduser()) + "/"
+                self._rsync_vps_home(local_home, remote_codex_home(profile_id) + "/", pull=False)
+                copied += 1
+        return {
+            "ok": True,
+            "target": "vps",
+            "host": DEFAULT_VPS_HOST,
+            "direction": direction,
+            "items": copied,
+            "message": f"Synced Codex homes with VPS ({direction})",
+        }
+
+    def _rsync_vps_home(self, source, destination, pull):
+        include_args = []
+        for name in sorted(SYNC_INCLUDE_NAMES):
+            include_args += ["--include", f"/{name}"]
+        for name in sorted(SYNC_INCLUDE_DIRS):
+            include_args += ["--include", f"/{name}/***"]
+        include_args += ["--exclude", "*"]
+        base_args = [
+            "rsync",
+            "-a",
+            "--update",
+            "-e",
+            "ssh -o BatchMode=yes -o ConnectTimeout=10",
+        ] + include_args
+        if pull:
+            args = base_args + [f"{DEFAULT_VPS_HOST}:{source}", destination]
+        else:
+            run_ssh(DEFAULT_VPS_HOST, "mkdir -p " + shlex.quote(destination.rstrip("/")), timeout=DEFAULT_VPS_SSH_TIMEOUT)
+            args = base_args + [source, f"{DEFAULT_VPS_HOST}:{destination}"]
+        completed = subprocess.run(
+            args,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stdout.strip() or "rsync failed")
+
+    def vps_status(self, raise_on_error=True, timeout=DEFAULT_VPS_SSH_TIMEOUT):
+        payload = {
+            "id": "vps",
+            "name": "Japan VPS Codex CLI",
+            "kind": "cli",
+            "host": DEFAULT_VPS_HOST,
+            "ready": False,
+            "detail": "Not checked",
+            "message": "VPS not checked",
+        }
+        try:
+            output = run_ssh(
+                DEFAULT_VPS_HOST,
+                "printf 'host='; hostname; printf 'codex='; command -v codex || true; printf 'version='; codex --version 2>/dev/null || true",
+                timeout=timeout,
+            )
+            payload["ready"] = "codex=" in output and not output.rstrip().endswith("codex=")
+            payload["detail"] = output
+            payload["message"] = "VPS Codex CLI reachable" if payload["ready"] else "VPS reachable, Codex CLI not found"
+            return payload
+        except Exception as exc:
+            payload["detail"] = str(exc)
+            payload["message"] = "VPS offline or VPN not connected"
+            if raise_on_error:
+                raise
+            return payload
+
     def share_all(self):
         run_script(self.script_path, ["link-all-history"], timeout=45)
         return "Shared local history with all profiles"
@@ -439,8 +801,11 @@ class BridgeState:
         paste_to_codex(text, submit)
         return "Sent prompt" if submit else "Pasted prompt"
 
-    def codex_conversations(self, profile_id="", limit=10):
-        profile = self.profile_by_id(profile_id) if profile_id else self.best_profile()
+    def codex_conversations(self, profile_id="", limit=10, target="mac"):
+        target = str(target or "mac").strip().lower()
+        if target == "vps":
+            return self.vps_conversations(profile_id=profile_id, limit=limit)
+        profile = self.conversation_profile(profile_id)
         if not profile:
             return {"profile": None, "conversations": []}
         home = Path(str(profile.get("home") or "")).expanduser()
@@ -453,16 +818,99 @@ class BridgeState:
             "conversations": rows[: max(1, int(limit or 10))],
         }
 
-    def codex_ask(self, profile_id, session_id, text, timeout=DEFAULT_CODEX_TIMEOUT):
+    def vps_conversations(self, profile_id="", limit=10):
+        selected_profile = self.conversation_profile(profile_id)
+        profile_id = str((selected_profile or {}).get("id") or profile_id or "").strip()
+        home = remote_codex_home(profile_id) if profile_id else DEFAULT_VPS_DEFAULT_CODEX_HOME
+        script = r'''
+python3 - "$1" "$2" <<'PY'
+import json, os, sqlite3, sys, time
+home = os.path.expanduser(sys.argv[1])
+limit = int(sys.argv[2] or "20")
+rows = []
+db = os.path.join(home, "state_5.sqlite")
+if os.path.exists(db):
+    try:
+        conn = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=2)
+        cur = conn.execute("""
+            SELECT id,
+                   COALESCE(NULLIF(title, ''), NULLIF(first_user_message, ''), 'Untitled') AS title,
+                   COALESCE(cwd, '') AS cwd,
+                   COALESCE(updated_at_ms, updated_at * 1000, created_at_ms, created_at * 1000, 0) AS updated_ms
+            FROM threads
+            WHERE COALESCE(archived, 0) = 0
+            ORDER BY updated_ms DESC, id DESC
+            LIMIT ?
+        """, (limit,))
+        for sid, title, cwd, updated_ms in cur.fetchall():
+            updated = ""
+            if updated_ms:
+                try:
+                    updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(updated_ms) / 1000))
+                except Exception:
+                    updated = ""
+            rows.append({"id": str(sid), "title": str(title), "cwd": str(cwd or ""), "projectLabel": os.path.basename(cwd) if cwd else "", "updatedAt": updated, "source": "vps_threads_sqlite"})
+        conn.close()
+    except Exception:
+        rows = []
+idx = os.path.join(home, "session_index.jsonl")
+if not rows and os.path.exists(idx):
+    try:
+        for line in open(idx, encoding="utf-8", errors="replace"):
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            sid = str(item.get("id") or "")
+            if sid:
+                rows.append({"id": sid, "title": str(item.get("thread_name") or sid), "updatedAt": str(item.get("updated_at") or ""), "cwd": "", "projectLabel": "", "source": "vps_session_index"})
+            if len(rows) >= limit:
+                break
+    except Exception:
+        pass
+print(json.dumps({"conversations": rows[:limit]}, ensure_ascii=False))
+PY
+'''
+        try:
+            output = run_ssh(
+                DEFAULT_VPS_HOST,
+                "set -- " + shlex.quote(home) + " " + shlex.quote(str(max(1, int(limit or 10)))) + "; " + script,
+                timeout=max(1, min(DEFAULT_VPS_SSH_TIMEOUT, DEFAULT_VPS_LIST_TIMEOUT)),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"VPS offline or VPN not connected ({short_error(exc)})")
+        data = json.loads(output or "{}")
+        return {
+            "target": "vps",
+            "profile": selected_profile,
+            "conversations": data.get("conversations", []),
+        }
+
+    def codex_ask(self, profile_id, session_id, text, timeout=DEFAULT_CODEX_TIMEOUT, target="mac", attachments=None):
         text = str(text or "").strip()
+        if str(target or "mac").strip().lower() == "vps":
+            if attachments:
+                raise ValueError("Attachments are currently supported on the MacBook target only.")
+            return self.vps_ask(profile_id, session_id, text, timeout=timeout)
+        materialized_attachments = materialize_remote_attachments(attachments)
+        if not text and materialized_attachments:
+            text = "請分析我上傳嘅附件。"
         if not text:
             raise ValueError("Missing prompt text")
-        profile = self.profile_by_id(profile_id) if profile_id else self.best_profile()
+        profile = self.conversation_profile(profile_id)
         if not profile:
             raise ValueError("No Codex profile found")
         home = Path(str(profile.get("home") or "")).expanduser()
         if not session_id:
             raise ValueError("Missing Codex session id")
+
+        prune_remote_attachments()
+        prompt = build_codex_prompt_with_attachments(text, materialized_attachments)
+        image_paths = [
+            str(item.get("path"))
+            for item in materialized_attachments
+            if str(item.get("mimeType") or "").startswith("image/") and item.get("path")
+        ]
 
         with tempfile.NamedTemporaryFile("w+", prefix="codex-remote-last-", suffix=".txt", delete=False) as tmp:
             last_path = tmp.name
@@ -475,11 +923,15 @@ class BridgeState:
             "resume",
             "--all",
             "--skip-git-repo-check",
+        ]
+        for image_path in image_paths:
+            cmd.extend(["--image", image_path])
+        cmd.extend([
             "--output-last-message",
             last_path,
             str(session_id),
-            text,
-        ]
+            prompt,
+        ])
         try:
             proc = subprocess.run(
                 cmd,
@@ -523,6 +975,57 @@ class BridgeState:
             "sessionId": session_id,
             "exitCode": proc.returncode,
             "output": truncate_text(output or "Codex returned no final message."),
+        }
+
+    def vps_ask(self, profile_id, session_id, text, timeout=DEFAULT_CODEX_TIMEOUT):
+        selected_profile = self.conversation_profile(profile_id)
+        if not selected_profile and not profile_id:
+            raise ValueError("No Codex profile found")
+        profile_id = str((selected_profile or {}).get("id") or profile_id or "").strip()
+        if not session_id:
+            raise ValueError("Missing Codex session id")
+        home = remote_codex_home(profile_id) if profile_id else DEFAULT_VPS_DEFAULT_CODEX_HOME
+        remote_last = f"/tmp/codex-remote-last-{secrets.token_hex(8)}.txt"
+        cmd = [
+            "env",
+            f"CODEX_HOME={home}",
+            "codex",
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "resume",
+            "--all",
+            "--skip-git-repo-check",
+            "--output-last-message",
+            remote_last,
+            str(session_id),
+            text,
+        ]
+        remote_script = shell_join(cmd) + "; code=$?; cat " + shlex.quote(remote_last) + " 2>/dev/null || true; rm -f " + shlex.quote(remote_last) + "; exit $code"
+        try:
+            output = run_ssh(DEFAULT_VPS_HOST, remote_script, timeout=int(timeout or DEFAULT_CODEX_TIMEOUT))
+            ok = True
+            exit_code = 0
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "target": "vps",
+                "profile": selected_profile,
+                "sessionId": session_id,
+                "exitCode": 124,
+                "output": f"VPS Codex timed out after {int(timeout or DEFAULT_CODEX_TIMEOUT)}s.",
+            }
+        except Exception as exc:
+            ok = False
+            exit_code = 1
+            output = f"VPS offline or VPN not connected ({short_error(exc)})"
+        return {
+            "ok": ok,
+            "target": "vps",
+            "profile": selected_profile,
+            "sessionId": session_id,
+            "exitCode": exit_code,
+            "output": truncate_text(output or "VPS Codex returned no final message."),
         }
 
     def profile_by_id(self, profile_id):
@@ -636,14 +1139,18 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return
             self.require_auth()
+            if path == "/targets":
+                self.write_json({"targets": self.state.targets()})
+                return
             if path == "/profiles":
                 self.write_json({"profiles": self.state.profiles()})
                 return
             if path == "/codex/conversations":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 profile_id = (query.get("profileId") or [""])[0]
+                target = (query.get("target") or ["mac"])[0]
                 limit = int((query.get("limit") or ["10"])[0] or 10)
-                self.write_json(self.state.codex_conversations(profile_id=profile_id, limit=limit))
+                self.write_json(self.state.codex_conversations(profile_id=profile_id, limit=limit, target=target))
                 return
             self.not_found()
         except StopIteration:
@@ -687,6 +1194,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/sync":
                 self.write_json({"ok": True, "message": self.state.sync()})
                 return
+            if path == "/vps/status":
+                self.write_json(self.state.vps_status(raise_on_error=False))
+                return
+            if path == "/vps/sync":
+                direction = str(body.get("direction", "push")).strip()
+                self.write_json(self.state.sync_vps(direction=direction))
+                return
             if path == "/share-all":
                 self.write_json({"ok": True, "message": self.state.share_all()})
                 return
@@ -707,6 +1221,8 @@ class Handler(BaseHTTPRequestHandler):
                     str(body.get("sessionId", "")).strip(),
                     str(body.get("text", "")).strip(),
                     timeout=int(body.get("timeout", DEFAULT_CODEX_TIMEOUT) or DEFAULT_CODEX_TIMEOUT),
+                    target=str(body.get("target", "mac")).strip(),
+                    attachments=body.get("attachments") or [],
                 )
                 self.write_json(result, status=200 if result.get("ok") else 500)
                 return

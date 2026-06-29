@@ -7,6 +7,7 @@ import IOKit
 import SwiftUI
 
 private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .utility)
+private let profileRefreshPayloadSeparator = "\u{1E}"
 
 private final class ProcessFinishState {
     private let lock = NSLock()
@@ -80,6 +81,25 @@ private struct AppThemeOption: Identifiable {
     let primary: Color
     let secondary: Color
     let warm: Color
+}
+
+private final class CallbackMenuItem: NSMenuItem {
+    private let callback: () -> Void
+
+    init(title: String, enabled: Bool = true, callback: @escaping () -> Void) {
+        self.callback = callback
+        super.init(title: title, action: #selector(runCallback), keyEquivalent: "")
+        self.target = self
+        self.isEnabled = enabled
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func runCallback() {
+        callback()
+    }
 }
 
 private enum AppLanguage: String, CaseIterable, Identifiable {
@@ -343,8 +363,10 @@ private func runProcess(
 
     if finished.wait(timeout: .now() + timeout) == .timedOut {
         timedOut = true
+        signalChildProcesses(of: process, signal: "TERM")
         process.terminate()
         if finished.wait(timeout: .now() + 1.5) == .timedOut {
+            signalChildProcesses(of: process, signal: "KILL")
             Darwin.kill(process.processIdentifier, SIGKILL)
             _ = finished.wait(timeout: .now() + 1.0)
         }
@@ -373,6 +395,23 @@ private func runProcess(
         return (124, message.isEmpty ? suffix : "\(message)\n\(suffix)")
     }
     return (process.terminationStatus, text)
+}
+
+private func signalChildProcesses(of process: Process, signal: String) {
+    guard process.processIdentifier > 0 else { return }
+
+    let killer = Process()
+    killer.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+    killer.arguments = ["-\(signal)", "-P", "\(process.processIdentifier)"]
+    killer.standardOutput = FileHandle.nullDevice
+    killer.standardError = FileHandle.nullDevice
+
+    do {
+        try killer.run()
+        killer.waitUntilExit()
+    } catch {
+        return
+    }
 }
 
 private func runDetachedProcess(
@@ -769,9 +808,12 @@ private func parsedCodexProfiles(
         }
 }
 
-private func profileWithCachedUsageFallback(_ profile: CodexProfile) -> CodexProfile {
+private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTokens knownHasLocalTokens: Bool? = nil) -> CodexProfile {
     let quota = profile.quota.trimmingCharacters(in: .whitespacesAndNewlines)
-    let hasLocalTokens = localAuthTokensExist(in: profile.home)
+    guard profile.authStatus != "auth_invalid" else {
+        return profile
+    }
+    let hasLocalTokens = knownHasLocalTokens ?? localAuthTokensExist(in: profile.home)
     guard profile.authStatus != "login_needed" || hasLocalTokens else {
         return profile
     }
@@ -826,6 +868,27 @@ private func localAuthTokensExist(in home: String) -> Bool {
     }
 
     return !accessToken.isEmpty && !refreshToken.isEmpty
+}
+
+private func collectLocalAuthTokenProfileIDs(in profiles: [CodexProfile]) -> Set<String> {
+    Set(profiles.compactMap { profile in
+        localAuthTokensExist(in: profile.home) ? profile.id : nil
+    })
+}
+
+private func profilePayloadText(from profiles: [CodexProfile]) -> String {
+    profiles.map { profile in
+        [
+            profile.id,
+            profile.displayName,
+            profile.home,
+            profile.authStatus,
+            profile.authMode,
+            profile.lastRefresh,
+            profile.quota,
+            profile.reset
+        ].joined(separator: "\t")
+    }.joined(separator: "\n")
 }
 
 private func promptForAccountName(title: String, message: String, defaultName: String? = nil) -> String? {
@@ -1622,13 +1685,17 @@ struct AccountsRootView: View {
     @AppStorage("language") private var language = "zh"
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
     @State private var lastAutoSync = ""
+    @State private var launchedAt = Date()
+    @State private var lastAutoSyncAt = Date.distantPast
+    @State private var lastSidebarCleanupAt = Date.distantPast
     @State private var layoutScale: CGFloat = 1
     @State private var visibleContentSize: CGSize = .zero
     @State private var activeOperationCount = 0
     @State private var loadingMessage = ""
     @State private var isRefreshing = false
     @State private var isSyncing = false
-    @State private var hasEntered = false
+    @State private var isCleaningSidebarState = false
+    @State private var hasEntered = true
     @State private var showKeepAwakeHelp = false
     @State private var showKeyboardCleanHelp = false
     @State private var showSyncHelp = false
@@ -1650,6 +1717,9 @@ struct AccountsRootView: View {
     @State private var remoteBridgeRunning = false
     @State private var remoteBridgeRefreshInFlight = false
     @State private var lastRemoteBridgeRefreshAt = Date.distantPast
+    @State private var localIPAddressRefreshInFlight = false
+    @State private var lastLocalIPAddressRefreshAt = Date.distantPast
+    @State private var cachedLocalIPAddress = "127.0.0.1"
     @State private var remoteBridgeUsersCount = 0
     @State private var remoteBridgeStatus = ""
     @State private var remoteBridgeLastOutput = ""
@@ -1660,6 +1730,7 @@ struct AccountsRootView: View {
     @State private var languageTransitionActive = false
     @State private var languagePulse = false
     @State private var hoveredProfileID: String?
+    @State private var localAuthTokenProfileIDs: Set<String> = []
     @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
     @AppStorage("sidebarRemoteExpanded") private var sidebarRemoteExpanded = false
@@ -1671,7 +1742,11 @@ struct AccountsRootView: View {
     @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-    private let autoQuotaLiveRefreshInterval: TimeInterval = 300
+    private let autoQuotaLiveRefreshInterval: TimeInterval = 900
+    private let autoSyncStartupDelay: TimeInterval = 90
+    private let autoSyncInterval: TimeInterval = 600
+    private let sidebarCleanupStartupDelay: TimeInterval = 15
+    private let sidebarCleanupInterval: TimeInterval = 60
 
     var body: some View {
         ZStack {
@@ -1712,12 +1787,16 @@ struct AccountsRootView: View {
         )
         .background(WindowContentSizeReader(size: $visibleContentSize))
         .onAppear {
+            launchedAt = Date()
             let normalizedLanguage = AppLanguage.normalized(language).rawValue
             if normalizedLanguage != language {
                 language = normalizedLanguage
             }
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
-                hasEntered = true
+            hasEntered = true
+            languageTransitionActive = false
+            showLanguageMenu = false
+            if hasSeenIntro {
+                showIntro = false
             }
             if !hasSeenIntro {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
@@ -1728,10 +1807,23 @@ struct AccountsRootView: View {
             if autoQuotaPool {
                 autoQuotaPool = false
             }
-            keepAwake.refreshState(force: true)
-            refreshRemoteBridgeState(force: true)
-            updater.checkForUpdates(presentNoUpdate: false, notifyIfAvailable: false)
-            refreshProfiles(showLoading: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                refreshProfiles(showLoading: false)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                refreshLocalIPAddress(force: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                lastSidebarCleanupAt = Date()
+                cleanupSidebarProjectsSilently()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                keepAwake.refreshState(force: true)
+                refreshRemoteBridgeState(force: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                updater.checkForUpdates(presentNoUpdate: false, notifyIfAvailable: false)
+            }
         }
         .sheet(isPresented: $showIntro) {
             introView
@@ -2057,7 +2149,7 @@ struct AccountsRootView: View {
     }
 
     private func isWaitingForRecovery(_ profile: CodexProfile) -> Bool {
-        quotaWindows(for: profile).contains { $0.id == "7d" && $0.percent == 0 }
+        quotaWindows(for: profile).contains { $0.percent == 0 }
     }
 
     private func isSignedIn(_ profile: CodexProfile) -> Bool {
@@ -2065,6 +2157,9 @@ struct AccountsRootView: View {
     }
 
     private func isLoginNeeded(_ profile: CodexProfile) -> Bool {
+        if profile.authStatus == "auth_invalid" {
+            return true
+        }
         if profileHasLocalAuthTokens(profile) {
             return false
         }
@@ -2072,12 +2167,21 @@ struct AccountsRootView: View {
     }
 
     private func isVisiblySignedIn(_ profile: CodexProfile) -> Bool {
-        isSignedIn(profile) || profileHasLocalAuthTokens(profile) || (!isLoginNeeded(profile) && profile.quota != "unknown")
+        if profile.authStatus == "auth_invalid" {
+            return false
+        }
+        return isSignedIn(profile) || profileHasLocalAuthTokens(profile) || (!isLoginNeeded(profile) && profile.quota != "unknown")
     }
 
     private func mergedAuthStatus(previous: String, current: String) -> String {
+        if current == "auth_invalid" {
+            return current
+        }
         if current == "signed_in_local" {
             return current
+        }
+        if previous == "auth_invalid", current == "unknown" || current == "checking" {
+            return previous
         }
         if previous == "unknown" || previous == "checking" {
             return current
@@ -2130,9 +2234,22 @@ struct AccountsRootView: View {
 
     private func runPeriodicMaintenance() {
         guard activeOperationCount == 0 else { return }
+        let now = Date()
 
-        if autoSync, !isSyncing {
+        if !isCleaningSidebarState,
+           now.timeIntervalSince(launchedAt) >= sidebarCleanupStartupDelay,
+           now.timeIntervalSince(lastSidebarCleanupAt) >= sidebarCleanupInterval {
+            lastSidebarCleanupAt = now
+            cleanupSidebarProjectsSilently()
+        }
+
+        if autoSync,
+           !isSyncing,
+           now.timeIntervalSince(launchedAt) >= autoSyncStartupDelay,
+           now.timeIntervalSince(lastAutoSyncAt) >= autoSyncInterval {
+            lastAutoSyncAt = now
             syncMemories(silent: true)
+            return
         }
 
         if autoRefresh, !isRefreshing {
@@ -2150,8 +2267,8 @@ struct AccountsRootView: View {
             showLoading: false,
             replayQuota: false,
             liveUsage: shouldUseLiveQuota,
-            liveParallelism: shouldUseLiveQuota ? 3 : 8,
-            statusTimeout: shouldUseLiveQuota ? 35 : 12
+            liveParallelism: shouldUseLiveQuota ? 1 : 2,
+            statusTimeout: shouldUseLiveQuota ? 18 : 8
         )
     }
 
@@ -2230,7 +2347,7 @@ struct AccountsRootView: View {
                 VStack(alignment: .leading, spacing: scaled(4)) {
                     Text(tr("快速開始", "Quick Start"))
                         .font(appFont(size: 24, weight: .semibold))
-                    Text(tr("多帳戶登入，共用本機 Codex 紀錄。", "Separate logins with shared local Codex history."))
+                    Text(tr("多帳戶登入；對話紀錄預設分開，需要時先共享。", "Separate logins; local history is separate unless shared."))
                         .font(appFont(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -2239,9 +2356,9 @@ struct AccountsRootView: View {
             VStack(alignment: .leading, spacing: scaled(11)) {
                 introPoint("1.circle.fill", tr("撳右上角 + 新增 profile，逐個登入唔同 GPT 帳戶。", "Use + to add profiles, then log each one into a different GPT account."))
                 introPoint("2.circle.fill", tr("切換帳戶前，先撳右上角紅色關閉全部，再打開你要用嗰個 profile。", "Before switching accounts, press the red close-all button, then open the profile you want."))
-                introPoint("3.circle.fill", tr("卡片中間會顯示 5H / 1W 用量；紅色代表等待恢復。", "The card shows 5H / 1W usage; red means it is waiting for reset."))
+                introPoint("3.circle.fill", tr("卡片中間會顯示 5H / 1W / 1M 用量；紅色代表等待恢復。", "The card shows 5H / 1W / 1M usage; red means it is waiting for reset."))
                 introPoint("4.circle.fill", tr("頂部三段掣可以快速跳去：已登入、未登入、等待恢復。", "The segmented control jumps to Signed in, Login needed, and Waiting sections."))
-                introPoint("5.circle.fill", tr("立即同步會同步本機記憶；共享全部會令所有 profile 共用同一份本機對話紀錄。", "Sync now syncs local memories; Share all links every profile to one local chat history."))
+                introPoint("5.circle.fill", tr("立即同步會同步本機記憶；共享全部會令所有 profile 共用同一份本機對話紀錄。普通打開唔會自動共享。", "Sync now syncs local memories; Share all links every profile to one local chat history. Normal opens do not share history automatically."))
                 introPoint("6.circle.fill", tr("防睡眠會阻止 Mac 喺長任務期間自動睡眠。", "Keep Awake prevents Mac sleep during long tasks."))
             }
 
@@ -2332,7 +2449,7 @@ struct AccountsRootView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    Text(tr("多帳戶登入，共用本機紀錄。", "Separate logins. Shared local history."))
+                    Text(tr("多帳戶登入，紀錄預設分開。", "Separate logins. Separate local history by default."))
                         .font(appFont(size: 13))
                         .foregroundStyle(.white.opacity(0.64))
                         .lineSpacing(scaled(3))
@@ -2654,7 +2771,7 @@ struct AccountsRootView: View {
                 }
 
                 sidebarToggle(tr("每分鐘重新整理", "Auto refresh"), isOn: $autoRefresh, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
-                sidebarToggle(tr("每分鐘同步記憶", "Auto sync"), isOn: $autoSync, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
+                sidebarToggle(tr("每分鐘同步對話同記憶", "Auto sync"), isOn: $autoSync, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
 
                 HStack(spacing: scaled(8)) {
                     miniButton(tr("立即同步", "Sync now")) { syncMemories() }
@@ -3187,8 +3304,8 @@ struct AccountsRootView: View {
 
     private var syncHelpText: String {
         tr(
-            "立即同步：同步本機記憶檔案。\n\n共享全部：將所有 profile 連到同一份本機對話紀錄。",
-            "Sync now: syncs local memory files.\n\nShare all: links every profile to the same local chat history."
+            "立即同步：同步本機記憶檔案。\n\n共享全部：將所有 profile 連到同一份本機對話紀錄；普通打開 profile 唔會自動共享。",
+            "Sync now: syncs local memories and conversation history.\n\nShare all: links every profile to the same local chat history; normal profile opens do not auto-share."
         )
     }
 
@@ -3525,48 +3642,13 @@ struct AccountsRootView: View {
         let dockGlowOpacity = profileDockGlowOpacity(forInfluence: dockInfluence)
         let dockFocused = isProfileDockFocused(index: dockIndex, hoveredIndex: hoveredIndex)
 
-        return GeometryReader { geometry in
-            let width = geometry.size.width
-            let veryCompact = width < 620
-            let compactQuota = width < 920
-            let rowSpacing = scaled(veryCompact ? 4 : 10)
-            let titleMinWidth = scaled(veryCompact ? 28 : 88)
-            let quotaWidth = scaled(width < 640 ? 230 : (width < 920 ? 276 : 330))
-            let openWidth = scaled(veryCompact ? 56 : 64)
-            let closeWidth = scaled(veryCompact ? 28 : 30)
-            let menuWidth = scaled(veryCompact ? 26 : 30)
-            let rowHeight = geometry.size.height
+        return ViewThatFits(in: .horizontal) {
+            regularProfileRowContent(profile)
+                .frame(minWidth: scaled(620))
 
-            HStack(spacing: rowSpacing) {
-                profileBadge(profile)
-                    .layoutPriority(20)
-
-                profileTitleBlock(profile, showsPath: true)
-                    .frame(minWidth: titleMinWidth, maxWidth: .infinity, alignment: .leading)
-                    .layoutPriority(1)
-
-                Spacer(minLength: scaled(4))
-
-                quotaMeter(profile, compact: compactQuota)
-                    .frame(width: quotaWidth, alignment: .trailing)
-                    .layoutPriority(30)
-
-                openButton(profile)
-                    .frame(width: openWidth)
-                    .layoutPriority(20)
-
-                closeButton(profile)
-                    .frame(width: closeWidth)
-                    .layoutPriority(20)
-
-                profileMenu(profile)
-                    .frame(width: menuWidth)
-                    .layoutPriority(20)
-            }
-            .padding(.horizontal, scaled(veryCompact ? 10 : 14))
-            .frame(width: geometry.size.width, height: rowHeight, alignment: .center)
+            compactProfileRowContent(profile)
         }
-        .frame(maxWidth: .infinity, minHeight: scaled(64), idealHeight: scaled(64), maxHeight: scaled(64), alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: scaled(64), alignment: .leading)
         .background(Color.white.opacity(0.040))
         .background(themeRowTint.opacity(profile.quota == "unknown" ? 0.030 : 0.085))
         .background(profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.020 : 0.074))
@@ -3595,7 +3677,6 @@ struct AccountsRootView: View {
         .shadow(color: profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.04 : 0.08), radius: 5, x: 0, y: 2)
         .shadow(color: profileRowAccent(for: profile).opacity(dockGlowOpacity), radius: dockFocused ? 22 : 12, x: 0, y: dockFocused ? 8 : 4)
         .brightness(dockFocused ? 0.035 : (dockScale > 1 ? 0.016 : 0))
-        .scaleEffect(dockScale, anchor: .center)
         .padding(.vertical, scaled(6))
         .contentShape(Rectangle())
         .onHover { hovering in
@@ -3604,6 +3685,68 @@ struct AccountsRootView: View {
         .zIndex(Double(dockScale * 1000))
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: profile.quota)
         .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.72, blendDuration: 0.08), value: hoveredProfileID)
+    }
+
+    private func regularProfileRowContent(_ profile: CodexProfile) -> some View {
+        HStack(spacing: scaled(10)) {
+            profileBadge(profile)
+                .layoutPriority(20)
+
+            profileTitleBlock(profile, showsPath: true)
+                .frame(minWidth: scaled(112), maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(18)
+
+            Spacer(minLength: scaled(4))
+
+            quotaMeter(profile, compact: false)
+                .frame(width: scaled(330), alignment: .trailing)
+                .layoutPriority(30)
+
+            openButton(profile)
+                .frame(width: scaled(64))
+                .layoutPriority(20)
+
+            closeButton(profile)
+                .frame(width: scaled(38))
+                .layoutPriority(20)
+
+            profileMenu(profile)
+                .frame(width: scaled(44))
+                .layoutPriority(20)
+        }
+        .padding(.horizontal, scaled(14))
+        .frame(maxWidth: .infinity, minHeight: scaled(64), alignment: .center)
+    }
+
+    private func compactProfileRowContent(_ profile: CodexProfile) -> some View {
+        VStack(alignment: .leading, spacing: scaled(8)) {
+            HStack(spacing: scaled(8)) {
+                profileBadge(profile)
+                    .layoutPriority(20)
+
+                profileTitleBlock(profile, showsPath: false)
+                    .frame(minWidth: scaled(118), maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(20)
+
+                openButton(profile)
+                    .frame(width: scaled(58))
+                    .layoutPriority(20)
+
+                closeButton(profile)
+                    .frame(width: scaled(34))
+                    .layoutPriority(20)
+
+                profileMenu(profile)
+                    .frame(width: scaled(40))
+                    .layoutPriority(20)
+            }
+
+            quotaMeter(profile, compact: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, scaled(12))
+        .padding(.vertical, scaled(10))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func profileBadge(_ profile: CodexProfile) -> some View {
@@ -3695,10 +3838,11 @@ struct AccountsRootView: View {
 
     private func authBadge(_ profile: CodexProfile, compact: Bool = false) -> some View {
         let signedIn = isSignedIn(profile)
+        let expired = profile.authStatus == "auth_invalid"
         let title = signedIn
             ? tr("已登入", "Signed in")
-            : (compact ? tr("要登入", "Login") : tr("要登入", "Login needed"))
-        let color = signedIn ? Color(red: 0.32, green: 0.96, blue: 0.46) : Color.orange
+            : (expired ? tr("登入過期", "Expired") : (compact ? tr("要登入", "Login") : tr("要登入", "Login needed")))
+        let color = signedIn ? Color(red: 0.32, green: 0.96, blue: 0.46) : (expired ? Color(red: 1.00, green: 0.22, blue: 0.20) : Color.orange)
 
         return Text(title)
             .font(appFont(size: 12, weight: .semibold))
@@ -3790,7 +3934,41 @@ struct AccountsRootView: View {
         switch id {
         case "5h": return 0
         case "7d": return 1
-        default: return 2
+        case "30d": return 2
+        case "usage": return 3
+        default: return 4
+        }
+    }
+
+    private func quotaWindowID(from text: String) -> String? {
+        guard let token = text.split(separator: " ").first else { return nil }
+        let id = String(token).lowercased()
+        if id == "5h" || id == "7d" || id == "30d" || id == "usage" {
+            return id
+        }
+        guard let suffix = id.last, suffix == "h" || suffix == "d" || suffix == "m" else {
+            return nil
+        }
+        guard Int(id.dropLast()) != nil else { return nil }
+        return id
+    }
+
+    private func quotaWindowLabels(for id: String) -> (zh: String, en: String) {
+        switch id {
+        case "5h":
+            return ("5H", "5H")
+        case "7d":
+            return ("1W", "1W")
+        case "30d":
+            return ("1M", "1M")
+        case "usage":
+            return ("用量", "Usage")
+        default:
+            guard let suffix = id.last, let number = Int(id.dropLast()) else {
+                return ("用量", "Usage")
+            }
+            let upperSuffix = String(suffix).uppercased()
+            return ("\(number)\(upperSuffix)", "\(number)\(upperSuffix)")
         }
     }
 
@@ -3810,14 +3988,9 @@ struct AccountsRootView: View {
         for part in profile.quota.split(separator: "/") {
             let text = part.trimmingCharacters(in: .whitespacesAndNewlines)
             let percent = quotaPercents(from: text).first
-            if text.lowercased().hasPrefix("5h") {
-                if let percent {
-                    parsed.append(QuotaWindow(id: "5h", labelZH: "5H", labelEN: "5H", percent: percent, reset: resets["5h"]))
-                }
-            } else if text.lowercased().hasPrefix("7d") {
-                if let percent {
-                    parsed.append(QuotaWindow(id: "7d", labelZH: "1W", labelEN: "1W", percent: percent, reset: resets["7d"]))
-                }
+            if let id = quotaWindowID(from: text), let percent {
+                let labels = quotaWindowLabels(for: id)
+                parsed.append(QuotaWindow(id: id, labelZH: labels.zh, labelEN: labels.en, percent: percent, reset: resets[id]))
             }
         }
 
@@ -3830,11 +4003,8 @@ struct AccountsRootView: View {
 
         for part in reset.components(separatedBy: " / ") {
             let text = part.trimmingCharacters(in: .whitespacesAndNewlines)
-            let lower = text.lowercased()
-            if lower.hasPrefix("5h") {
-                result["5h"] = text.replacingOccurrences(of: "5h", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-            } else if lower.hasPrefix("7d") {
-                result["7d"] = text.replacingOccurrences(of: "7d", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let id = quotaWindowID(from: text), let token = text.split(separator: " ").first {
+                result[id] = String(text.dropFirst(token.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
 
@@ -3965,6 +4135,7 @@ struct AccountsRootView: View {
         }
         let absolute = fullResetDateText(from: reset)
         let countdown = relativeResetText(from: reset)
+        let labels = quotaWindowLabels(for: windowID)
         if windowID == "5h" {
             return tr(
                 "5H 重設時間\n\(absolute)\n\n倒數\n\(countdown)",
@@ -3972,8 +4143,8 @@ struct AccountsRootView: View {
             )
         }
         return tr(
-            "1W 重設時間\n\(absolute)\n\n倒數\n\(countdown)",
-            "1W reset time\n\(absolute)\n\nCountdown\n\(countdown)"
+            "\(labels.zh) 重設時間\n\(absolute)\n\n倒數\n\(countdown)",
+            "\(labels.en) reset time\n\(absolute)\n\nCountdown\n\(countdown)"
         )
     }
 
@@ -4342,33 +4513,64 @@ struct AccountsRootView: View {
         ) {
             closeAccount(profile)
         }
+        .frame(width: scaled(38), height: scaled(40))
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            updateHoveredProfile(profile.id, hovering: hovering)
+        }
     }
 
     private func profileMenu(_ profile: CodexProfile) -> some View {
-        Menu {
-            Button(tr("關閉視窗", "Close Window")) { closeAccount(profile) }
-            Button(tr("改名...", "Rename...")) { renameProfile(profile) }
-            Button(tr("自訂 Icon...", "Custom Icon...")) { chooseCustomIcon(for: profile) }
-            Button(tr("喺 Finder 顯示", "Reveal Profile Folder")) { revealProfile(profile) }
-            Button(tr("共享對話紀錄", "Share History")) { shareHistory(profile) }
-            Divider()
-            Button(tr("刪除 Profile...", "Delete Profile..."), role: .destructive) { deleteProfile(profile) }
-                .disabled(profile.id == "account1")
+        Button {
+            withAnimation(.interactiveSpring(response: 0.20, dampingFraction: 0.78, blendDuration: 0.06)) {
+                hoveredProfileID = profile.id
+            }
+            showProfilePopupMenu(for: profile)
         } label: {
             HStack(spacing: scaled(3)) {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: scaled(14), weight: .medium))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: scaled(8), weight: .bold))
             }
             .foregroundStyle(.white.opacity(0.80))
-            .frame(width: scaled(38), height: scaled(30))
-            .contentShape(RoundedRectangle(cornerRadius: scaled(10), style: .continuous))
+            .frame(width: scaled(44), height: scaled(40))
+            .contentShape(RoundedRectangle(cornerRadius: scaled(13), style: .continuous))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .buttonStyle(PressScaleButtonStyle(scale: 0.86, hoverScale: 1.08, glow: Color.white, glowOpacity: 0.18))
+        .buttonStyle(PressScaleButtonStyle(scale: 0.92, hoverScale: 1.04, glow: Color.white, glowOpacity: 0.18))
+        .onHover { hovering in
+            updateHoveredProfile(profile.id, hovering: hovering)
+        }
         .help(tr("更多", "More"))
+    }
+
+    private func showProfilePopupMenu(for profile: CodexProfile) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let menu = NSMenu()
+        menu.addItem(CallbackMenuItem(title: tr("關閉視窗", "Close Window")) {
+            closeAccount(profile)
+        })
+        menu.addItem(CallbackMenuItem(title: tr("改名...", "Rename...")) {
+            renameProfile(profile)
+        })
+        menu.addItem(CallbackMenuItem(title: tr("自訂 Icon...", "Custom Icon...")) {
+            chooseCustomIcon(for: profile)
+        })
+        menu.addItem(CallbackMenuItem(title: tr("喺 Finder 顯示", "Reveal Profile Folder")) {
+            revealProfile(profile)
+        })
+        menu.addItem(CallbackMenuItem(title: tr("共享對話紀錄", "Share History")) {
+            shareHistory(profile)
+        })
+        menu.addItem(CallbackMenuItem(title: tr("分開對話紀錄", "Separate History")) {
+            separateHistory(profile)
+        })
+        menu.addItem(.separator())
+        menu.addItem(CallbackMenuItem(title: tr("刪除 Profile...", "Delete Profile..."), enabled: profile.id != "account1") {
+            deleteProfile(profile)
+        })
+
+        let mouse = NSEvent.mouseLocation
+        menu.popUp(positioning: nil, at: NSPoint(x: mouse.x, y: mouse.y), in: nil)
     }
 
     private func miniButton(_ title: String, action: @escaping () -> Void) -> some View {
@@ -4530,7 +4732,7 @@ struct AccountsRootView: View {
     }
 
     private var remoteBridgeURLLabel: String {
-        "http://\(localIPAddress()):\(remoteBridgePort)"
+        "http://\(cachedLocalIPAddress):\(remoteBridgePort)"
     }
 
     private var remoteBridgeScriptPath: String {
@@ -4717,6 +4919,7 @@ struct AccountsRootView: View {
         guard !remoteBridgeRefreshInFlight else { return }
         lastRemoteBridgeRefreshAt = now
         remoteBridgeRefreshInFlight = true
+        refreshLocalIPAddress(force: force)
 
         refreshRemoteBridgeRunningFlag()
 
@@ -4784,16 +4987,81 @@ struct AccountsRootView: View {
         try? FileManager.default.removeItem(at: remoteBridgePIDFileURL)
     }
 
-    private func localIPAddress() -> String {
-        let addresses = Host.current().addresses
-        if let address = addresses.first(where: { candidate in
-            candidate.range(of: #"^\d+\.\d+\.\d+\.\d+$"#, options: .regularExpression) != nil
-                && !candidate.hasPrefix("127.")
-                && !candidate.hasPrefix("169.254.")
-        }) {
-            return address
+    private func refreshLocalIPAddress(force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastLocalIPAddressRefreshAt) >= 30 else { return }
+        guard !localIPAddressRefreshInFlight else { return }
+        localIPAddressRefreshInFlight = true
+        lastLocalIPAddressRefreshAt = now
+
+        DispatchQueue.global(qos: .utility).async {
+            let address = currentLocalIPv4Address()
+            DispatchQueue.main.async {
+                cachedLocalIPAddress = address
+                localIPAddressRefreshInFlight = false
+            }
         }
-        return "127.0.0.1"
+    }
+
+    private func currentLocalIPv4Address() -> String {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let firstInterface = interfaces else {
+            return cachedLocalIPAddress
+        }
+        defer { freeifaddrs(interfaces) }
+
+        var candidates: [(score: Int, address: String)] = []
+        var cursor: UnsafeMutablePointer<ifaddrs>? = firstInterface
+        while let interface = cursor {
+            defer { cursor = interface.pointee.ifa_next }
+
+            let flags = Int32(interface.pointee.ifa_flags)
+            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            guard let socketAddress = interface.pointee.ifa_addr,
+                  socketAddress.pointee.sa_family == UInt8(AF_INET)
+            else { continue }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                socketAddress,
+                socklen_t(socketAddress.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            guard result == 0 else { continue }
+
+            let address = String(cString: host)
+            guard !address.hasPrefix("127."), !address.hasPrefix("169.254.") else { continue }
+
+            let name = String(cString: interface.pointee.ifa_name)
+            var score = 100
+            if name.hasPrefix("en") {
+                score -= 40
+            }
+            if name.hasPrefix("utun") {
+                score -= 20
+            }
+            if isPrivateIPv4(address) {
+                score -= 30
+            }
+            if name.hasPrefix("awdl") || name.hasPrefix("llw") {
+                score += 50
+            }
+            candidates.append((score, address))
+        }
+
+        return candidates.sorted { $0.score < $1.score }.first?.address ?? cachedLocalIPAddress
+    }
+
+    private func isPrivateIPv4(_ address: String) -> Bool {
+        if address.hasPrefix("10.") || address.hasPrefix("192.168.") {
+            return true
+        }
+        let parts = address.split(separator: ".").compactMap { Int($0) }
+        return parts.count == 4 && parts[0] == 172 && (16...31).contains(parts[1])
     }
 
     private func refreshProfiles(
@@ -4819,26 +5087,29 @@ struct AccountsRootView: View {
             }
         }
         let displayNamesSnapshot = displayNames
+        let previousProfilesSnapshot = profiles
         let hadProfiles = !profiles.isEmpty
         let loading = showLoading && hadProfiles ? tr("重新整理帳戶...", "Refreshing accounts...") : nil
 
         runBackground(loading) {
-            let accountsResult = runCodexScript(scriptPath, ["list-accounts"], wait: true, timeout: 15)
-            return accountsResult
-        } completion: { result in
-            guard result.0 == 0 else {
-                isRefreshing = false
-                statusText = tr("載入帳戶失敗", "Could not load accounts.")
-                return
+            let accountsResult = runCodexScript(scriptPath, ["list-accounts"], wait: true, timeout: 10)
+            guard accountsResult.0 == 0 else {
+                return accountsResult
             }
+
             let discoveredProfiles = parsedCodexProfiles(
-                accountsOutput: result.1,
+                accountsOutput: accountsResult.1,
                 statusOutput: "",
                 displayNames: displayNamesSnapshot
             )
-            let previousByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
-            profiles = discoveredProfiles.map { profile in
-                let cachedProfile = profileWithCachedUsageFallback(profileWithLocalAuthTokenFallback(profile))
+            let tokenIDs = collectLocalAuthTokenProfileIDs(in: discoveredProfiles)
+            let previousByID = Dictionary(uniqueKeysWithValues: previousProfilesSnapshot.map { ($0.id, $0) })
+            let resolvedProfiles = discoveredProfiles.map { profile -> CodexProfile in
+                let hasLocalTokens = tokenIDs.contains(profile.id)
+                let cachedProfile = profileWithCachedUsageFallback(
+                    profileWithLocalAuthTokenFallback(profile, hasLocalTokens: hasLocalTokens),
+                    hasLocalTokens: hasLocalTokens
+                )
                 guard let previous = previousByID[profile.id] else {
                     return CodexProfile(
                         id: cachedProfile.id,
@@ -4863,9 +5134,33 @@ struct AccountsRootView: View {
                     reset: preservePreviousUsage ? previous.reset : cachedProfile.reset
                 )
             }
+
+            return (
+                0,
+                [
+                    accountsResult.1,
+                    profilePayloadText(from: resolvedProfiles),
+                    tokenIDs.sorted().joined(separator: "\t")
+                ].joined(separator: profileRefreshPayloadSeparator)
+            )
+        } completion: { result in
+            guard result.0 == 0 else {
+                finishQuotaReplayImmediately()
+                isRefreshing = false
+                statusText = tr("載入帳戶失敗", "Could not load accounts.")
+                return
+            }
+            let payloadParts = result.1.components(separatedBy: profileRefreshPayloadSeparator)
+            let accountsOutput = payloadParts.first ?? ""
+            if payloadParts.count > 1 {
+                profiles = profilePayload(from: payloadParts[1])
+            }
+            if payloadParts.count > 2 {
+                localAuthTokenProfileIDs = Set(payloadParts[2].split(separator: "\t").map(String.init))
+            }
             statusText = tr("\(profiles.count) 個 profile 就緒", "\(profiles.count) profiles ready")
             refreshProfileStatuses(
-                accountsOutput: result.1,
+                accountsOutput: accountsOutput,
                 displayNamesSnapshot: displayNamesSnapshot,
                 showLoading: showLoading && hadProfiles,
                 replayQuota: replayQuota,
@@ -4890,8 +5185,8 @@ struct AccountsRootView: View {
 
         runBackground(loading) {
             var environment = ProcessInfo.processInfo.environment
-            let resolvedParallelism = max(1, liveParallelism ?? (liveUsage ? 2 : 8))
-            let resolvedTimeout = statusTimeout ?? (liveUsage ? (resolvedParallelism <= 1 ? 45 : 35) : 12)
+            let resolvedParallelism = max(1, liveParallelism ?? 2)
+            let resolvedTimeout = statusTimeout ?? (liveUsage ? (resolvedParallelism <= 1 ? 20 : 18) : 8)
             environment["CODEX_USAGE_LIVE_LOOKUP"] = liveUsage ? "1" : "0"
             environment["STATUS_PARALLELISM"] = "\(resolvedParallelism)"
             if liveUsage {
@@ -4899,7 +5194,7 @@ struct AccountsRootView: View {
                 environment["USAGE_DIRECT_TIMEOUT_SECONDS"] = "2"
                 environment["TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS"] = "1"
                 environment["TOKEN_REFRESH_TIMEOUT_SECONDS"] = "3"
-                environment["APP_SERVER_USAGE_TIMEOUT_SECONDS"] = "1"
+                environment["APP_SERVER_USAGE_TIMEOUT_SECONDS"] = "3"
             }
             let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: resolvedTimeout, environment: environment)
             let profiles = parsedCodexProfiles(
@@ -4907,6 +5202,7 @@ struct AccountsRootView: View {
                 statusOutput: statusResult.0 == 0 ? statusResult.1 : "",
                 displayNames: displayNamesSnapshot
             )
+            let tokenIDs = collectLocalAuthTokenProfileIDs(in: profiles)
             let statusIDs = Set(statusResult.1.split(separator: "\n").compactMap { line -> String? in
                 let parts = line.split(separator: "|", omittingEmptySubsequences: false).map {
                     String($0).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4915,7 +5211,11 @@ struct AccountsRootView: View {
             })
             let previousByID = Dictionary(uniqueKeysWithValues: previousProfiles.map { ($0.id, $0) })
             let payload = profiles.map {
-                let resolvedProfile = profileWithCachedUsageFallback(profileWithLocalAuthTokenFallback($0))
+                let hasLocalTokens = tokenIDs.contains($0.id)
+                let resolvedProfile = profileWithCachedUsageFallback(
+                    profileWithLocalAuthTokenFallback($0, hasLocalTokens: hasLocalTokens),
+                    hasLocalTokens: hasLocalTokens
+                )
                 let profile = (!statusIDs.contains(resolvedProfile.id) && resolvedProfile.authStatus == "unknown" && resolvedProfile.quota == "unknown")
                     ? (previousByID[$0.id] ?? $0)
                     : resolvedProfile
@@ -4924,14 +5224,25 @@ struct AccountsRootView: View {
                     profile.lastRefresh, profile.quota, profile.reset
                 ].joined(separator: "\t")
             }.joined(separator: "\n")
-            return (profiles.isEmpty ? statusResult.0 : 0, payload)
+            return (
+                profiles.isEmpty ? statusResult.0 : 0,
+                [
+                    payload,
+                    tokenIDs.sorted().joined(separator: "\t")
+                ].joined(separator: profileRefreshPayloadSeparator)
+            )
         } completion: { result in
             isRefreshing = false
             guard result.0 == 0 else {
+                finishQuotaReplayImmediately()
                 statusText = tr("用量更新失敗", "Usage update failed")
                 return
             }
-            let incomingProfiles = profilePayload(from: result.1)
+            let payloadParts = result.1.components(separatedBy: profileRefreshPayloadSeparator)
+            let incomingProfiles = profilePayload(from: payloadParts.first ?? "")
+            if payloadParts.count > 1 {
+                localAuthTokenProfileIDs = Set(payloadParts[1].split(separator: "\t").map(String.init))
+            }
             withAnimation(.easeInOut(duration: 0.24)) {
                 profiles = stabilizedProfilesAfterRefresh(incomingProfiles, previousProfiles: previousProfiles)
             }
@@ -4947,6 +5258,16 @@ struct AccountsRootView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             startResetReturnFill()
         }
+    }
+
+    private func finishQuotaReplayImmediately() {
+        resetScrambleRunID += 1
+        withAnimation(.easeOut(duration: 0.16)) {
+            quotaReplayActive = false
+        }
+        resetScrambleActive = false
+        resetScrambleReturning = false
+        resetScrambleSeed = 0
     }
 
     private func startResetReturnFill() {
@@ -4992,9 +5313,13 @@ struct AccountsRootView: View {
 
         return incoming.map { profile -> CodexProfile in
             let rawProfile = profile
-            let localProfile = profileWithCachedUsageFallback(profileWithLocalAuthTokenFallback(rawProfile))
+            let hasLocalTokens = localAuthTokenProfileIDs.contains(rawProfile.id)
+            let localProfile = profileWithCachedUsageFallback(
+                profileWithLocalAuthTokenFallback(rawProfile, hasLocalTokens: hasLocalTokens),
+                hasLocalTokens: hasLocalTokens
+            )
 
-            if localProfile.authStatus == "login_needed" || localProfile.authStatus == "auth_incomplete" {
+            if localProfile.authStatus == "login_needed" || localProfile.authStatus == "auth_incomplete" || localProfile.authStatus == "auth_invalid" {
                 return CodexProfile(
                     id: localProfile.id,
                     displayName: localProfile.displayName,
@@ -5007,7 +5332,10 @@ struct AccountsRootView: View {
                 )
             }
 
-            let profile = profileWithCachedUsageFallback(profileWithConservativeLocalAuthFallback(localProfile))
+            let profile = profileWithCachedUsageFallback(
+                profileWithConservativeLocalAuthFallback(localProfile, hasLocalTokens: hasLocalTokens),
+                hasLocalTokens: hasLocalTokens
+            )
             let previous = previousByID[profile.id]
 
             if profile.authStatus == "unknown", let previous {
@@ -5041,7 +5369,7 @@ struct AccountsRootView: View {
         }
     }
 
-    private func profileWithLocalAuthTokenFallback(_ profile: CodexProfile) -> CodexProfile {
+    private func profileWithLocalAuthTokenFallback(_ profile: CodexProfile, hasLocalTokens knownHasLocalTokens: Bool? = nil) -> CodexProfile {
         guard profile.authStatus == "unknown"
                 || profile.authStatus == "checking"
                 || profile.authStatus == "login_needed"
@@ -5050,7 +5378,12 @@ struct AccountsRootView: View {
             return profile
         }
 
-        guard profileHasLocalAuthTokens(profile) else {
+        guard profile.authStatus != "auth_invalid" else {
+            return profile
+        }
+
+        let hasLocalTokens = knownHasLocalTokens ?? localAuthTokensExist(in: profile.home)
+        guard hasLocalTokens else {
             let authURL = URL(fileURLWithPath: profile.home).appendingPathComponent("auth.json")
             let fallbackStatus = FileManager.default.fileExists(atPath: authURL.path) ? "auth_incomplete" : "login_needed"
             return CodexProfile(
@@ -5077,10 +5410,10 @@ struct AccountsRootView: View {
         )
     }
 
-    private func profileWithConservativeLocalAuthFallback(_ profile: CodexProfile) -> CodexProfile {
+    private func profileWithConservativeLocalAuthFallback(_ profile: CodexProfile, hasLocalTokens knownHasLocalTokens: Bool? = nil) -> CodexProfile {
         guard profile.authStatus == "unknown",
               profile.quota != "unknown",
-              profileHasLocalAuthTokens(profile)
+              (knownHasLocalTokens ?? localAuthTokensExist(in: profile.home))
         else {
             return profile
         }
@@ -5098,7 +5431,7 @@ struct AccountsRootView: View {
     }
 
     private func profileHasLocalAuthTokens(_ profile: CodexProfile) -> Bool {
-        localAuthTokensExist(in: profile.home)
+        localAuthTokenProfileIDs.contains(profile.id)
     }
 
     private func profilePayload(from payload: String) -> [CodexProfile] {
@@ -5122,7 +5455,7 @@ struct AccountsRootView: View {
         let defaultName = nextDefaultAccountName()
         guard let name = promptForAccountName(
             title: tr("新增帳戶", "New Account"),
-            message: tr("可以直接用預設名，或者輸入你想要嘅 profile 名。", "Use the default name, or enter your own profile name."),
+            message: tr("建立全新空白 profile；唔會自動同步舊對話。", "Create a new blank profile; old conversations will not sync automatically."),
             defaultName: defaultName
         ) else { return }
         runBackground(tr("建立帳戶...", "Creating account...")) {
@@ -5166,26 +5499,58 @@ struct AccountsRootView: View {
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private func openAccount(_ name: String, displayName: String? = nil) {
+    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = false) {
         let requestedName = displayName ?? name
         let route = quotaPoolRoute(for: name)
         let targetID = route?.target.id ?? name
         let targetName = route?.target.displayName ?? requestedName
-        var arguments = ["launch-account", targetID]
+        var launchArguments = ["launch-account-nosync", targetID]
         if !targetName.isEmpty {
-            arguments.append(targetName)
+            launchArguments.append(targetName)
         }
         let requestedID = sanitizedProfileId(name)
         let targetProfileID = sanitizedProfileId(targetID)
         let busyIDs = Set([requestedID, targetProfileID])
         startUsageSession()
         busyIDs.forEach { setProfileBusy($0, true) }
-        let loadingText = tr("正在同步記憶，再打開 \(targetName)...", "Syncing memory, then opening \(targetName)...")
+        let loadingText: String
+        if syncBeforeLaunch {
+            loadingText = tr("正在同步對話同記憶，再打開 \(targetName)...", "Syncing history and memory, then opening \(targetName)...")
+        } else {
+            loadingText = tr("正在打開 \(targetName)...", "Opening \(targetName)...")
+        }
         runBackground(loadingText) {
-            if route?.didSwitch == true {
-                _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 25)
+            if syncBeforeLaunch {
+                var syncEnvironment = ProcessInfo.processInfo.environment
+                syncEnvironment["CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS"] = "8"
+                syncEnvironment["CODEX_RSYNC_MAX_WAITS"] = "50"
+                syncEnvironment["CODEX_RSYNC_WAIT_SECONDS"] = "0.08"
+                syncEnvironment["CODEX_SYNC_THREAD_HISTORY"] = "1"
+                let syncResult = runCodexScript(
+                    scriptPath,
+                    ["sync-account-for-launch", targetID],
+                    wait: true,
+                    timeout: 24,
+                    environment: syncEnvironment
+                )
+                guard syncResult.0 == 0 else { return syncResult }
             }
-            return runCodexScript(scriptPath, arguments, wait: true, timeout: 65)
+
+            if route?.didSwitch == true {
+                _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 12)
+            }
+
+            var launchEnvironment = ProcessInfo.processInfo.environment
+            launchEnvironment["CODEX_PRELAUNCH_SYNC"] = "0"
+            launchEnvironment["CODEX_SHARED_SESSIONS"] = "1"
+            launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = "0"
+            return runCodexScript(
+                scriptPath,
+                launchArguments,
+                wait: true,
+                timeout: 28,
+                environment: launchEnvironment
+            )
         } completion: { result in
             let releaseDelay: TimeInterval = result.0 == 0 ? 1.45 : 0
             DispatchQueue.main.asyncAfter(deadline: .now() + releaseDelay) {
@@ -5195,9 +5560,13 @@ struct AccountsRootView: View {
             if result.0 == 0 {
                 activeQuotaPoolProfileID = targetID
             }
-            statusText = result.0 == 0
-                ? tr("已打開 \(targetName)", "Opened \(targetName)")
-                : tr("同步或打開失敗", "Sync or open failed")
+            let failureText: String
+            if syncBeforeLaunch {
+                failureText = tr("同步或打開失敗", "Sync or open failed")
+            } else {
+                failureText = tr("打開失敗", "Open failed")
+            }
+            statusText = result.0 == 0 ? tr("已打開 \(targetName)", "Opened \(targetName)") : failureText
         }
     }
 
@@ -5255,30 +5624,48 @@ struct AccountsRootView: View {
     private func syncMemories(silent: Bool = false) {
         guard !isSyncing else { return }
         isSyncing = true
-        let loading = silent ? nil : tr("同步記憶...", "Syncing memories...")
+        let loading = silent ? nil : tr("同步對話同記憶...", "Syncing history and memory...")
 
         runBackground(loading) {
             var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_SHARED_SESSIONS"] = "1"
+            environment["CODEX_SYNC_THREAD_HISTORY"] = "1"
             if silent {
                 environment["CODEX_FAST_SYNC_PLUGIN_PAYLOADS"] = "0"
                 environment["CODEX_SYNC_PLUGIN_PAYLOADS"] = "0"
             }
-            return runCodexScript(scriptPath, ["sync-once"], wait: true, timeout: silent ? 35 : 60, environment: environment)
+            return runCodexScript(scriptPath, ["sync-history-once"], wait: true, timeout: silent ? 35 : 60, environment: environment)
         } completion: { result in
             isSyncing = false
             let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
+            lastAutoSyncAt = Date()
             if result.0 == 0 {
                 lastAutoSync = time
-                statusText = silent ? tr("已自動同步 \(time)", "Auto synced at \(time)") : tr("記憶已同步", "Memories synced")
+                statusText = silent ? tr("已自動同步 \(time)", "Auto synced at \(time)") : tr("對話同記憶已同步", "History and memory synced")
             } else if !silent {
                 statusText = tr("同步失敗", "Sync failed")
             }
         }
     }
 
+    private func cleanupSidebarProjectsSilently() {
+        guard !isCleaningSidebarState else { return }
+        isCleaningSidebarState = true
+
+        runBackground(nil) {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_SYNC_THREAD_HISTORY"] = "0"
+            return runCodexScript(scriptPath, ["cleanup-empty-projects"], wait: true, timeout: 45, environment: environment)
+        } completion: { _ in
+            isCleaningSidebarState = false
+        }
+    }
+
     private func shareAll() {
         runBackground(tr("共享對話紀錄...", "Sharing history...")) {
-            runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60)
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_SHARED_SESSIONS"] = "1"
+            return runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60, environment: environment)
         } completion: { result in
             statusText = result.0 == 0 ? tr("已同全部 profile 共享對話紀錄", "History shared with all profiles") : tr("共享失敗", "History share failed")
             refreshProfiles(showLoading: false)
@@ -5349,9 +5736,20 @@ struct AccountsRootView: View {
 
     private func shareHistory(_ profile: CodexProfile) {
         runBackground(tr("共享 \(profile.displayName) 對話紀錄...", "Sharing \(profile.displayName) history...")) {
-            runCodexScript(scriptPath, ["link-history", profile.id], wait: true, timeout: 45)
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_SHARED_SESSIONS"] = "1"
+            return runCodexScript(scriptPath, ["link-history", profile.id], wait: true, timeout: 45, environment: environment)
         } completion: { result in
             statusText = result.0 == 0 ? tr("已同 \(profile.displayName) 共享對話紀錄", "History shared with \(profile.displayName)") : tr("共享失敗", "History share failed")
+            refreshProfiles(showLoading: false)
+        }
+    }
+
+    private func separateHistory(_ profile: CodexProfile) {
+        runBackground(tr("分開 \(profile.displayName) 對話紀錄...", "Separating \(profile.displayName) history...")) {
+            runCodexScript(scriptPath, ["separate-history", profile.id], wait: true, timeout: 45)
+        } completion: { result in
+            statusText = result.0 == 0 ? tr("已分開 \(profile.displayName) 對話紀錄", "Separated \(profile.displayName) history") : tr("分開紀錄失敗", "History separation failed")
             refreshProfiles(showLoading: false)
         }
     }
@@ -5713,7 +6111,10 @@ private final class UpdateController: ObservableObject {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var syncProcess: Process?
+    private var sidebarPruneProcess: Process?
     private var window: NSWindow!
+    private var cachedAccounts: [Account] = []
+    private var accountsCacheRefreshInFlight = false
 
     private var scriptPath: String {
         if let bundled = Bundle.main.path(forResource: "codex_multi_account", ofType: "zsh") {
@@ -5745,6 +6146,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardCleanChanged), name: .keyboardCleanStateChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateStateChanged), name: .updateStateChanged, object: nil)
         showAccountsWindow()
+        refreshAccountsCacheAsync()
+        startSidebarPruneLoop()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -5781,9 +6184,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = appTr("Codex 帳戶", "Codex Accounts")
         statusItem.button?.toolTip = appTr("Codex 帳戶", "Codex Accounts")
 
-        let accounts = loadAccounts()
+        let accounts = cachedAccounts
         if accounts.isEmpty {
-            menu.addItem(disabledMenuItem(appTr("冇帳戶", "No accounts found")))
+            menu.addItem(disabledMenuItem(accountsCacheRefreshInFlight ? appTr("正在載入帳戶...", "Loading accounts...") : appTr("冇帳戶", "No accounts found")))
         } else {
             for account in accounts {
                 let item = NSMenuItem(title: appTr("打開 \(account.displayName)", "Open \(account.displayName)"), action: #selector(openAccountFromMenu(_:)), keyEquivalent: account.keyEquivalent)
@@ -5811,13 +6214,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(menuItem(appTr("新增帳戶...", "New Account..."), action: #selector(newAccount), key: "n"))
         menu.addItem(menuItem(appTr("帳戶列表", "List Accounts"), action: #selector(listAccounts), key: "l"))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(menuItem(appTr("同步記憶一次", "Sync Memories Once"), action: #selector(syncOnce), key: "s"))
+        menu.addItem(menuItem(appTr("同步對話同記憶一次", "Sync History and Memory Once"), action: #selector(syncOnce), key: "s"))
         menu.addItem(menuItem(appTr("關閉全部 Codex 視窗", "Close All Codex Windows"), action: #selector(closeAllWindows), key: "w"))
 
         if syncProcess == nil {
-            menu.addItem(menuItem(appTr("開始自動同步記憶", "Start Memory Sync Loop"), action: #selector(startSyncLoop), key: ""))
+            menu.addItem(menuItem(appTr("開始自動同步對話同記憶", "Start History and Memory Sync Loop"), action: #selector(startSyncLoop), key: ""))
         } else {
-            menu.addItem(menuItem(appTr("停止自動同步記憶", "Stop Memory Sync Loop"), action: #selector(stopSyncLoop), key: ""))
+            menu.addItem(menuItem(appTr("停止自動同步對話同記憶", "Stop History and Memory Sync Loop"), action: #selector(stopSyncLoop), key: ""))
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -5883,7 +6286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let accountMenu = NSApp.mainMenu?.items.first(where: { $0.submenu?.title == appTr("帳戶", "Accounts") })?.submenu else { return }
         accountMenu.removeAllItems()
 
-        for account in loadAccounts() {
+        for account in cachedAccounts {
             let item = NSMenuItem(title: appTr("打開 \(account.displayName)", "Open \(account.displayName)"), action: #selector(openAccountFromMenu(_:)), keyEquivalent: account.keyEquivalent)
             item.target = self
             item.representedObject = ["name": account.name, "displayName": account.displayName] as NSDictionary
@@ -5892,7 +6295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         accountMenu.addItem(NSMenuItem.separator())
         accountMenu.addItem(menuItem(appTr("新增帳戶...", "New Account..."), action: #selector(newAccount), key: "n"))
-        accountMenu.addItem(menuItem(appTr("同步記憶一次", "Sync Memories Once"), action: #selector(syncOnce), key: "s"))
+        accountMenu.addItem(menuItem(appTr("同步對話同記憶一次", "Sync History and Memory Once"), action: #selector(syncOnce), key: "s"))
         accountMenu.addItem(menuItem(appTr("關閉全部 Codex 視窗", "Close All Codex Windows"), action: #selector(closeAllWindows), key: "w"))
         accountMenu.addItem(menuItem(appTr("切換防睡眠", "Toggle Keep Awake"), action: #selector(toggleKeepAwake), key: "k"))
         accountMenu.addItem(menuItem(appTr("切換清潔模式", "Toggle Clean Mode"), action: #selector(toggleKeyboardClean), key: ""))
@@ -5950,6 +6353,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadAccounts() -> [Account] {
+        cachedAccounts
+    }
+
+    private func loadAccountsFromScript() -> [Account] {
         let result = runScript(["list-accounts"], wait: true, timeout: 8)
         guard result.0 == 0 else { return [] }
         let displayNames = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
@@ -5977,13 +6384,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
     }
 
+    private func refreshAccountsCacheAsync() {
+        guard !accountsCacheRefreshInFlight else { return }
+        accountsCacheRefreshInFlight = true
+        rebuildMenu()
+        refreshMainAccountsMenu()
+
+        DispatchQueue.global(qos: .utility).async {
+            let accounts = self.loadAccountsFromScript()
+            DispatchQueue.main.async {
+                self.cachedAccounts = accounts
+                self.accountsCacheRefreshInFlight = false
+                self.rebuildMenu()
+                self.refreshMainAccountsMenu()
+            }
+        }
+    }
+
     @discardableResult
     private func runScript(_ arguments: [String], wait: Bool = false, timeout: TimeInterval = 90) -> (Int32, String) {
         let processArguments = [scriptPath] + arguments
-        if wait {
-            return runProcess(executable: "/bin/zsh", arguments: processArguments, timeout: timeout)
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_SHARED_SESSIONS"] = "1"
+        let command = arguments.first ?? ""
+        if ["sync-once", "sync-history-once", "sync-account", "sync-account-for-launch", "sync-loop", "sync-history-loop"].contains(command) {
+            environment["CODEX_SYNC_THREAD_HISTORY"] = "1"
+        } else if !["link-history", "link-all-history", "link-account2-history"].contains(command) {
+            environment["CODEX_SYNC_THREAD_HISTORY"] = "0"
         }
-        return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments)
+        if wait {
+            return runProcess(executable: "/bin/zsh", arguments: processArguments, environment: environment, timeout: timeout)
+        }
+        return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments, environment: environment)
     }
 
     private func showMessage(_ title: String, _ text: String) {
@@ -5997,7 +6429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openAccount(_ name: String, displayName: String? = nil) {
         let routed = quotaPoolRouteForMenu(requestedName: name)
-        var arguments = ["launch-account", routed.name]
+        var arguments = ["launch-account-nosync", routed.name]
         if !routed.displayName.isEmpty {
             arguments.append(routed.displayName)
         }
@@ -6079,7 +6511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.messageText = appTr("新增帳戶", "New Codex Account")
-        alert.informativeText = appTr("輸入 profile 名。", "Enter a profile name.")
+        alert.informativeText = appTr("輸入 profile 名；會建立全新空白 profile，唔會自動同步舊對話。", "Enter a profile name. This creates a new blank profile without automatically syncing old conversations.")
         alert.addButton(withTitle: appTr("建立並打開", "Create and Open"))
         alert.addButton(withTitle: appTr("取消", "Cancel"))
 
@@ -6098,12 +6530,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         rebuildMenu()
         refreshMainAccountsMenu()
-        runScript(["launch-account", rawName, rawName])
+        runScript(["launch-account-nosync", rawName, rawName])
     }
 
     @objc private func refreshWindow() {
-        rebuildMenu()
-        refreshMainAccountsMenu()
+        refreshAccountsCacheAsync()
     }
 
     @objc private func showAccountsWindow() {
@@ -6145,7 +6576,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = [scriptPath, "sync-loop"]
+        process.arguments = [scriptPath, "sync-history-loop"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_SYNC_THREAD_HISTORY"] = "1"
+        process.environment = environment
         if let nullOutput = FileHandle(forWritingAtPath: "/dev/null") {
             process.standardOutput = nullOutput
             process.standardError = nullOutput
@@ -6164,6 +6598,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         syncProcess?.terminate()
         syncProcess = nil
         rebuildMenu()
+    }
+
+    private func startSidebarPruneLoop() {
+        guard sidebarPruneProcess == nil else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [scriptPath, "prune-loop"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_DELETE_STALE_THREAD_ROWS"] = "0"
+        environment["CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS"] = "5"
+        process.environment = environment
+        if let nullOutput = FileHandle(forWritingAtPath: "/dev/null") {
+            process.standardOutput = nullOutput
+            process.standardError = nullOutput
+        }
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.sidebarPruneProcess = nil
+            }
+        }
+
+        do {
+            try process.run()
+            sidebarPruneProcess = process
+        } catch {
+            sidebarPruneProcess = nil
+        }
     }
 
     @objc private func toggleKeepAwake() {
@@ -6190,6 +6652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         syncProcess?.terminate()
+        sidebarPruneProcess?.terminate()
         KeyboardCleanController.shared.stop()
         KeepAwakeController.shared.stop()
         NSApp.terminate(nil)
@@ -6197,6 +6660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         syncProcess?.terminate()
+        sidebarPruneProcess?.terminate()
         KeyboardCleanController.shared.stop()
         KeepAwakeController.shared.stop()
     }
