@@ -20,10 +20,11 @@ CODEX_HISTORY_ANCHOR_HOME="${CODEX_HISTORY_ANCHOR_HOME:-$ACCOUNTS_ROOT/250345400
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
 CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS="${CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS:-5}"
 USAGE_API_URL="${USAGE_API_URL:-https://chatgpt.com/backend-api/wham/usage}"
+RESET_CREDITS_API_URL="${RESET_CREDITS_API_URL:-https://chatgpt.com/backend-api/wham/rate-limit-reset-credits}"
 TOKEN_REFRESH_URL="${TOKEN_REFRESH_URL:-https://auth.openai.com/oauth/token}"
 CHATGPT_CLIENT_ID="${CHATGPT_CLIENT_ID:-app_EMoamEEZ73f0CkXaXp7hrann}"
 USAGE_CACHE_SECONDS="${USAGE_CACHE_SECONDS:-120}"
-USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache-v5}"
+USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache-v8}"
 USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS="${USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS:-1}"
 USAGE_DIRECT_TIMEOUT_SECONDS="${USAGE_DIRECT_TIMEOUT_SECONDS:-3}"
 TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS="${TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS:-3}"
@@ -43,6 +44,10 @@ CODEX_AUTO_SYNC_LOCK_MAX_WAITS="${CODEX_AUTO_SYNC_LOCK_MAX_WAITS:-0}"
 CODEX_SYNC_STALE_LOCK_SECONDS="${CODEX_SYNC_STALE_LOCK_SECONDS:-15}"
 CODEX_SKIP_ACTIVE_STATE_DB_WRITES="${CODEX_SKIP_ACTIVE_STATE_DB_WRITES:-1}"
 CODEX_DELETE_STALE_THREAD_ROWS="${CODEX_DELETE_STALE_THREAD_ROWS:-0}"
+CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-1}"
+CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES="${CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES:-67108864}"
+CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS="${CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS:-65536}"
+CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS="${CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS:-200000}"
 CODEX_ACTIVE_DB_LSOF_MAX_WAITS="${CODEX_ACTIVE_DB_LSOF_MAX_WAITS:-4}"
 CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS="${CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS:-0.05}"
 CODEX_RSYNC_MAX_WAITS="${CODEX_RSYNC_MAX_WAITS:-80}"
@@ -54,6 +59,15 @@ CODEX_INJECT_PROXY_ENV="${CODEX_INJECT_PROXY_ENV:-1}"
 CODEX_PROXY_URL="${CODEX_PROXY_URL:-http://127.0.0.1:7897}"
 CODEX_NO_PROXY="${CODEX_NO_PROXY:-localhost,127.0.0.1,::1}"
 DASHSCOPE_SECRET_ENV_FILE="${DASHSCOPE_SECRET_ENV_FILE:-$ACCOUNTS_ROOT/.secrets/dashscope.env}"
+ALIYUN_CODING_PLAN_BRIDGE_HOST="${ALIYUN_CODING_PLAN_BRIDGE_HOST:-127.0.0.1}"
+ALIYUN_CODING_PLAN_BRIDGE_PORT="${ALIYUN_CODING_PLAN_BRIDGE_PORT:-31416}"
+ALIYUN_CODING_PLAN_BRIDGE_ROOT="${ALIYUN_CODING_PLAN_BRIDGE_ROOT:-$ACCOUNTS_ROOT/.tools/aliyun-codex-bridge}"
+ALIYUN_CODING_PLAN_BRIDGE_VERSION="${ALIYUN_CODING_PLAN_BRIDGE_VERSION:-0.1.2}"
+ALIYUN_CODING_PLAN_BASE_URL="${ALIYUN_CODING_PLAN_BASE_URL:-https://coding.dashscope.aliyuncs.com/v1}"
+CODEX_BUNDLED_NODE_BIN="${CODEX_BUNDLED_NODE_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
+CODEX_BUNDLED_NPM_BIN="${CODEX_BUNDLED_NPM_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/npm}"
+SCRIPT_DIR="${0:A:h}"
+CODEX_SHARE_HELPER="${CODEX_SHARE_HELPER:-$SCRIPT_DIR/codex_share_package.py}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
@@ -76,6 +90,8 @@ Usage:
   scripts/codex_multi_account.zsh sync-history-once
   scripts/codex_multi_account.zsh sync-account <account-name>
   scripts/codex_multi_account.zsh sync-account-for-launch <account-name>
+  scripts/codex_multi_account.zsh repair-account1
+  scripts/codex_multi_account.zsh repair-compactions <account-name>
   scripts/codex_multi_account.zsh sync-loop
   scripts/codex_multi_account.zsh init-account <account-name>
   scripts/codex_multi_account.zsh init-shared-account <account-name>
@@ -92,6 +108,10 @@ Usage:
   scripts/codex_multi_account.zsh separate-history <account-name>
   scripts/codex_multi_account.zsh separate-all-history
   scripts/codex_multi_account.zsh cleanup-empty-projects
+  scripts/codex_multi_account.zsh list-exportable-threads <account-name> [limit]
+  scripts/codex_multi_account.zsh export-thread-package <account-name> <thread-id> <output.codexshare> [--include-generated-images] [--include-local-assets]
+  scripts/codex_multi_account.zsh inspect-thread-package <package.codexshare>
+  scripts/codex_multi_account.zsh import-thread-package <package.codexshare> <account-name|all> [--mark-latest]
   scripts/codex_multi_account.zsh link-all-history
   CODEX_SYNC_PLUGIN_PAYLOADS=1 scripts/codex_multi_account.zsh sync-once
   scripts/codex_multi_account.zsh link-account2-history
@@ -138,6 +158,9 @@ Notes:
     auth.json, cookies, SQLite logs, or browser cookies/local storage.
   - Usage status is fetched per profile from Codex's authenticated usage
     endpoint. Tokens are only read for the request and are not cached.
+  - Conversation packages (.codexshare) export/import one selected local Codex
+    conversation, including the rollout JSONL and thread SQLite row. They never
+    include auth.json, cookies, or Codex config by default.
   - Codex profile launches inject HTTP_PROXY/HTTPS_PROXY/ALL_PROXY by default
     so WSS and HTTPS traffic use the same local proxy. Set
     CODEX_INJECT_PROXY_ENV=0 to disable this.
@@ -270,6 +293,440 @@ load_dashscope_api_key() {
   fi
 }
 
+load_aliyun_coding_plan_key() {
+  load_dashscope_api_key
+  if [[ -z "${AI_API_KEY:-}" && -n "${DASHSCOPE_API_KEY:-}" ]]; then
+    AI_API_KEY="$DASHSCOPE_API_KEY"
+    export AI_API_KEY
+  fi
+}
+
+resolve_node_bin() {
+  local candidate
+  for candidate in \
+    "${NODE_BIN:-}" \
+    "$CODEX_BUNDLED_NODE_BIN" \
+    "/usr/local/bin/node" \
+    "/opt/homebrew/bin/node"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  command -v node 2>/dev/null || return 1
+}
+
+resolve_npm_bin() {
+  local candidate
+  for candidate in \
+    "${NPM_BIN:-}" \
+    "$CODEX_BUNDLED_NPM_BIN" \
+    "/usr/local/bin/npm" \
+    "/opt/homebrew/bin/npm"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  command -v npm 2>/dev/null || return 1
+}
+
+is_primary_codex_home() {
+  local home_dir="$1"
+  [[ "$home_dir" == "$PRIMARY_CODEX_HOME" ]]
+}
+
+write_top_level_model_config() {
+  local config_file="$1"
+  local model="$2"
+  local provider="$3"
+  [[ -f "$config_file" ]] || return 0
+
+  MODEL_VALUE="$model" PROVIDER_VALUE="$provider" CONFIG_FILE="$config_file" python3 - <<'PY'
+from pathlib import Path
+import os
+
+path = Path(os.environ["CONFIG_FILE"])
+model = os.environ["MODEL_VALUE"]
+provider = os.environ["PROVIDER_VALUE"]
+lines = path.read_text(errors="replace").splitlines()
+out = []
+in_table = False
+seen_model = False
+seen_provider = False
+inserted = False
+
+def insert_missing():
+    global inserted, seen_model, seen_provider
+    if inserted:
+        return
+    if not seen_model:
+        out.append(f'model = "{model}"')
+        seen_model = True
+    if not seen_provider:
+        out.append(f'model_provider = "{provider}"')
+        seen_provider = True
+    inserted = True
+
+for line in lines:
+    stripped = line.strip()
+    if not in_table and stripped.startswith("["):
+        insert_missing()
+        in_table = True
+
+    if not in_table and stripped.startswith("model ") or (not in_table and stripped.startswith("model=")):
+        if not seen_model:
+            out.append(f'model = "{model}"')
+            seen_model = True
+        continue
+    if not in_table and stripped.startswith("model_provider"):
+        if not seen_provider:
+            out.append(f'model_provider = "{provider}"')
+            seen_provider = True
+        continue
+    out.append(line)
+
+if not inserted:
+    insert_missing()
+
+path.write_text("\n".join(out) + "\n")
+PY
+}
+
+ensure_ai_proxy_provider_config() {
+  local config_file="$1"
+  [[ -f "$config_file" ]] || return 0
+
+  AI_PROXY_BASE_URL="http://${ALIYUN_CODING_PLAN_BRIDGE_HOST}:${ALIYUN_CODING_PLAN_BRIDGE_PORT}" CONFIG_FILE="$config_file" python3 - <<'PY'
+from pathlib import Path
+import os
+
+path = Path(os.environ["CONFIG_FILE"])
+base_url = os.environ["AI_PROXY_BASE_URL"]
+lines = path.read_text(errors="replace").splitlines()
+table_header = "[model_providers.ai_proxy]"
+block = [
+    table_header,
+    'name = "Coding Plan Dashscope via local proxy"',
+    f'base_url = "{base_url}"',
+    'env_key = "AI_API_KEY"',
+    'wire_api = "responses"',
+    'supports_websockets = false',
+    'stream_idle_timeout_ms = 3000000',
+]
+
+out = []
+i = 0
+replaced = False
+while i < len(lines):
+    if lines[i].strip() == table_header:
+        out.extend(block)
+        replaced = True
+        i += 1
+        while i < len(lines) and not lines[i].lstrip().startswith("["):
+            i += 1
+        continue
+    out.append(lines[i])
+    i += 1
+
+if not replaced:
+    if out and out[-1].strip():
+        out.append("")
+    out.extend(block)
+
+path.write_text("\n".join(out) + "\n")
+PY
+}
+
+ensure_account1_model_catalog_for_home() {
+  local home_dir="$1"
+  is_primary_codex_home "$home_dir" || return 0
+  [[ -d "$home_dir" ]] || return 0
+
+  ACCOUNT1_HOME="$home_dir" python3 - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+home = Path(os.environ["ACCOUNT1_HOME"]).expanduser()
+config_path = home / "config.toml"
+catalog_path = home / "qwen-model-catalog.json"
+cache_path = home / "models_cache.json"
+provider = "ai_proxy"
+default_model = "qwen3.7-plus"
+
+specs = [
+    ("qwen3.7-plus", "Qwen 3.7 Plus", "high", ["low", "medium", "high", "xhigh"], ["text", "image"], "Recommended Aliyun Coding Plan model with image understanding."),
+    ("qwen3.6-plus", "Qwen 3.6 Plus", "medium", ["low", "medium", "high"], ["text", "image"], "Recommended Aliyun Coding Plan model with image understanding."),
+    ("kimi-k2.5", "Kimi K2.5", "medium", ["low", "medium", "high"], ["text"], "Recommended Aliyun Coding Plan model."),
+    ("glm-5", "GLM 5", "medium", ["low", "medium", "high"], ["text"], "Recommended Aliyun Coding Plan model."),
+    ("MiniMax-M2.5", "MiniMax M2.5", "medium", ["low", "medium", "high"], ["text"], "Recommended Aliyun Coding Plan model."),
+    ("qwen3.5-plus", "Qwen 3.5 Plus", "medium", ["low", "medium", "high"], ["text", "image"], "Aliyun Coding Plan model with image understanding."),
+    ("qwen3-max-2026-01-23", "Qwen 3 Max 2026-01-23", "high", ["low", "medium", "high", "xhigh"], ["text"], "Aliyun Coding Plan model."),
+    ("qwen3-coder-next", "Qwen 3 Coder Next", "high", ["low", "medium", "high", "xhigh"], ["text"], "Aliyun Coding Plan coding model."),
+    ("qwen3-coder-plus", "Qwen 3 Coder Plus", "high", ["low", "medium", "high", "xhigh"], ["text"], "Aliyun Coding Plan coding model."),
+    ("glm-4.7", "GLM 4.7", "medium", ["low", "medium", "high"], ["text"], "Aliyun Coding Plan model."),
+]
+
+reasoning_descriptions = {
+    "low": "Fast responses with lighter reasoning",
+    "medium": "Balanced speed and reasoning",
+    "high": "Deeper reasoning for coding tasks",
+    "xhigh": "Extra reasoning depth",
+}
+
+
+def read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def existing_models_by_slug() -> dict[str, dict]:
+    by_slug: dict[str, dict] = {}
+    for path in (catalog_path, cache_path):
+        for item in read_json(path).get("models", []):
+            if isinstance(item, dict) and isinstance(item.get("slug"), str):
+                by_slug[item["slug"]] = item
+    return by_slug
+
+
+def normalize_model(existing: dict, slug: str, display: str, default_reasoning: str, levels: list[str], modalities: list[str], description: str) -> dict:
+    model = dict(existing)
+    model.update(
+        {
+            "slug": slug,
+            "display_name": display,
+            "displayName": display,
+            "description": description,
+            "base_instructions": model.get("base_instructions")
+            or "You are Codex, a coding agent. Work pragmatically, verify changes, and be concise.",
+            "supports_reasoning_summaries": False,
+            "support_verbosity": False,
+            "provider": provider,
+            "model_provider": provider,
+            "hidden": False,
+            "visibility": "list",
+            "supported_in_api": True,
+            "default_reasoning_level": default_reasoning,
+            "supported_reasoning_levels": [
+                {"effort": effort, "description": reasoning_descriptions.get(effort, effort)}
+                for effort in levels
+            ],
+            "shell_type": "shell_command",
+            "priority": next(i for i, item in enumerate(specs) if item[0] == slug),
+            "additional_speed_tiers": [],
+            "service_tiers": [],
+            "availability_nux": None,
+            "upgrade": None,
+            "model_messages": {
+                "instructions_template": "You are Codex, a coding agent. Work pragmatically, verify changes, and be concise.\n\n{{ personality }}",
+                "default_personality": "You are pragmatic, direct, and careful.",
+            },
+            "default_reasoning_summary": "none",
+            "default_verbosity": "low",
+            "apply_patch_tool_type": "freeform",
+            "web_search_tool_type": "text_and_image",
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+            "supports_parallel_tool_calls": True,
+            "supports_image_detail_original": True,
+            "context_window": 131000,
+            "max_context_window": 131000,
+            "effective_context_window_percent": 95,
+            "experimental_supported_tools": [],
+            "input_modalities": modalities,
+            "supports_search_tool": False,
+            "use_responses_lite": False,
+        }
+    )
+    return model
+
+
+def set_top_level_catalog_line(text: str) -> str:
+    if not text:
+        return f'model = "{default_model}"\nmodel_provider = "{provider}"\nmodel_catalog_json = "{catalog_path}"\n'
+    lines = text.splitlines()
+    out: list[str] = []
+    in_table = False
+    seen = False
+    inserted = False
+    catalog_line = f'model_catalog_json = "{catalog_path}"'
+    for line in lines:
+        stripped = line.strip()
+        if not in_table and stripped.startswith("[") and not inserted:
+            if not seen:
+                out.append(catalog_line)
+                seen = True
+            inserted = True
+            in_table = True
+        if not in_table and stripped.startswith("model_catalog_json"):
+            if not seen:
+                out.append(catalog_line)
+                seen = True
+            continue
+        out.append(line)
+        if not in_table and stripped.startswith("model_provider") and not seen:
+            out.append(catalog_line)
+            seen = True
+            inserted = True
+    if not seen:
+        out.append(catalog_line)
+    return "\n".join(out) + "\n"
+
+
+existing = existing_models_by_slug()
+models = [normalize_model(existing.get(slug, {}), slug, display, default_reasoning, levels, modalities, description) for slug, display, default_reasoning, levels, modalities, description in specs]
+catalog = {"models": models}
+old_cache = read_json(cache_path)
+cache = {
+    "fetched_at": old_cache.get("fetched_at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "etag": "local-qwen-ai-proxy",
+    "client_version": "local-qwen-ai-proxy",
+    "models": models,
+}
+
+new_texts: dict[Path, str] = {
+    catalog_path: json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+    cache_path: json.dumps(cache, ensure_ascii=False, indent=2) + "\n",
+}
+if config_path.exists():
+    new_texts[config_path] = set_top_level_catalog_line(config_path.read_text(errors="replace"))
+
+changed = []
+for path, new_text in new_texts.items():
+    try:
+        old_text = path.read_text(errors="replace")
+    except OSError:
+        old_text = ""
+    if old_text != new_text:
+        changed.append((path, old_text, new_text))
+
+if changed:
+    backup_dir = home / "recovery-backups" / f"account1-model-catalog-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for path, old_text, _ in changed:
+        if path.exists():
+            shutil.copy2(path, backup_dir / path.name)
+        elif old_text:
+            (backup_dir / path.name).write_text(old_text)
+    for path, _, new_text in changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_text)
+PY
+}
+
+backup_config_once() {
+  local home_dir="$1"
+  local reason="$2"
+  local config_file="$home_dir/config.toml"
+  [[ -f "$config_file" ]] || return 0
+  local backup_dir="$home_dir/recovery-backups/$reason-$(date '+%Y%m%d-%H%M%S')"
+  mkdir -p "$backup_dir"
+  cp -p "$config_file" "$backup_dir/config.toml" 2>/dev/null || true
+}
+
+configure_account1_aliyun_proxy_for_home() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  is_primary_codex_home "$home_dir" || return 0
+  [[ -f "$config_file" ]] || return 0
+
+  if ! awk '
+    BEGIN { in_table = 0; ok_model = 0; ok_provider = 0 }
+    /^\[/ { in_table = 1 }
+    in_table == 0 && $0 == "model = \"qwen3.7-plus\"" { ok_model = 1 }
+    in_table == 0 && $0 == "model_provider = \"ai_proxy\"" { ok_provider = 1 }
+    END { exit (ok_model && ok_provider) ? 0 : 1 }
+  ' "$config_file" >/dev/null 2>&1; then
+    backup_config_once "$home_dir" "account1-ai-proxy-config"
+  fi
+  write_top_level_model_config "$config_file" "qwen3.7-plus" "ai_proxy"
+  ensure_ai_proxy_provider_config "$config_file"
+  ensure_account1_model_catalog_for_home "$home_dir"
+}
+
+restore_non_account1_openai_config_for_home() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  is_primary_codex_home "$home_dir" && return 0
+  [[ -f "$config_file" ]] || return 0
+
+  if awk '
+    BEGIN { in_table = 0; bad = 0 }
+    /^\[/ { in_table = 1 }
+    in_table == 0 && ($0 == "model_provider = \"Model_Studio\"" || $0 == "model_provider = \"Model_Studio_Coding_Plan\"" || $0 == "model_provider = \"ai_proxy\"") { bad = 1 }
+    END { exit bad ? 0 : 1 }
+  ' "$config_file" >/dev/null 2>&1; then
+    backup_config_once "$home_dir" "non-account1-openai-restore"
+    write_top_level_model_config "$config_file" "gpt-5.5" "openai"
+  fi
+}
+
+home_uses_account1_ai_proxy() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  is_primary_codex_home "$home_dir" || return 1
+  [[ -f "$config_file" ]] || return 1
+  awk '
+    BEGIN { in_table = 0; found = 0 }
+    /^\[/ { in_table = 1 }
+    in_table == 0 && $0 == "model_provider = \"ai_proxy\"" { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$config_file" >/dev/null 2>&1
+}
+
+ensure_aliyun_coding_plan_bridge_running() {
+  local health_url="http://${ALIYUN_CODING_PLAN_BRIDGE_HOST}:${ALIYUN_CODING_PLAN_BRIDGE_PORT}/health"
+  local server_js="$ALIYUN_CODING_PLAN_BRIDGE_ROOT/node_modules/aliyun-codex-bridge/src/server.js"
+  local log_dir="$APP_DATA_ROOT/.logs"
+  local log_file="$log_dir/aliyun-codex-bridge.log"
+  local node_bin npm_bin tool_path bridge_pid
+
+  curl -fsS "$health_url" >/dev/null 2>&1 && return 0
+  load_aliyun_coding_plan_key
+  if [[ -z "${AI_API_KEY:-}" ]]; then
+    echo "Missing Aliyun Coding Plan key: AI_API_KEY/DASHSCOPE_API_KEY is not set." >&2
+    return 1
+  fi
+  node_bin="$(resolve_node_bin 2>/dev/null || true)"
+  if [[ -z "$node_bin" ]]; then
+    echo "node is required to start aliyun-codex-bridge." >&2
+    return 1
+  fi
+  if [[ ! -f "$server_js" ]]; then
+    npm_bin="$(resolve_npm_bin 2>/dev/null || true)"
+    if [[ -z "$npm_bin" ]]; then
+      echo "npm is required to install aliyun-codex-bridge." >&2
+      return 1
+    fi
+    mkdir -p "$ALIYUN_CODING_PLAN_BRIDGE_ROOT"
+    tool_path="$(dirname "$node_bin"):$(dirname "$npm_bin"):${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+    PATH="$tool_path" "$npm_bin" install --prefix "$ALIYUN_CODING_PLAN_BRIDGE_ROOT" "aliyun-codex-bridge@$ALIYUN_CODING_PLAN_BRIDGE_VERSION" >/dev/null
+  fi
+  if [[ ! -f "$server_js" ]]; then
+    echo "aliyun-codex-bridge server.js was not found after install." >&2
+    return 1
+  fi
+  mkdir -p "$log_dir"
+  nohup env \
+    AI_API_KEY="$AI_API_KEY" \
+    AI_API_BASE="$ALIYUN_CODING_PLAN_BASE_URL" \
+    HOST="$ALIYUN_CODING_PLAN_BRIDGE_HOST" \
+    PORT="$ALIYUN_CODING_PLAN_BRIDGE_PORT" \
+    LOG_LEVEL="${ALIYUN_CODING_PLAN_BRIDGE_LOG_LEVEL:-warn}" \
+    ALLOW_TOOLS=1 \
+    SUPPRESS_REASONING_TEXT=1 \
+    "$node_bin" "$server_js" >>"$log_file" 2>&1 &
+  bridge_pid="$!"
+  disown "$bridge_pid" >/dev/null 2>&1 || true
+  sleep 0.6
+  curl -fsS "$health_url" >/dev/null 2>&1
+}
+
 ensure_owl_auth_features_enabled() {
   local app_data="$1"
   local cache_file="$app_data/owl-feature-bootstrap-cache.json"
@@ -332,6 +789,7 @@ restore_default_thread_model_providers_for_home() {
   local db count timestamp backup_dir
 
   [[ "${CODEX_PRESERVE_TOP_LEVEL_OPENAI_HTTP_PROVIDER:-0}" == "1" ]] && return 0
+  is_primary_codex_home "$home_dir" && return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
   timestamp="$(date '+%Y%m%d-%H%M%S')"
 
@@ -341,8 +799,28 @@ restore_default_thread_model_providers_for_home() {
       PRAGMA busy_timeout = 5000;
       DROP TRIGGER IF EXISTS codex_accounts_thread_model_provider_ai;
       DROP TRIGGER IF EXISTS codex_accounts_thread_model_provider_au;
+      DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_ai;
+      DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_au;
+      CREATE TRIGGER IF NOT EXISTS codex_accounts_openai_thread_provider_ai
+      AFTER INSERT ON threads
+      WHEN NEW.archived = 0
+        AND (COALESCE(NEW.model_provider, '') <> 'openai' OR COALESCE(NEW.model, '') <> 'gpt-5.5')
+      BEGIN
+        UPDATE threads
+        SET model_provider = 'openai', model = 'gpt-5.5'
+        WHERE id = NEW.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS codex_accounts_openai_thread_provider_au
+      AFTER UPDATE OF source, archived, model_provider, model ON threads
+      WHEN NEW.archived = 0
+        AND (COALESCE(NEW.model_provider, '') <> 'openai' OR COALESCE(NEW.model, '') <> 'gpt-5.5')
+      BEGIN
+        UPDATE threads
+        SET model_provider = 'openai', model = 'gpt-5.5'
+        WHERE id = NEW.id;
+      END;
     " >/dev/null 2>&1 || true
-    count="$(sqlite3 "$db" "SELECT count(*) FROM threads WHERE archived = 0 AND source = 'vscode' AND model_provider = 'openai_http';" 2>/dev/null || echo 0)"
+    count="$(sqlite3 "$db" "SELECT count(*) FROM threads WHERE archived = 0 AND (COALESCE(model_provider, '') <> 'openai' OR COALESCE(model, '') <> 'gpt-5.5');" 2>/dev/null || echo 0)"
     [[ "$count" == <-> ]] || count=0
     (( count > 0 )) || continue
 
@@ -353,7 +831,24 @@ restore_default_thread_model_providers_for_home() {
       [[ -f "$db-wal" ]] && cp -p "$db-wal" "$backup_dir/$(basename "$db")-wal" 2>/dev/null || true
       [[ -f "$db-shm" ]] && cp -p "$db-shm" "$backup_dir/$(basename "$db")-shm" 2>/dev/null || true
     fi
-    sqlite3 "$db" "UPDATE threads SET model_provider = 'openai' WHERE archived = 0 AND source = 'vscode' AND model_provider = 'openai_http';" >/dev/null 2>&1 || true
+    sqlite3 "$db" "UPDATE threads SET model_provider = 'openai', model = 'gpt-5.5' WHERE archived = 0 AND (COALESCE(model_provider, '') <> 'openai' OR COALESCE(model, '') <> 'gpt-5.5');" >/dev/null 2>&1 || true
+  done
+}
+
+restore_account1_visible_thread_model_providers_for_home() {
+  local home_dir="$1"
+  is_primary_codex_home "$home_dir" || return 0
+  [[ -d "$home_dir" ]] || return 0
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+
+  local db
+  for db in "$home_dir/state_5.sqlite" "$home_dir/sqlite/state_5.sqlite"; do
+    [[ -f "$db" ]] || continue
+    sqlite3 "$db" "
+      PRAGMA busy_timeout = 5000;
+      DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_ai;
+      DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_au;
+    " >/dev/null 2>&1 || true
   done
 }
 
@@ -404,6 +899,7 @@ post_launch_thread_index_repair_for_home() {
           DROP TRIGGER IF EXISTS codex_accounts_thread_model_provider_au;
         " >/dev/null 2>&1 || true
       done
+      "$script_path" restore-thread-models-home "$home_dir" >/dev/null 2>&1 || true
       "$script_path" prune-global-state-home "$home_dir" >/dev/null 2>&1 || true
       sleep 3
     done
@@ -768,7 +1264,8 @@ cached_reset_has_elapsed() {
 cached_usage_has_elapsed_reset() {
   local cached="$1"
   local quota="${cached%%$'\t'*}"
-  local reset="${cached#*$'\t'}"
+  local rest="${cached#*$'\t'}"
+  local reset="${rest%%$'\t'*}"
   local part label
 
   for part in ${(s: / :)quota}; do
@@ -783,6 +1280,21 @@ cached_usage_has_elapsed_reset() {
   return 1
 }
 
+cached_usage_lacks_reset_credit_expiries() {
+  local cached="$1"
+  local first_rest second_rest reset_credits
+
+  [[ "$cached" == *$'\t'*$'\t'* ]] || return 1
+  first_rest="${cached#*$'\t'}"
+  second_rest="${first_rest#*$'\t'}"
+  reset_credits="$(printf '%s' "$second_rest" | trim_usage_text)"
+
+  if [[ "$reset_credits" =~ '^[1-9][0-9]*$' ]]; then
+    return 0
+  fi
+  return 1
+}
+
 read_cached_usage_if_still_current() {
   local cache_file="$1"
   local max_age="$2"
@@ -791,6 +1303,7 @@ read_cached_usage_if_still_current() {
   cached="$(read_cached_usage "$cache_file" "$max_age" 2>/dev/null || true)"
   [[ -n "$cached" ]] || return 1
   cached_usage_has_elapsed_reset "$cached" && return 1
+  cached_usage_lacks_reset_credit_expiries "$cached" && return 1
   printf '%s\n' "$cached"
 }
 
@@ -798,11 +1311,12 @@ write_cached_usage() {
   local cache_file="$1"
   local quota="$2"
   local reset="$3"
+  local reset_credits="${4:-unknown}"
   local tmp_file
 
   mkdir -p "$USAGE_CACHE_ROOT"
   tmp_file="${cache_file}.$$"
-  printf '%s\t%s\n' "$quota" "$reset" > "$tmp_file"
+  printf '%s\t%s\t%s\n' "$quota" "$reset" "$reset_credits" > "$tmp_file"
   mv "$tmp_file" "$cache_file"
 }
 
@@ -896,6 +1410,95 @@ fetch_usage_http_status() {
     "$USAGE_API_URL" 2>/dev/null || true
 }
 
+fetch_reset_credits_http_status() {
+  local auth_file="$1"
+  local tmp_file="$2"
+  local token account_id
+  local -a request_headers
+
+  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
+  [[ -n "$token" ]] || return 1
+  account_id="$(jq -r '.tokens.account_id // empty' "$auth_file" 2>/dev/null || true)"
+
+  request_headers=(
+    -H "Authorization: Bearer $token"
+    -H 'Accept: application/json'
+    -H 'originator: Codex Desktop'
+    -H 'OAI-Product-Sku: CODEX'
+  )
+  if [[ -n "$account_id" && "$account_id" != "null" ]]; then
+    request_headers+=(-H "ChatGPT-Account-Id: $account_id")
+  fi
+
+  curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+    "${request_headers[@]}" \
+    "$RESET_CREDITS_API_URL" 2>/dev/null || true
+}
+
+parse_reset_credits_detail_file() {
+  local json_file="$1"
+
+  jq -r '
+    def reset_credit_expiry($x):
+      ($x.expires_at // $x.expiresAt // $x.expiry_at // $x.expiryAt // $x.expires // $x.expiry // $x.expiration // null);
+    def is_available($x):
+      (($x.status // "available") | tostring | ascii_downcase) == "available";
+    def reset_credits($c):
+      if $c == null then "unknown"
+      else
+        (($c.available_count // $c.availableCount // $c.count // $c.balance // 0) | tostring) as $count |
+        ([($c.credits // $c.items // $c.reset_credits // $c.resetCredits // [])[]? | select(is_available(.)) | reset_credit_expiry(.) | select(. != null) | tostring] | join(",")) as $expiries |
+        if $expiries != "" then ($count + "@" + $expiries) else $count end
+      end;
+    reset_credits(.)
+  ' "$json_file" 2>/dev/null || true
+}
+
+fetch_reset_credits_detail_for() {
+  local auth_file="$1"
+  local tmp_file http_status detail
+
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  [[ -f "$auth_file" ]] || return 1
+
+  tmp_file="$(mktemp)"
+  http_status="$(fetch_reset_credits_http_status "$auth_file" "$tmp_file")"
+  if [[ "$http_status" == "401" ]]; then
+    rm -f "$tmp_file"
+    if refresh_chatgpt_tokens_for "$auth_file"; then
+      tmp_file="$(mktemp)"
+      http_status="$(fetch_reset_credits_http_status "$auth_file" "$tmp_file")"
+    fi
+  fi
+
+  if [[ "$http_status" != "200" ]]; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  detail="$(parse_reset_credits_detail_file "$tmp_file")"
+  rm -f "$tmp_file"
+  [[ -n "$detail" && "$detail" != "unknown" ]] || return 1
+  printf '%s\n' "$detail"
+}
+
+merge_reset_credits_detail_into_raw_summary() {
+  local auth_file="$1"
+  local raw_summary="$2"
+  local detail
+  local -a parts
+
+  detail="$(fetch_reset_credits_detail_for "$auth_file" 2>/dev/null || true)"
+  [[ -n "$detail" ]] || {
+    printf '%s\n' "$raw_summary"
+    return 0
+  }
+
+  parts=("${(@ps:\t:)raw_summary}")
+  printf '%s\t%s\t%s\n' "${parts[1]:-}" "${parts[2]:-}" "$detail"
+}
+
 format_reset_epoch() {
   local epoch="${1:-}"
   if [[ -z "$epoch" || "$epoch" == "unknown" || "$epoch" == "null" ]]; then
@@ -920,14 +1523,17 @@ format_reset_epoch() {
 emit_usage_summary_from_raw() {
   local cache_file="$1"
   local raw_summary="$2"
-  local quota reset_epochs reset
+  local quota reset_epochs reset reset_credits
+  local -a summary_parts
 
-  quota="${raw_summary%%$'\t'*}"
-  reset_epochs="${raw_summary#*$'\t'}"
+  summary_parts=("${(@ps:\t:)raw_summary}")
+  quota="${summary_parts[1]:-}"
+  reset_epochs="${summary_parts[2]:-}"
+  reset_credits="${summary_parts[3]:-unknown}"
   [[ -n "$quota" ]] || return 1
   if [[ "$quota" == "unlimited" ]]; then
-    write_cached_usage "$cache_file" "$quota" "none"
-    printf '%s\t%s\n' "$quota" "none"
+    write_cached_usage "$cache_file" "$quota" "none" "$reset_credits"
+    printf '%s\t%s\t%s\n' "$quota" "none" "$reset_credits"
     return 0
   fi
 
@@ -944,13 +1550,14 @@ emit_usage_summary_from_raw() {
   done
   [[ -n "$reset" ]] || reset="unknown"
 
-  write_cached_usage "$cache_file" "$quota" "$reset"
-  printf '%s\t%s\n' "$quota" "$reset"
+  write_cached_usage "$cache_file" "$quota" "$reset" "$reset_credits"
+  printf '%s\t%s\t%s\n' "$quota" "$reset" "$reset_credits"
 }
 
 fetch_usage_summary_via_app_server() {
   local home_dir="$1"
   local cache_file="$2"
+  local auth_file="$home_dir/auth.json"
   local codex_bin="$CODEX_APP/Contents/Resources/codex"
   local timeout_seconds="$APP_SERVER_USAGE_TIMEOUT_SECONDS"
   local init_request initialized_notification rate_request line raw_summary error_message server_pid
@@ -963,7 +1570,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.4.3"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.5.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -1021,10 +1628,20 @@ fetch_usage_summary_via_app_server() {
         if $w == null then $fallback
         else duration_label($fallback; window_minutes($w))
         end;
+      def reset_credit_expiry($x):
+        ($x.expiresAt // $x.expires_at // $x.expiryAt // $x.expiry_at // $x.expires // $x.expiry // $x.expiration // null);
+      def reset_credits($c):
+        if $c == null then "unknown"
+        else
+          (($c.availableCount // $c.available_count // $c.count // $c.balance // 0) | tostring) as $count |
+          ([($c.credits // $c.items // $c.resetCredits // $c.reset_credits // [])[]? | reset_credit_expiry(.) | select(. != null) | tostring] | join(",")) as $expiries |
+          if $expiries != "" then ($count + "@" + $expiries) else $count end
+        end;
       select(.id? == 2 and .result?.rateLimits?) |
       .result.rateLimits as $l |
+      (.result.rateLimitResetCredits // .result.rate_limit_reset_credits) as $rc |
       if (($l.credits.unlimited // false) == true) then
-        ["unlimited", "none"]
+        ["unlimited", "none", reset_credits($rc)]
       else
         [
           ([
@@ -1034,12 +1651,14 @@ fetch_usage_summary_via_app_server() {
           ([
             if has_usage($l.primary) then quota_label("usage"; $l.primary) + " " + epoch($l.primary) else empty end,
             if has_usage($l.secondary) then quota_label("usage"; $l.secondary) + " " + epoch($l.secondary) else empty end
-          ] | join(" / "))
+          ] | join(" / ")),
+          reset_credits($rc)
         ]
       end | @tsv
     ' 2>/dev/null || true)"
     if [[ -n "$raw_summary" ]]; then
       cleanup_app_server_process "$server_pid"
+      raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary")"
       emit_usage_summary_from_raw "$cache_file" "$raw_summary"
       return 0
     fi
@@ -1168,11 +1787,20 @@ fetch_usage_summary_for() {
       if $w == null then $fallback
       else duration_label($fallback; window_minutes($w))
       end;
+    def reset_credit_expiry($x):
+      ($x.expires_at // $x.expiresAt // $x.expiry_at // $x.expiryAt // $x.expires // $x.expiry // $x.expiration // null);
+    def reset_credits($c):
+      if $c == null then "unknown"
+      else
+        (($c.available_count // $c.availableCount // $c.count // $c.balance // 0) | tostring) as $count |
+        ([($c.credits // $c.items // $c.reset_credits // $c.resetCredits // [])[]? | reset_credit_expiry(.) | select(. != null) | tostring] | join(",")) as $expiries |
+        if $expiries != "" then ($count + "@" + $expiries) else $count end
+      end;
     def primary_label($l):
       quota_label("usage"; $l.primary);
     (limits) as $l |
     if ($l.unlimited == true) then
-      ["unlimited", "none"]
+      ["unlimited", "none", reset_credits(.rate_limit_reset_credits // .rateLimitResetCredits)]
     else
       [
         ([
@@ -1182,13 +1810,15 @@ fetch_usage_summary_for() {
         ([
           if has_usage($l.primary) then primary_label($l) + " " + epoch($l.primary) else empty end,
           if has_usage($l.secondary) then quota_label("usage"; $l.secondary) + " " + epoch($l.secondary) else empty end
-        ] | join(" / "))
+        ] | join(" / ")),
+        reset_credits(.rate_limit_reset_credits // .rateLimitResetCredits)
       ]
     end | @tsv
   ' "$tmp_file" 2>/dev/null || true)"
   rm -f "$tmp_file"
   [[ -n "$raw_summary" ]] || return 1
 
+  raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary")"
   emit_usage_summary_from_raw "$cache_file" "$raw_summary"
 }
 
@@ -1199,7 +1829,8 @@ account_status_for() {
     exit 2
   fi
 
-  local home_dir auth_file auth_mode last_refresh auth_status quota reset usage_summary
+  local home_dir auth_file auth_mode last_refresh auth_status quota reset reset_credits usage_summary
+  local -a usage_parts
   home_dir="$(account_home_for "$name")"
   auth_file="$home_dir/auth.json"
   auth_mode="unknown"
@@ -1207,6 +1838,12 @@ account_status_for() {
   auth_status="login_needed"
   quota="unknown"
   reset="unknown"
+  reset_credits="unknown"
+
+  if home_uses_account1_ai_proxy "$home_dir"; then
+    echo "$(sanitize_account_name "$name") | signed_in_local | external | api-key | external | aliyun:qwen3.7-plus | none"
+    return 0
+  fi
 
   if [[ -f "$auth_file" ]]; then
     auth_mode="$(jq -r '.auth_mode // "unknown"' "$auth_file" 2>/dev/null || echo "unknown")"
@@ -1215,14 +1852,17 @@ account_status_for() {
       auth_status="signed_in_local"
       usage_summary="$(fetch_usage_summary_for "$name" "$home_dir" 2>/dev/null || true)"
       if [[ -n "$usage_summary" ]]; then
-        quota="${usage_summary%%$'\t'*}"
-        reset="${usage_summary#*$'\t'}"
+        usage_parts=("${(@ps:\t:)usage_summary}")
+        quota="${usage_parts[1]:-unknown}"
+        reset="${usage_parts[2]:-unknown}"
+        reset_credits="${usage_parts[3]:-unknown}"
         if [[ "$quota" == "__auth_invalid__" ]]; then
           # The app-server confirmed Codex itself cannot use this token.
           # Treat it as an expired login instead of showing stale quota.
           auth_status="auth_invalid"
           quota="unknown"
           reset="unknown"
+          reset_credits="unknown"
         fi
       fi
     else
@@ -1230,7 +1870,7 @@ account_status_for() {
     fi
   fi
 
-  echo "$(sanitize_account_name "$name") | $auth_status | $auth_mode | $last_refresh | $quota | $reset"
+  echo "$(sanitize_account_name "$name") | $auth_status | $auth_mode | $last_refresh | $quota | $reset | $reset_credits"
 }
 
 list_accounts_status() {
@@ -2270,17 +2910,114 @@ def thread_updated_at_iso(row):
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 def thread_index_name(row):
+    best_name = None
+    best_score = -1
     for key in ("title", "preview"):
         value = str(row.get(key) or "").strip()
         if not value:
             continue
         for line in value.splitlines():
             name = " ".join(line.split())
-            if name:
-                if len(name) > 80:
-                    return name[:77].rstrip() + "..."
-                return name
+            if not name:
+                continue
+            score = title_text_score(name, row, key)
+            if score > best_score:
+                best_name = name
+                best_score = score
+                if score >= 100:
+                    break
+        if best_score >= 100:
+            break
+    if best_name:
+        if len(best_name) > 80:
+            return best_name[:77].rstrip() + "..."
+        return best_name
     return "Untitled"
+
+def first_nonempty_line(value):
+    for line in str(value or "").splitlines():
+        candidate = " ".join(line.split())
+        if candidate:
+            return candidate
+    return ""
+
+def compact_text(value):
+    return " ".join(str(value or "").split())
+
+def looks_like_filesystem_path(value, row=None):
+    text = first_nonempty_line(value)
+    if not text:
+        return False
+    cwd = ""
+    if row is not None:
+        cwd = str(row.get("cwd") or "").strip()
+    path_prefixes = (
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/tmp/",
+        "/var/",
+        "~/",
+    )
+    if cwd and (text == cwd or text.startswith(cwd + " ") or text.startswith(cwd + "\t")):
+        return True
+    if any(text.startswith(prefix) for prefix in path_prefixes):
+        return True
+    return False
+
+def title_text_score(value, row=None, field="title"):
+    raw = str(value or "")
+    text = first_nonempty_line(raw)
+    if not text or text == "Untitled":
+        return 0
+    if looks_like_filesystem_path(text, row):
+        return 1
+
+    same_as_preview = False
+    if field == "title" and row is not None:
+        preview = compact_text(row.get("preview"))
+        same_as_preview = bool(preview and compact_text(raw) == preview)
+
+    if "\n" in raw:
+        return 30 if same_as_preview else 40
+    if same_as_preview and len(text) > 48:
+        return 35
+    if row is None and len(text) > 48 and any(mark in text for mark in ("?", "？", "!", "！", "。", "，", ",")):
+        return 55
+    if len(text) > 120:
+        return 45
+    if len(text) > 80:
+        return 60
+    if same_as_preview:
+        return 75
+    return 100
+
+def best_thread_text(left, right, field):
+    left_value = str(left.get(field) or "")
+    right_value = str(right.get(field) or "")
+    left_score = title_text_score(left_value, left, field)
+    right_score = title_text_score(right_value, right, field)
+    if right_score > left_score:
+        return right.get(field)
+    if left_score > right_score:
+        return left.get(field)
+    if row_marker(right, ("updated_at_ms", "updated_at")) > row_marker(left, ("updated_at_ms", "updated_at")):
+        return right.get(field)
+    return left.get(field)
+
+def merge_thread_rows(existing, incoming):
+    if existing is None:
+        return dict(incoming)
+    if row_marker(incoming, ("updated_at_ms", "updated_at")) >= row_marker(existing, ("updated_at_ms", "updated_at")):
+        merged = dict(incoming)
+        other = existing
+    else:
+        merged = dict(existing)
+        other = incoming
+    for field in ("title", "preview"):
+        if field in merged and field in other:
+            merged[field] = best_thread_text(merged, other, field)
+    return merged
 
 def thread_has_live_rollout(row):
     rollout_path = str(row.get("rollout_path") or "").strip()
@@ -2368,7 +3105,17 @@ def repair_session_index_files(homes):
                                 record["updated_at"] = fresh["updated_at"]
                                 changed = True
                             existing_name = str(record.get("thread_name") or "").strip()
-                            if not existing_name or (len(existing_name) > 80 and len(fresh["thread_name"]) < len(existing_name)):
+                            fresh_name = str(fresh.get("thread_name") or "").strip()
+                            if (
+                                not existing_name
+                                or title_text_score(fresh_name) > title_text_score(existing_name)
+                                or (
+                                    fresh_name != existing_name
+                                    and title_text_score(fresh_name) >= title_text_score(existing_name)
+                                    and len(fresh_name) + 12 < len(existing_name)
+                                )
+                                or (len(existing_name) > 80 and len(fresh_name) < len(existing_name))
+                            ):
                                 record["thread_name"] = fresh["thread_name"]
                                 changed = True
                         existing_lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
@@ -2524,7 +3271,9 @@ for home in homes:
                         if not thread_is_indexable(row):
                             continue
                     existing = catalog[table].get(key)
-                    if existing is None:
+                    if table == "threads":
+                        catalog[table][key] = merge_thread_rows(existing, row)
+                    elif existing is None:
                         catalog[table][key] = row
                     elif marker_cols and row_marker(row, marker_cols) >= row_marker(existing, marker_cols):
                         catalog[table][key] = row
@@ -2741,6 +3490,31 @@ refresh_shared_history_for_home() {
   sync_global_state_to_selected_homes 1 "$target_home" "${homes[@]}" >/dev/null 2>&1 || true
   sync_goal_state_to_selected_homes 1 "$target_home" "${homes[@]}" >/dev/null 2>&1 || true
   CODEX_SKIP_ACTIVE_STATE_DB_WRITES="$previous_skip_active"
+  restore_account1_visible_thread_model_providers_for_home "$target_home" >/dev/null 2>&1 || true
+}
+
+repair_account1() {
+  require_rsync
+  ensure_dirs
+  configure_account1_aliyun_proxy_for_home "$PRIMARY_CODEX_HOME"
+  refresh_shared_history_for_home "$PRIMARY_CODEX_HOME"
+  normalize_thread_sources_for_home "$PRIMARY_CODEX_HOME"
+  restore_account1_visible_thread_model_providers_for_home "$PRIMARY_CODEX_HOME"
+  repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
+  prune_global_state_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
+}
+
+repair_compactions_for_account() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "repair-compactions requires an account name." >&2
+    exit 2
+  fi
+
+  ensure_dirs
+  local account_home
+  account_home="$(account_home_for "$name")"
+  repair_compacted_image_payloads_for_home "$account_home"
 }
 
 sync_once() {
@@ -3136,7 +3910,14 @@ launch_account() {
     fi
   fi
   prepare_profile_login_storage "$home_dir"
+  if is_primary_codex_home "$home_dir"; then
+    configure_account1_aliyun_proxy_for_home "$home_dir"
+    ensure_aliyun_coding_plan_bridge_running
+  else
+    restore_non_account1_openai_config_for_home "$home_dir"
+  fi
   refresh_shared_history_for_home "$home_dir"
+  repair_compacted_image_payloads_for_home "$home_dir" >/dev/null 2>&1 || true
   if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
     cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
   fi
@@ -3144,6 +3925,7 @@ launch_account() {
   normalize_top_level_model_provider_for_home "$home_dir"
   normalize_thread_sources_for_home "$home_dir"
   restore_default_thread_model_providers_for_home "$home_dir"
+  restore_account1_visible_thread_model_providers_for_home "$home_dir"
 
   echo "Launching Codex profile..."
   echo "  account=$(sanitize_account_name "$name")"
@@ -3161,10 +3943,15 @@ launch_account() {
   # Keep the account env scoped to this launch. `launchctl setenv` is global
   # and can make later Codex windows inherit the wrong CODEX_HOME.
   launchctl unsetenv CODEX_HOME >/dev/null 2>&1 || true
-  load_dashscope_api_key
   launch_env=(--env "CODEX_HOME=$home_dir")
-  if [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then
-    launch_env+=(--env "DASHSCOPE_API_KEY=$DASHSCOPE_API_KEY")
+  if is_primary_codex_home "$home_dir"; then
+    load_aliyun_coding_plan_key
+    if [[ -n "${AI_API_KEY:-}" ]]; then
+      launch_env+=(--env "AI_API_KEY=$AI_API_KEY")
+    fi
+    if [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then
+      launch_env+=(--env "DASHSCOPE_API_KEY=$DASHSCOPE_API_KEY")
+    fi
   fi
   if [[ "$CODEX_INJECT_PROXY_ENV" == "1" && -n "$CODEX_PROXY_URL" ]]; then
     launch_env+=(
@@ -3655,6 +4442,52 @@ def marker(row):
 def text(row, key):
     return str(row.get(key) or "").strip()
 
+def compact_text(value):
+    return " ".join(str(value or "").split())
+
+def first_nonempty_line(value):
+    for line in str(value or "").splitlines():
+        candidate = " ".join(line.split())
+        if candidate:
+            return candidate
+    return ""
+
+def looks_like_filesystem_path(value, row=None):
+    first_line = first_nonempty_line(value)
+    if not first_line:
+        return False
+    cwd = text(row, "cwd") if row is not None else ""
+    if cwd and (first_line == cwd or first_line.startswith(cwd + " ") or first_line.startswith(cwd + "\t")):
+        return True
+    return first_line.startswith(("/Users/", "/Volumes/", "/private/", "/tmp/", "/var/", "~/"))
+
+def title_text_score(value, row=None, field="title"):
+    raw = str(value or "")
+    first_line = first_nonempty_line(raw)
+    if not first_line or first_line == "Untitled":
+        return 0
+    if looks_like_filesystem_path(first_line, row):
+        return 1
+
+    same_as_preview = False
+    if field == "title" and row is not None:
+        preview = compact_text(row.get("preview"))
+        same_as_preview = bool(preview and compact_text(raw) == preview)
+
+    if "\n" in raw:
+        return 30 if same_as_preview else 40
+    if same_as_preview and len(first_line) > 48:
+        return 35
+    if row is None and len(first_line) > 48 and any(mark in first_line for mark in ("?", "？", "!", "！", "。", "，", ",")):
+        return 55
+    if len(first_line) > 120:
+        return 45
+    if len(first_line) > 80:
+        return 60
+    if same_as_preview:
+        return 75
+    return 100
+
 def rollout_exists(row):
     rollout_path = text(row, "rollout_path")
     if not rollout_path:
@@ -3670,6 +4503,27 @@ def is_live(row):
     except (TypeError, ValueError):
         archived = 1
     return archived == 0 and bool(text(row, "preview") or text(row, "title")) and rollout_exists(row)
+
+def best_text_row(rows, field):
+    best = None
+    best_score = -1
+    best_marker = -1
+    for row in rows:
+        score = title_text_score(text(row, field), row, field)
+        row_time = marker(row)
+        if score > best_score or (score == best_score and row_time > best_marker):
+            best = row
+            best_score = score
+            best_marker = row_time
+    return best
+
+def merged_live_row(rows):
+    base = dict(max(rows, key=marker))
+    for field in ("title", "preview"):
+        row = best_text_row(rows, field)
+        if row is not None:
+            base[field] = row.get(field)
+    return base
 
 def backup_file(path, relative_name):
     if not path.exists():
@@ -3750,7 +4604,7 @@ rollouts_to_move = []
 for thread_id, rows in rows_by_id.items():
     live = [row for row in rows if is_live(row)]
     if live:
-        live_rows[thread_id] = max(live, key=marker)
+        live_rows[thread_id] = merged_live_row(live)
         continue
     delete_ids.add(thread_id)
     for row in rows:
@@ -3815,14 +4669,26 @@ for db_path in state_paths:
             pass
 
 def thread_index_name(row):
+    best_name = None
+    best_score = -1
     for key in ("title", "preview"):
         value = text(row, key)
         if not value:
             continue
         for line in value.splitlines():
             name = " ".join(line.split())
-            if name:
-                return name[:77].rstrip() + "..." if len(name) > 80 else name
+            if not name:
+                continue
+            score = title_text_score(name, row, key)
+            if score > best_score:
+                best_name = name
+                best_score = score
+                if score >= 100:
+                    break
+        if best_score >= 100:
+            break
+    if best_name:
+        return best_name[:77].rstrip() + "..." if len(best_name) > 80 else best_name
     return "Untitled"
 
 def thread_updated_at_iso(row):
@@ -3946,6 +4812,258 @@ if changed:
     if moved_count:
         print(f"Moved {moved_count} stale rollout file(s).")
     print(f"Backup: {backup_dir}")
+else:
+    try:
+        backup_dir.rmdir()
+    except OSError:
+        pass
+PY
+}
+
+repair_compacted_image_payloads_for_home() {
+  local account_home="$1"
+
+  [[ "$CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH" == "1" ]] || return 0
+  [[ -d "$account_home" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  CODEX_REPAIR_ACCOUNT_HOME="$account_home" \
+  CODEX_REPAIR_MIN_BYTES="$CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES" \
+  CODEX_REPAIR_IMAGE_MIN_CHARS="$CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS" \
+  CODEX_REPAIR_STRING_MAX_CHARS="$CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS" \
+  python3 - <<'PY'
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+home = Path(os.environ["CODEX_REPAIR_ACCOUNT_HOME"]).expanduser()
+sessions_dir = home / "sessions"
+try:
+    min_bytes = int(os.environ.get("CODEX_REPAIR_MIN_BYTES", "67108864"))
+except ValueError:
+    min_bytes = 67108864
+try:
+    image_min_chars = int(os.environ.get("CODEX_REPAIR_IMAGE_MIN_CHARS", "65536"))
+except ValueError:
+    image_min_chars = 65536
+try:
+    string_max_chars = int(os.environ.get("CODEX_REPAIR_STRING_MAX_CHARS", "200000"))
+except ValueError:
+    string_max_chars = 200000
+
+if not sessions_dir.is_dir():
+    raise SystemExit(0)
+
+stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+backup_dir = home / "recovery-backups" / f"session-payload-repair-{stamp}"
+files_changed = 0
+images_omitted = 0
+image_chars_omitted = 0
+strings_omitted = 0
+string_chars_omitted = 0
+
+def is_open(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", "--", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except OSError:
+        return False
+
+def backup_file(path: Path) -> None:
+    try:
+        rel = path.relative_to(sessions_dir)
+    except ValueError:
+        rel = Path(path.name)
+    target = backup_dir / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["/bin/cp", "-c", "-p", str(path), str(target)],
+        ["/bin/cp", "-p", str(path), str(target)],
+    ):
+        try:
+            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    shutil.copy2(path, target)
+
+def digest_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:16]
+
+def omitted_image_text(stats, detail=None):
+    suffix = f"; detail={detail}" if detail else ""
+    return (
+        f"[screenshot omitted from local history #{stats['images']}; "
+        f"large inline image payload removed; original payload remains in the repair backup{suffix}]"
+    )
+
+def should_trim_string(key, value):
+    if not isinstance(value, str) or len(value) <= string_max_chars:
+        return False
+    if key in {"encrypted_content", "arguments"}:
+        return False
+    if key in {"output", "result"}:
+        return True
+    if "data:image/" in value:
+        return True
+    return len(value) > max(string_max_chars * 4, 1000000)
+
+def trim_large_string(value, stats):
+    stats["strings"] += 1
+    stats["string_chars"] += len(value)
+    prefix = value[:2000].rstrip()
+    marker = (
+        f"[large local history payload omitted; original_chars={len(value)}; "
+        f"sha256={digest_text(value)}; full payload is in the repair backup]"
+    )
+    if prefix:
+        return f"{prefix}\n\n{marker}"
+    return marker
+
+def trim_large_mcp_result(value, stats):
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return value
+    if len(serialized) <= string_max_chars:
+        return value
+    stats["strings"] += 1
+    stats["string_chars"] += len(serialized)
+    return {
+        "omitted": (
+            f"[large MCP tool result omitted; original_chars={len(serialized)}; "
+            f"sha256={digest_text(serialized)}; full payload is in the repair backup]"
+        )
+    }
+
+def scrub_session_payload(obj, stats, key=None):
+    if isinstance(obj, dict):
+        if obj.get("type") == "mcp_tool_call_end" and "result" in obj:
+            repaired = {child_key: scrub_session_payload(value, stats, child_key) for child_key, value in obj.items()}
+            repaired["result"] = trim_large_mcp_result(repaired.get("result"), stats)
+            return repaired
+        image_url = obj.get("image_url")
+        if (
+            obj.get("type") == "input_image"
+            and isinstance(image_url, str)
+            and image_url.startswith("data:image/")
+            and len(image_url) >= image_min_chars
+        ):
+            stats["images"] += 1
+            stats["chars"] += len(image_url)
+            detail = obj.get("detail")
+            return {
+                "type": "input_text",
+                "text": omitted_image_text(stats, detail),
+            }
+        return {child_key: scrub_session_payload(value, stats, child_key) for child_key, value in obj.items()}
+    if isinstance(obj, list):
+        return [scrub_session_payload(value, stats, key) for value in obj]
+    if should_trim_string(key, obj):
+        return trim_large_string(obj, stats)
+    return obj
+
+def repair_rollout(path: Path):
+    global files_changed, images_omitted, image_chars_omitted, strings_omitted, string_chars_omitted
+
+    try:
+        if path.stat().st_size < min_bytes:
+            return
+    except OSError:
+        return
+
+    if is_open(path):
+        print(f"session-payload-repair skip_open={path}", file=sys.stderr)
+        return
+
+    tmp = path.with_name(f".{path.name}.tmp-session-payload-repair-{os.getpid()}")
+    changed = False
+    file_images = 0
+    file_chars = 0
+    file_strings = 0
+    file_string_chars = 0
+
+    try:
+        with path.open("r", encoding="utf-8") as src, tmp.open("w", encoding="utf-8") as dst:
+            for line in src:
+                if "data:image/" not in line and len(line) <= string_max_chars:
+                    dst.write(line)
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    dst.write(line)
+                    continue
+                stats = {"images": 0, "chars": 0, "strings": 0, "string_chars": 0}
+                repaired = scrub_session_payload(record, stats)
+                if stats["images"] or stats["strings"]:
+                    changed = True
+                    file_images += stats["images"]
+                    file_chars += stats["chars"]
+                    file_strings += stats["strings"]
+                    file_string_chars += stats["string_chars"]
+                    dst.write(json.dumps(repaired, ensure_ascii=False, separators=(",", ":")))
+                    dst.write("\n")
+                else:
+                    dst.write(line)
+    except Exception as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        print(f"session-payload-repair failed={path}: {exc}", file=sys.stderr)
+        return
+
+    if not changed:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return
+
+    try:
+        backup_file(path)
+        os.replace(tmp, path)
+    except Exception as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        print(f"session-payload-repair replace_failed={path}: {exc}", file=sys.stderr)
+        return
+
+    files_changed += 1
+    images_omitted += file_images
+    image_chars_omitted += file_chars
+    strings_omitted += file_strings
+    string_chars_omitted += file_string_chars
+    print(
+        "session-payload-repair repaired="
+        f"{path} images={file_images} image_chars={file_chars} "
+        f"strings={file_strings} string_chars={file_string_chars}",
+        file=sys.stderr,
+    )
+
+for rollout_path in sessions_dir.rglob("rollout-*.jsonl"):
+    repair_rollout(rollout_path)
+
+if files_changed:
+    print(
+        "session-payload-repair summary "
+        f"files={files_changed} images={images_omitted} image_chars={image_chars_omitted} "
+        f"strings={strings_omitted} string_chars={string_chars_omitted} backup={backup_dir}",
+        file=sys.stderr,
+    )
 else:
     try:
         backup_dir.rmdir()
@@ -4266,6 +5384,83 @@ unlink_account2_history() {
   unlink_history_for "account2"
 }
 
+run_codex_share_helper() {
+  if [[ ! -f "$CODEX_SHARE_HELPER" ]]; then
+    echo "Codex share helper not found: $CODEX_SHARE_HELPER" >&2
+    exit 1
+  fi
+  python3 "$CODEX_SHARE_HELPER" "$@"
+}
+
+list_exportable_threads() {
+  local name="${1:-account1}" limit="${2:-30}" account_home
+  account_home="$(account_home_for "$name")"
+  run_codex_share_helper list \
+    --account-name "$name" \
+    --account-home "$account_home" \
+    --limit "$limit"
+}
+
+export_thread_package() {
+  local name="${1:-}" thread_id="${2:-}" output_path="${3:-}" account_home
+  shift $(( $# < 3 ? $# : 3 ))
+  if [[ -z "$name" || -z "$thread_id" || -z "$output_path" ]]; then
+    echo "export-thread-package requires: <account-name> <thread-id> <output.codexshare>" >&2
+    exit 2
+  fi
+  account_home="$(account_home_for "$name")"
+  run_codex_share_helper export \
+    --account-name "$name" \
+    --account-home "$account_home" \
+    --thread-id "$thread_id" \
+    --output "$output_path" \
+    "$@"
+}
+
+inspect_thread_package() {
+  local package_path="${1:-}"
+  if [[ -z "$package_path" ]]; then
+    echo "inspect-thread-package requires: <package.codexshare>" >&2
+    exit 2
+  fi
+  run_codex_share_helper inspect --package "$package_path"
+}
+
+import_thread_package() {
+  local package_path="${1:-}" target="${2:-all}" mark_latest_arg="${3:---mark-latest}"
+  local -a target_args
+  local raw_name raw_home name home
+  if [[ -z "$package_path" ]]; then
+    echo "import-thread-package requires: <package.codexshare> <account-name|all>" >&2
+    exit 2
+  fi
+
+  target_args=()
+  if [[ "$target" == "all" || "$target" == "--all" || "$target" == "all-profiles" ]]; then
+    while IFS='|' read -r raw_name raw_home _; do
+      name="$(printf '%s' "$raw_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      home="$(printf '%s' "$raw_home" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [[ -n "$name" && -n "$home" ]] || continue
+      target_args+=(--target "$name=$home")
+    done < <(list_accounts)
+  else
+    name="$(sanitize_account_name "$target")"
+    home="$(account_home_for "$name")"
+    target_args+=(--target "$name=$home")
+  fi
+
+  if (( ${#target_args[@]} == 0 )); then
+    echo "No Codex profiles found for import." >&2
+    exit 1
+  fi
+
+  if [[ "$mark_latest_arg" == "--no-mark-latest" ]]; then
+    run_codex_share_helper import --package "$package_path" "${target_args[@]}"
+  else
+    run_codex_share_helper import --package "$package_path" "${target_args[@]}" --mark-latest
+  fi
+}
+
 main() {
   local command="${1:-}"
   case "$command" in
@@ -4275,6 +5470,10 @@ main() {
     sync-history-once) sync_history_once ;;
     sync-account) sync_account "${2:-}" ;;
     sync-account-for-launch) sync_account_for_launch "${2:-}" ;;
+    repair-account1) repair_account1 ;;
+    ensure-aliyun-bridge) ensure_aliyun_coding_plan_bridge_running ;;
+    repair-compactions) repair_compactions_for_account "${2:-}" ;;
+    restore-thread-models-home) restore_default_thread_model_providers_for_home "${2:-}" "no-backup" ;;
     sync-loop) sync_loop ;;
     sync-history-loop) sync_history_loop ;;
     init-account) init_account "${2:-}" ;;
@@ -4292,6 +5491,10 @@ main() {
     separate-history) separate_history_for "${2:-}" ;;
     separate-all-history) separate_all_history ;;
     cleanup-empty-projects) cleanup_empty_projects ;;
+    list-exportable-threads) list_exportable_threads "${2:-account1}" "${3:-30}" ;;
+    export-thread-package) export_thread_package "${@:2}" ;;
+    inspect-thread-package) inspect_thread_package "${2:-}" ;;
+    import-thread-package) import_thread_package "${2:-}" "${3:-all}" "${4:---mark-latest}" ;;
     prune-global-state-home) prune_global_state_for_home "${2:-}" ;;
     prune-loop) prune_global_state_loop ;;
     link-all-history) link_all_history ;;

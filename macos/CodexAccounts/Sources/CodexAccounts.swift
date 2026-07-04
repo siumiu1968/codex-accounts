@@ -5,6 +5,7 @@ import Darwin
 import Foundation
 import IOKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .utility)
 private let profileRefreshPayloadSeparator = "\u{1E}"
@@ -59,6 +60,37 @@ struct CodexProfile: Identifiable {
     let lastRefresh: String
     let quota: String
     let reset: String
+    let resetCredits: String
+
+    init(
+        id: String,
+        displayName: String,
+        home: String,
+        authStatus: String,
+        authMode: String,
+        lastRefresh: String,
+        quota: String,
+        reset: String,
+        resetCredits: String = "unknown"
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.home = home
+        self.authStatus = authStatus
+        self.authMode = authMode
+        self.lastRefresh = lastRefresh
+        self.quota = quota
+        self.reset = reset
+        self.resetCredits = resetCredits
+    }
+}
+
+private struct ExportableThread: Identifiable {
+    let id: String
+    let title: String
+    let updatedAt: String
+    let cwd: String
+    let sizeBytes: Int64
 }
 
 private struct QuotaWindow: Identifiable {
@@ -69,10 +101,20 @@ private struct QuotaWindow: Identifiable {
     let reset: String?
 }
 
+private struct ResetCreditSummary {
+    let count: Int
+    let expiries: [String]
+}
+
 private struct QuotaPoolRouteDecision {
     let requested: CodexProfile
     let target: CodexProfile
     let didSwitch: Bool
+}
+
+private struct LocalExternalProviderDetails {
+    let model: String
+    let providerLabel: String
 }
 
 private struct AppThemeOption: Identifiable {
@@ -769,6 +811,39 @@ private func runCodexScript(
     return runDetachedProcess(executable: "/bin/zsh", arguments: processArguments, environment: environment)
 }
 
+private func parsedExportableThreads(_ output: String) -> [ExportableThread] {
+    output.split(separator: "\n").compactMap { line in
+        let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 5 else { return nil }
+        return ExportableThread(
+            id: parts[0],
+            title: parts[1].isEmpty ? "Untitled" : parts[1],
+            updatedAt: parts[2],
+            cwd: parts[3],
+            sizeBytes: Int64(parts[4]) ?? 0
+        )
+    }
+}
+
+private func safePackageFileName(title: String, threadID: String) -> String {
+    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._- "))
+    let cleaned = title.unicodeScalars.map { scalar -> Character in
+        allowed.contains(scalar) ? Character(scalar) : "-"
+    }
+    let compact = String(cleaned).split(separator: " ").joined(separator: " ")
+    let prefix = String(compact.prefix(60)).trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+    let base = prefix.isEmpty ? "codex-conversation" : prefix
+    return "\(base)-\(threadID.prefix(8)).codexshare"
+}
+
+private func humanFileSize(_ bytes: Int64) -> String {
+    guard bytes > 0 else { return "0 KB" }
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    formatter.includesActualByteCount = false
+    return formatter.string(fromByteCount: bytes)
+}
+
 private func parsedCodexProfiles(
     accountsOutput: String,
     statusOutput: String,
@@ -795,7 +870,7 @@ private func parsedCodexProfiles(
             let fallbackDisplay = name == "account1" ? "Account 1" : (name == "account2" ? "Account 2" : name)
             let display = displayNames[name] ?? fallbackDisplay
             let status = statusByName[name] ?? []
-            return CodexProfile(
+            let profile = CodexProfile(
                 id: name,
                 displayName: display,
                 home: parts[1],
@@ -803,12 +878,19 @@ private func parsedCodexProfiles(
                 authMode: status.count > 2 ? status[2] : "unknown",
                 lastRefresh: status.count > 3 ? status[3] : "unknown",
                 quota: status.count > 4 ? status[4] : "unknown",
-                reset: status.count > 5 ? status[5] : "unknown"
+                reset: status.count > 5 ? status[5] : "unknown",
+                resetCredits: status.count > 6 ? status[6] : "unknown"
             )
+            return profileWithLocalExternalProviderFallback(profile)
         }
 }
 
 private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTokens knownHasLocalTokens: Bool? = nil) -> CodexProfile {
+    let externalProfile = profileWithLocalExternalProviderFallback(profile)
+    guard externalProfile.authMode != "external" else {
+        return externalProfile
+    }
+
     let quota = profile.quota.trimmingCharacters(in: .whitespacesAndNewlines)
     guard profile.authStatus != "auth_invalid" else {
         return profile
@@ -817,9 +899,14 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTok
     guard profile.authStatus != "login_needed" || hasLocalTokens else {
         return profile
     }
-    guard quota.isEmpty || quota == "unknown",
-          let cachedUsage = cachedUsage(for: profile.id)
-    else {
+    guard let cachedUsage = cachedUsage(for: profile.id) else {
+        return profile
+    }
+
+    let reset = profile.reset.trimmingCharacters(in: .whitespacesAndNewlines)
+    let shouldUseCachedUsage = usageFieldIsMissing(quota)
+    let resolvedResetCredits = bestResetCredits(primary: profile.resetCredits, fallback: cachedUsage.resetCredits)
+    guard shouldUseCachedUsage || resolvedResetCredits != profile.resetCredits else {
         return profile
     }
 
@@ -830,14 +917,15 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTok
         authStatus: hasLocalTokens ? "signed_in_local" : profile.authStatus,
         authMode: hasLocalTokens && profile.authMode == "unknown" ? "checking" : profile.authMode,
         lastRefresh: profile.lastRefresh,
-        quota: cachedUsage.quota,
-        reset: cachedUsage.reset
+        quota: shouldUseCachedUsage ? cachedUsage.quota : profile.quota,
+        reset: shouldUseCachedUsage || usageFieldIsMissing(reset) ? cachedUsage.reset : profile.reset,
+        resetCredits: resolvedResetCredits
     )
 }
 
-private func cachedUsage(for profileID: String) -> (quota: String, reset: String)? {
+private func cachedUsage(for profileID: String) -> (quota: String, reset: String, resetCredits: String)? {
     let cacheURL = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/Codex Accounts/.usage-cache-v5")
+        .appendingPathComponent("Library/Application Support/Codex Accounts/.usage-cache-v8")
         .appendingPathComponent("\(profileID).status")
 
     guard let text = try? String(contentsOf: cacheURL, encoding: .utf8)
@@ -853,7 +941,69 @@ private func cachedUsage(for profileID: String) -> (quota: String, reset: String
         return nil
     }
 
-    return (parts[0], parts[1].isEmpty ? "unknown" : parts[1])
+    return (
+        parts[0],
+        parts[1].isEmpty ? "unknown" : parts[1],
+        parts.count > 2 && !parts[2].isEmpty ? parts[2] : "unknown"
+    )
+}
+
+private func usageFieldIsMissing(_ raw: String) -> Bool {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty || trimmed == "unknown" || trimmed == "none" || trimmed == "--"
+}
+
+private func resetCreditAvailableCount(_ raw: String) -> Int? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !usageFieldIsMissing(trimmed) else { return nil }
+    let pieces = trimmed.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+    let rawCount = pieces.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let digits = rawCount.prefix { $0.isNumber }
+    return Int(String(digits))
+}
+
+private func resetCreditHasExpiryList(_ raw: String) -> Bool {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let count = resetCreditAvailableCount(trimmed), count > 0 else { return false }
+    let pieces = trimmed.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+    guard pieces.count > 1 else { return false }
+    return pieces[1]
+        .split(separator: ",", omittingEmptySubsequences: true)
+        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .contains { !$0.isEmpty && $0 != "unknown" && $0 != "null" }
+}
+
+private func resetCreditCountNeedsExpiryBackfill(_ raw: String) -> Bool {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let count = resetCreditAvailableCount(trimmed), count > 0 else { return false }
+    return !resetCreditHasExpiryList(trimmed)
+}
+
+private func bestResetCredits(primary: String, fallback: String) -> String {
+    let primaryTrimmed = primary.trimmingCharacters(in: .whitespacesAndNewlines)
+    let fallbackTrimmed = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if resetCreditHasExpiryList(primaryTrimmed) {
+        return primary
+    }
+
+    if resetCreditHasExpiryList(fallbackTrimmed) {
+        let primaryCount = resetCreditAvailableCount(primaryTrimmed)
+        let fallbackCount = resetCreditAvailableCount(fallbackTrimmed)
+        if usageFieldIsMissing(primaryTrimmed)
+            || primaryCount == nil
+            || fallbackCount == nil
+            || primaryCount == fallbackCount
+            || resetCreditCountNeedsExpiryBackfill(primaryTrimmed) {
+            return fallback
+        }
+    }
+
+    if usageFieldIsMissing(primaryTrimmed), !usageFieldIsMissing(fallbackTrimmed) {
+        return fallback
+    }
+
+    return primary
 }
 
 private func localAuthTokensExist(in home: String) -> Bool {
@@ -868,6 +1018,89 @@ private func localAuthTokensExist(in home: String) -> Bool {
     }
 
     return !accessToken.isEmpty && !refreshToken.isEmpty
+}
+
+private func profileWithLocalExternalProviderFallback(_ profile: CodexProfile) -> CodexProfile {
+    guard let details = localExternalProviderDetails(in: profile.home) else {
+        return profile
+    }
+
+    return CodexProfile(
+        id: profile.id,
+        displayName: profile.displayName,
+        home: profile.home,
+        authStatus: "signed_in_local",
+        authMode: "external",
+        lastRefresh: profile.lastRefresh == "unknown" || profile.lastRefresh == "never" ? "api-key" : profile.lastRefresh,
+        quota: "external",
+        reset: "\(details.providerLabel):\(details.model)",
+        resetCredits: "none"
+    )
+}
+
+private func localExternalProviderDetails(in home: String) -> LocalExternalProviderDetails? {
+    guard isPrimaryCodexHome(home) else { return nil }
+
+    let configURL = URL(fileURLWithPath: home).appendingPathComponent("config.toml")
+    guard let config = try? String(contentsOf: configURL, encoding: .utf8) else {
+        return nil
+    }
+
+    let topLevel = topLevelTomlText(config)
+    guard tomlStringValue("model_provider", in: topLevel) == "ai_proxy" else {
+        return nil
+    }
+
+    let model = tomlStringValue("model", in: topLevel) ?? "qwen3.7-plus"
+    let label = config.localizedCaseInsensitiveContains("dashscope.aliyuncs.com") ? "aliyun" : "external"
+    return LocalExternalProviderDetails(model: model, providerLabel: label)
+}
+
+private func isPrimaryCodexHome(_ home: String) -> Bool {
+    let primary = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent(".codex")
+        .standardizedFileURL
+        .path
+    return URL(fileURLWithPath: home).standardizedFileURL.path == primary
+}
+
+private func topLevelTomlText(_ text: String) -> String {
+    var lines: [String] = []
+    for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("[") {
+            break
+        }
+        lines.append(String(line))
+    }
+    return lines.joined(separator: "\n")
+}
+
+private func tomlStringValue(_ key: String, in text: String) -> String? {
+    for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.hasPrefix("#"),
+              let equals = trimmed.firstIndex(of: "=")
+        else {
+            continue
+        }
+
+        let candidateKey = trimmed[..<equals].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard candidateKey == key else { continue }
+
+        var value = trimmed[trimmed.index(after: equals)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        if let comment = value.firstIndex(of: "#") {
+            value = value[..<comment].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if value.hasPrefix("\""), let closing = value.dropFirst().firstIndex(of: "\"") {
+            return String(value[value.index(after: value.startIndex)..<closing])
+        }
+        return value.split(separator: " ").first.map(String.init)
+    }
+
+    return nil
 }
 
 private func collectLocalAuthTokenProfileIDs(in profiles: [CodexProfile]) -> Set<String> {
@@ -886,7 +1119,8 @@ private func profilePayloadText(from profiles: [CodexProfile]) -> String {
             profile.authMode,
             profile.lastRefresh,
             profile.quota,
-            profile.reset
+            profile.reset,
+            profile.resetCredits
         ].joined(separator: "\t")
     }.joined(separator: "\n")
 }
@@ -910,47 +1144,6 @@ private func promptForAccountName(title: String, message: String, defaultName: S
     guard alert.runModal() == .alertFirstButtonReturn else { return nil }
     let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     return name.isEmpty ? defaultName : name
-}
-
-private func promptForRemoteUserCredentials() -> (username: String, password: String)? {
-    let language = UserDefaults.standard.string(forKey: "language")
-    NSApp.activate(ignoringOtherApps: true)
-
-    let alert = NSAlert()
-    alert.messageText = localizedText("新增手機登入帳號", "New Mobile Login", language: language)
-    alert.informativeText = localizedText(
-        "喺呢部 Mac 建立一個 username/password。手機要用同一組資料登入先可以控制 Codex。",
-        "Create a username/password on this Mac. The Android app must sign in with the same credentials before it can control Codex.",
-        language: language
-    )
-    alert.addButton(withTitle: localizedText("建立", "Create", language: language))
-    alert.addButton(withTitle: localizedText("取消", "Cancel", language: language))
-
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.spacing = 8
-    stack.frame = NSRect(x: 0, y: 0, width: 300, height: 62)
-
-    let usernameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
-    usernameField.placeholderString = "username"
-    let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
-    passwordField.placeholderString = localizedText("密碼，至少 10 個字元", "Password, at least 10 characters", language: language)
-
-    stack.addArrangedSubview(usernameField)
-    stack.addArrangedSubview(passwordField)
-    alert.accessoryView = stack
-
-    guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-    let username = usernameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    let password = passwordField.stringValue
-    guard !username.isEmpty, password.count >= 10 else {
-        alertMessage(
-            localizedText("帳號資料不完整", "Invalid Login", language: language),
-            localizedText("Username 唔可以留空，密碼至少要 10 個字元。", "Username cannot be empty and password must be at least 10 characters.", language: language)
-        )
-        return nil
-    }
-    return (username, password)
 }
 
 private func alertMessage(_ title: String, _ message: String) {
@@ -1695,12 +1888,14 @@ struct AccountsRootView: View {
     @State private var isRefreshing = false
     @State private var isSyncing = false
     @State private var isCleaningSidebarState = false
+    @State private var isRepairingHistoryPayloads = false
     @State private var hasEntered = true
     @State private var showKeepAwakeHelp = false
     @State private var showKeyboardCleanHelp = false
     @State private var showSyncHelp = false
     @State private var busyProfiles: Set<String> = []
     @State private var expandedResetKeys: Set<String> = []
+    @State private var expandedResetCreditProfileIDs: Set<String> = []
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     @AppStorage("hasSeenIntro") private var hasSeenIntro = false
     @State private var showIntro = false
@@ -1713,19 +1908,10 @@ struct AccountsRootView: View {
     @State private var resetScrambleRunID = 0
     @State private var codexUsageSessionStart: Date?
     @State private var usageTicker = Date()
-    @State private var remoteBridgeProcess: Process?
-    @State private var remoteBridgeRunning = false
-    @State private var remoteBridgeRefreshInFlight = false
-    @State private var lastRemoteBridgeRefreshAt = Date.distantPast
-    @State private var localIPAddressRefreshInFlight = false
-    @State private var lastLocalIPAddressRefreshAt = Date.distantPast
-    @State private var cachedLocalIPAddress = "127.0.0.1"
-    @State private var remoteBridgeUsersCount = 0
-    @State private var remoteBridgeStatus = ""
-    @State private var remoteBridgeLastOutput = ""
     @State private var activeQuotaPoolProfileID: String?
     @State private var quotaPoolFailoverInProgress = false
     @State private var lastAutoQuotaRefreshAt = Date.distantPast
+    @State private var lastResetCreditBackfillAt = Date.distantPast
     @State private var showLanguageMenu = false
     @State private var languageTransitionActive = false
     @State private var languagePulse = false
@@ -1733,7 +1919,6 @@ struct AccountsRootView: View {
     @State private var localAuthTokenProfileIDs: Set<String> = []
     @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
-    @AppStorage("sidebarRemoteExpanded") private var sidebarRemoteExpanded = false
     @AppStorage("sidebarAppearanceExpanded") private var sidebarAppearanceExpanded = false
     @AppStorage("sidebarUpdatesExpanded") private var sidebarUpdatesExpanded = false
     @AppStorage("codexUsageDayKey") private var codexUsageDayKey = ""
@@ -1743,6 +1928,7 @@ struct AccountsRootView: View {
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
     private let autoQuotaLiveRefreshInterval: TimeInterval = 900
+    private let resetCreditLiveBackfillInterval: TimeInterval = 90
     private let autoSyncStartupDelay: TimeInterval = 90
     private let autoSyncInterval: TimeInterval = 600
     private let sidebarCleanupStartupDelay: TimeInterval = 15
@@ -1810,16 +1996,12 @@ struct AccountsRootView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 refreshProfiles(showLoading: false)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                refreshLocalIPAddress(force: true)
-            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 lastSidebarCleanupAt = Date()
                 cleanupSidebarProjectsSilently()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
                 keepAwake.refreshState(force: true)
-                refreshRemoteBridgeState(force: true)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                 updater.checkForUpdates(presentNoUpdate: false, notifyIfAvailable: false)
@@ -1846,7 +2028,6 @@ struct AccountsRootView: View {
         .onReceive(timer) { _ in
             runPeriodicMaintenance()
             keepAwake.refreshState()
-            refreshRemoteBridgeState()
             usageTicker = Date()
             normalizeUsageDay()
         }
@@ -1943,12 +2124,7 @@ struct AccountsRootView: View {
     }
 
     private var themeTitle: String {
-        switch appTheme {
-        case "aurora": return tr("極光", "Aurora")
-        case "amber": return tr("琥珀", "Amber")
-        case "violet": return tr("紫晶", "Violet")
-        default: return tr("石墨", "Graphite")
-        }
+        selectedThemeOption.zhTitle
     }
 
     private var themeOptions: [AppThemeOption] {
@@ -1980,35 +2156,80 @@ struct AccountsRootView: View {
                 primary: Color(red: 0.62, green: 0.42, blue: 1.00),
                 secondary: Color(red: 0.30, green: 0.84, blue: 1.00),
                 warm: Color(red: 0.94, green: 0.30, blue: 0.64)
+            ),
+            AppThemeOption(
+                id: "ocean",
+                zhTitle: tr("深海", "Ocean"),
+                primary: Color(red: 0.05, green: 0.70, blue: 1.00),
+                secondary: Color(red: 0.00, green: 0.84, blue: 0.70),
+                warm: Color(red: 1.00, green: 0.45, blue: 0.28)
+            ),
+            AppThemeOption(
+                id: "sage",
+                zhTitle: tr("苔原", "Sage"),
+                primary: Color(red: 0.44, green: 0.82, blue: 0.52),
+                secondary: Color(red: 0.86, green: 0.76, blue: 0.36),
+                warm: Color(red: 0.95, green: 0.44, blue: 0.22)
+            ),
+            AppThemeOption(
+                id: "rose",
+                zhTitle: tr("玫瑰", "Rose"),
+                primary: Color(red: 1.00, green: 0.42, blue: 0.62),
+                secondary: Color(red: 0.56, green: 0.64, blue: 1.00),
+                warm: Color(red: 1.00, green: 0.64, blue: 0.42)
+            ),
+            AppThemeOption(
+                id: "indigo",
+                zhTitle: tr("靛藍", "Indigo"),
+                primary: Color(red: 0.35, green: 0.50, blue: 1.00),
+                secondary: Color(red: 0.00, green: 0.82, blue: 0.95),
+                warm: Color(red: 0.96, green: 0.42, blue: 0.88)
+            ),
+            AppThemeOption(
+                id: "slate",
+                zhTitle: tr("鋼灰", "Slate"),
+                primary: Color(red: 0.55, green: 0.72, blue: 0.82),
+                secondary: Color(red: 0.34, green: 0.92, blue: 0.82),
+                warm: Color(red: 0.94, green: 0.68, blue: 0.36)
+            ),
+            AppThemeOption(
+                id: "copper",
+                zhTitle: tr("銅綠", "Copper"),
+                primary: Color(red: 0.96, green: 0.46, blue: 0.22),
+                secondary: Color(red: 0.16, green: 0.76, blue: 0.64),
+                warm: Color(red: 0.98, green: 0.72, blue: 0.34)
+            ),
+            AppThemeOption(
+                id: "glacier",
+                zhTitle: tr("冰川", "Glacier"),
+                primary: Color(red: 0.52, green: 0.82, blue: 1.00),
+                secondary: Color(red: 0.56, green: 0.96, blue: 0.82),
+                warm: Color(red: 0.74, green: 0.58, blue: 1.00)
+            ),
+            AppThemeOption(
+                id: "ember",
+                zhTitle: tr("星火", "Ember"),
+                primary: Color(red: 1.00, green: 0.32, blue: 0.22),
+                secondary: Color(red: 0.92, green: 0.64, blue: 0.18),
+                warm: Color(red: 0.50, green: 0.66, blue: 1.00)
             )
         ]
     }
 
+    private var selectedThemeOption: AppThemeOption {
+        themeOptions.first(where: { $0.id == appTheme }) ?? themeOptions[0]
+    }
+
     private var themePrimary: Color {
-        switch appTheme {
-        case "aurora": return Color(red: 0.02, green: 0.78, blue: 0.72)
-        case "amber": return Color(red: 1.00, green: 0.58, blue: 0.16)
-        case "violet": return Color(red: 0.62, green: 0.42, blue: 1.00)
-        default: return Color(red: 0.22, green: 0.74, blue: 1.00)
-        }
+        selectedThemeOption.primary
     }
 
     private var themeSecondary: Color {
-        switch appTheme {
-        case "aurora": return Color(red: 0.22, green: 0.95, blue: 0.48)
-        case "amber": return Color(red: 1.00, green: 0.76, blue: 0.20)
-        case "violet": return Color(red: 0.30, green: 0.84, blue: 1.00)
-        default: return Color(red: 0.00, green: 0.92, blue: 0.78)
-        }
+        selectedThemeOption.secondary
     }
 
     private var themeWarm: Color {
-        switch appTheme {
-        case "aurora": return Color(red: 0.18, green: 0.50, blue: 1.00)
-        case "amber": return Color(red: 0.88, green: 0.22, blue: 0.10)
-        case "violet": return Color(red: 0.94, green: 0.30, blue: 0.64)
-        default: return Color(red: 0.82, green: 0.20, blue: 0.12)
-        }
+        selectedThemeOption.warm
     }
 
     private var themeBackgroundColors: [Color] {
@@ -2031,6 +2252,54 @@ struct AccountsRootView: View {
                 Color(red: 0.26, green: 0.12, blue: 0.42).opacity(0.54),
                 Color(red: 0.05, green: 0.10, blue: 0.24).opacity(0.58)
             ]
+        case "ocean":
+            return [
+                Color(red: 0.02, green: 0.08, blue: 0.16).opacity(0.72),
+                Color(red: 0.00, green: 0.20, blue: 0.28).opacity(0.56),
+                Color(red: 0.06, green: 0.10, blue: 0.18).opacity(0.62)
+            ]
+        case "sage":
+            return [
+                Color(red: 0.03, green: 0.15, blue: 0.10).opacity(0.72),
+                Color(red: 0.14, green: 0.25, blue: 0.12).opacity(0.54),
+                Color(red: 0.07, green: 0.09, blue: 0.07).opacity(0.64)
+            ]
+        case "rose":
+            return [
+                Color(red: 0.24, green: 0.05, blue: 0.13).opacity(0.72),
+                Color(red: 0.36, green: 0.12, blue: 0.28).opacity(0.52),
+                Color(red: 0.05, green: 0.08, blue: 0.20).opacity(0.58)
+            ]
+        case "indigo":
+            return [
+                Color(red: 0.04, green: 0.05, blue: 0.23).opacity(0.74),
+                Color(red: 0.10, green: 0.14, blue: 0.38).opacity(0.56),
+                Color(red: 0.02, green: 0.12, blue: 0.20).opacity(0.60)
+            ]
+        case "slate":
+            return [
+                Color(red: 0.06, green: 0.09, blue: 0.12).opacity(0.74),
+                Color(red: 0.12, green: 0.18, blue: 0.22).opacity(0.54),
+                Color(red: 0.05, green: 0.06, blue: 0.08).opacity(0.62)
+            ]
+        case "copper":
+            return [
+                Color(red: 0.20, green: 0.09, blue: 0.05).opacity(0.72),
+                Color(red: 0.08, green: 0.22, blue: 0.18).opacity(0.52),
+                Color(red: 0.22, green: 0.15, blue: 0.06).opacity(0.58)
+            ]
+        case "glacier":
+            return [
+                Color(red: 0.03, green: 0.12, blue: 0.18).opacity(0.70),
+                Color(red: 0.08, green: 0.24, blue: 0.30).opacity(0.50),
+                Color(red: 0.13, green: 0.10, blue: 0.24).opacity(0.54)
+            ]
+        case "ember":
+            return [
+                Color(red: 0.18, green: 0.05, blue: 0.04).opacity(0.74),
+                Color(red: 0.30, green: 0.14, blue: 0.06).opacity(0.54),
+                Color(red: 0.06, green: 0.07, blue: 0.15).opacity(0.62)
+            ]
         default:
             return [
                 Color(red: 0.03, green: 0.06, blue: 0.09).opacity(0.70),
@@ -2045,6 +2314,14 @@ struct AccountsRootView: View {
         case "aurora": return Color(red: 0.00, green: 0.45, blue: 0.38)
         case "amber": return Color(red: 0.58, green: 0.26, blue: 0.08)
         case "violet": return Color(red: 0.38, green: 0.18, blue: 0.58)
+        case "ocean": return Color(red: 0.00, green: 0.28, blue: 0.38)
+        case "sage": return Color(red: 0.16, green: 0.34, blue: 0.18)
+        case "rose": return Color(red: 0.44, green: 0.14, blue: 0.28)
+        case "indigo": return Color(red: 0.18, green: 0.22, blue: 0.56)
+        case "slate": return Color(red: 0.18, green: 0.26, blue: 0.32)
+        case "copper": return Color(red: 0.42, green: 0.22, blue: 0.12)
+        case "glacier": return Color(red: 0.14, green: 0.34, blue: 0.42)
+        case "ember": return Color(red: 0.48, green: 0.16, blue: 0.12)
         default: return Color(red: 0.06, green: 0.18, blue: 0.24)
         }
     }
@@ -2054,6 +2331,14 @@ struct AccountsRootView: View {
         case "aurora": return Color(red: 0.00, green: 0.34, blue: 0.29)
         case "amber": return Color(red: 0.38, green: 0.15, blue: 0.05)
         case "violet": return Color(red: 0.24, green: 0.10, blue: 0.38)
+        case "ocean": return Color(red: 0.02, green: 0.14, blue: 0.24)
+        case "sage": return Color(red: 0.10, green: 0.24, blue: 0.13)
+        case "rose": return Color(red: 0.28, green: 0.08, blue: 0.18)
+        case "indigo": return Color(red: 0.10, green: 0.12, blue: 0.36)
+        case "slate": return Color(red: 0.12, green: 0.18, blue: 0.23)
+        case "copper": return Color(red: 0.26, green: 0.12, blue: 0.07)
+        case "glacier": return Color(red: 0.08, green: 0.22, blue: 0.28)
+        case "ember": return Color(red: 0.30, green: 0.08, blue: 0.07)
         default: return Color(red: 0.04, green: 0.11, blue: 0.16)
         }
     }
@@ -2063,20 +2348,32 @@ struct AccountsRootView: View {
         case "aurora": return Color(red: 0.00, green: 0.62, blue: 0.48)
         case "amber": return Color(red: 0.92, green: 0.40, blue: 0.10)
         case "violet": return Color(red: 0.56, green: 0.25, blue: 0.88)
+        case "ocean": return Color(red: 0.00, green: 0.52, blue: 0.72)
+        case "sage": return Color(red: 0.34, green: 0.62, blue: 0.34)
+        case "rose": return Color(red: 0.80, green: 0.24, blue: 0.46)
+        case "indigo": return Color(red: 0.30, green: 0.40, blue: 0.86)
+        case "slate": return Color(red: 0.34, green: 0.48, blue: 0.56)
+        case "copper": return Color(red: 0.72, green: 0.34, blue: 0.18)
+        case "glacier": return Color(red: 0.32, green: 0.66, blue: 0.82)
+        case "ember": return Color(red: 0.78, green: 0.24, blue: 0.16)
         default: return Color(red: 0.08, green: 0.34, blue: 0.46)
         }
     }
 
     private var activeProfiles: [CodexProfile] {
-        sortedProfileList(profiles.filter { !isLoginNeeded($0) && !isWaitingForRecovery($0) })
+        sortedProfileList(profiles.filter { !isExternalProvider($0) && !isLoginNeeded($0) && !isWaitingForRecovery($0) })
+    }
+
+    private var apiProfiles: [CodexProfile] {
+        sortedProfileList(profiles.filter { isExternalProvider($0) })
     }
 
     private var loginProfiles: [CodexProfile] {
-        sortedProfileList(profiles.filter { isLoginNeeded($0) })
+        sortedProfileList(profiles.filter { !isExternalProvider($0) && isLoginNeeded($0) })
     }
 
     private var waitingProfiles: [CodexProfile] {
-        sortedProfileList(profiles.filter { !isLoginNeeded($0) && isWaitingForRecovery($0) })
+        sortedProfileList(profiles.filter { !isExternalProvider($0) && !isLoginNeeded($0) && isWaitingForRecovery($0) })
     }
 
     private func sortedProfileList(_ input: [CodexProfile]) -> [CodexProfile] {
@@ -2149,14 +2446,27 @@ struct AccountsRootView: View {
     }
 
     private func isWaitingForRecovery(_ profile: CodexProfile) -> Bool {
-        quotaWindows(for: profile).contains { $0.percent == 0 }
+        if isExternalProvider(profile) {
+            return false
+        }
+        return quotaWindows(for: profile).contains { $0.percent == 0 }
+    }
+
+    private func isExternalProvider(_ profile: CodexProfile) -> Bool {
+        profile.authMode == "external" || profile.quota == "external" || profile.reset.hasPrefix("aliyun:")
     }
 
     private func isSignedIn(_ profile: CodexProfile) -> Bool {
-        profile.authStatus == "signed_in_local"
+        if isExternalProvider(profile) {
+            return true
+        }
+        return profile.authStatus == "signed_in_local"
     }
 
     private func isLoginNeeded(_ profile: CodexProfile) -> Bool {
+        if isExternalProvider(profile) {
+            return false
+        }
         if profile.authStatus == "auth_invalid" {
             return true
         }
@@ -2167,6 +2477,9 @@ struct AccountsRootView: View {
     }
 
     private func isVisiblySignedIn(_ profile: CodexProfile) -> Bool {
+        if isExternalProvider(profile) {
+            return true
+        }
         if profile.authStatus == "auth_invalid" {
             return false
         }
@@ -2270,6 +2583,65 @@ struct AccountsRootView: View {
             liveParallelism: shouldUseLiveQuota ? 1 : 2,
             statusTimeout: shouldUseLiveQuota ? 18 : 8
         )
+    }
+
+    private func scheduleLiveUsageBackfillIfNeeded(_ refreshedProfiles: [CodexProfile], triggeredByLiveUsage: Bool) {
+        guard !triggeredByLiveUsage else { return }
+        let now = Date()
+        let needsResetCreditBackfill = refreshedProfiles.contains(where: needsResetCreditExpiryBackfill)
+        guard refreshedProfiles.contains(where: needsLiveUsageBackfill) else { return }
+
+        if needsResetCreditBackfill {
+            guard now.timeIntervalSince(lastResetCreditBackfillAt) >= resetCreditLiveBackfillInterval else { return }
+            lastResetCreditBackfillAt = now
+        } else {
+            guard now.timeIntervalSince(lastAutoQuotaRefreshAt) >= autoQuotaLiveRefreshInterval else { return }
+            lastAutoQuotaRefreshAt = now
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard !isRefreshing else { return }
+            refreshProfiles(
+                showLoading: false,
+                replayQuota: false,
+                liveUsage: true,
+                liveParallelism: 1,
+                statusTimeout: 20
+            )
+        }
+    }
+
+    private func needsLiveUsageBackfill(_ profile: CodexProfile) -> Bool {
+        guard !isExternalProvider(profile),
+              profileHasLocalAuthTokens(profile),
+              profile.authStatus != "auth_invalid",
+              profile.authStatus != "auth_incomplete",
+              !isLoginNeeded(profile)
+        else {
+            return false
+        }
+
+        if profile.quota == "unknown" {
+            return true
+        }
+
+        return resetCreditCountLacksExpiries(profile.resetCredits)
+    }
+
+    private func needsResetCreditExpiryBackfill(_ profile: CodexProfile) -> Bool {
+        guard !isExternalProvider(profile),
+              profileHasLocalAuthTokens(profile),
+              profile.authStatus != "auth_invalid",
+              profile.authStatus != "auth_incomplete",
+              !isLoginNeeded(profile)
+        else {
+            return false
+        }
+
+        return resetCreditCountLacksExpiries(profile.resetCredits)
+    }
+
+    private func resetCreditCountLacksExpiries(_ raw: String) -> Bool {
+        resetCreditCountNeedsExpiryBackfill(raw)
     }
 
     private var loadingDisplayMessage: String {
@@ -2789,16 +3161,12 @@ struct AccountsRootView: View {
                 keepAwakePanel
                 Divider().background(Color.white.opacity(0.10))
                 keyboardCleanPanel
-            }
-
-            sidebarDisclosureSection(
-                title: tr("手機遠端", "Mobile Remote"),
-                systemName: "iphone.radiowaves.left.and.right",
-                subtitle: remoteBridgeRunning ? tr("已啟動", "Running") : tr("未啟動", "Stopped"),
-                accent: remoteBridgeRunning ? Color(red: 0.00, green: 0.92, blue: 0.70) : Color(red: 1.00, green: 0.58, blue: 0.16),
-                expanded: $sidebarRemoteExpanded
-            ) {
-                remoteBridgePanel
+                Divider().background(Color.white.opacity(0.10))
+                HStack(spacing: scaled(8)) {
+                    miniButton(isRepairingHistoryPayloads ? tr("清理中", "Cleaning") : tr("清理大對話", "Clean large chats")) {
+                        repairLargeHistoryPayloads()
+                    }
+                }
             }
 
             sidebarDisclosureSection(
@@ -2979,43 +3347,6 @@ struct AccountsRootView: View {
             "防止 Mac 自動睡眠。打開後合蓋會盡量保持任務運行，內置屏幕亮度會降到 0；開蓋或關閉功能會恢復亮度。",
             "Prevents Mac sleep. When enabled, closing the lid keeps tasks running where macOS allows it and dims the built-in display to 0; opening the lid or turning this off restores brightness."
         )
-    }
-
-    private var remoteBridgePanel: some View {
-        let running = remoteBridgeRunning
-        let userText = tr("\(remoteBridgeUsersCount) 個手機帳號", "\(remoteBridgeUsersCount) mobile users")
-
-        return VStack(alignment: .leading, spacing: scaled(8)) {
-            VStack(alignment: .leading, spacing: scaled(3)) {
-                Text(userText)
-                    .font(appFont(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
-                    .lineLimit(1)
-
-                Text(remoteBridgeURLLabel)
-                    .font(appFont(size: 10, weight: .medium, monospaced: true))
-                    .foregroundStyle(Color(red: 0.32, green: 0.86, blue: 1.00).opacity(0.86))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            HStack(spacing: scaled(8)) {
-                miniButton(running ? tr("停止 Bridge", "Stop Bridge") : tr("啟動 Bridge", "Start Bridge")) {
-                    running ? stopRemoteBridge() : startRemoteBridge()
-                }
-                miniButton(tr("新增登入", "Add Login")) {
-                    createRemoteBridgeUser()
-                }
-            }
-
-            if !remoteBridgeStatus.isEmpty {
-                Text(remoteBridgeStatus)
-                    .font(appFont(size: 10))
-                    .foregroundStyle(.white.opacity(0.42))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-        }
     }
 
     private var keepAwakePanel: some View {
@@ -3217,7 +3548,9 @@ struct AccountsRootView: View {
     }
 
     private var themeSelector: some View {
-        VStack(alignment: .leading, spacing: scaled(6)) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: scaled(6)), count: 4)
+
+        return VStack(alignment: .leading, spacing: scaled(6)) {
             HStack(spacing: scaled(6)) {
                 Image(systemName: "circle.hexagongrid.fill")
                     .font(.system(size: scaled(10), weight: .semibold))
@@ -3233,7 +3566,7 @@ struct AccountsRootView: View {
                     .minimumScaleFactor(0.78)
             }
 
-            HStack(spacing: scaled(6)) {
+            LazyVGrid(columns: columns, spacing: scaled(6)) {
                 ForEach(themeOptions) { option in
                     themeSwatchButton(option)
                 }
@@ -3283,7 +3616,7 @@ struct AccountsRootView: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(height: scaled(28))
+            .frame(height: scaled(26))
             .overlay(
                 RoundedRectangle(cornerRadius: scaled(9), style: .continuous)
                     .stroke(selected ? Color.white.opacity(0.74) : Color.white.opacity(0.14), lineWidth: selected ? 1.4 : 1)
@@ -3474,6 +3807,16 @@ struct AccountsRootView: View {
 
     private func sectionJumpControls(compact: Bool) -> some View {
         HStack(spacing: 0) {
+            if !apiProfiles.isEmpty {
+                sectionJumpButton(
+                    systemName: "terminal",
+                    label: tr("API 模型", "API models"),
+                    sectionID: "section-api",
+                    accent: Color(red: 0.10, green: 0.86, blue: 0.74),
+                    compact: compact
+                )
+                sectionJumpDivider
+            }
             sectionJumpButton(
                 systemName: "checkmark.circle.fill",
                 label: tr("已登入", "Signed in"),
@@ -3543,23 +3886,38 @@ struct AccountsRootView: View {
     }
 
     private var profilesList: some View {
+        let api = apiProfiles
         let active = activeProfiles
         let login = loginProfiles
         let waiting = waitingProfiles
-        let orderedProfileIDs = (active + login + waiting).map(\.id)
+        let orderedProfileIDs = (api + active + login + waiting).map(\.id)
         let hoveredIndex = hoveredProfileID.flatMap { orderedProfileIDs.firstIndex(of: $0) }
 
         return LazyVStack(spacing: 0) {
+            if !api.isEmpty {
+                sectionHeader(
+                    id: "section-api",
+                    systemName: "terminal",
+                    title: tr("API", "API"),
+                    accent: Color(red: 0.10, green: 0.86, blue: 0.74)
+                )
+                .padding(.top, scaled(2))
+
+                ForEach(Array(api.enumerated()), id: \.element.id) { index, profile in
+                    profileRow(profile, dockIndex: index, hoveredIndex: hoveredIndex)
+                }
+            }
+
             sectionHeader(
                 id: "section-active",
                 systemName: "checkmark.circle.fill",
                 title: tr("已登入", "Signed in"),
                 accent: Color(red: 0.16, green: 0.92, blue: 0.62)
             )
-            .padding(.top, scaled(2))
+            .padding(.top, scaled(api.isEmpty ? 2 : 9))
 
             ForEach(Array(active.enumerated()), id: \.element.id) { index, profile in
-                profileRow(profile, dockIndex: index, hoveredIndex: hoveredIndex)
+                profileRow(profile, dockIndex: api.count + index, hoveredIndex: hoveredIndex)
             }
 
             sectionHeader(
@@ -3571,7 +3929,7 @@ struct AccountsRootView: View {
             .padding(.top, scaled(active.isEmpty ? 3 : 9))
 
             ForEach(Array(login.enumerated()), id: \.element.id) { index, profile in
-                profileRow(profile, dockIndex: active.count + index, hoveredIndex: hoveredIndex)
+                profileRow(profile, dockIndex: api.count + active.count + index, hoveredIndex: hoveredIndex)
             }
 
             sectionHeader(
@@ -3583,7 +3941,7 @@ struct AccountsRootView: View {
             .padding(.top, scaled(login.isEmpty ? 3 : 9))
 
             ForEach(Array(waiting.enumerated()), id: \.element.id) { index, profile in
-                profileRow(profile, dockIndex: active.count + login.count + index, hoveredIndex: hoveredIndex)
+                profileRow(profile, dockIndex: api.count + active.count + login.count + index, hoveredIndex: hoveredIndex)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3644,11 +4002,11 @@ struct AccountsRootView: View {
 
         return ViewThatFits(in: .horizontal) {
             regularProfileRowContent(profile)
-                .frame(minWidth: scaled(620))
+                .frame(minWidth: scaled(780))
 
             compactProfileRowContent(profile)
         }
-        .frame(maxWidth: .infinity, minHeight: scaled(64), alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: scaled(profileRowMinimumHeight(for: profile)), alignment: .leading)
         .background(Color.white.opacity(0.040))
         .background(themeRowTint.opacity(profile.quota == "unknown" ? 0.030 : 0.085))
         .background(profileRowAccent(for: profile).opacity(profile.quota == "unknown" ? 0.020 : 0.074))
@@ -3698,9 +4056,15 @@ struct AccountsRootView: View {
 
             Spacer(minLength: scaled(4))
 
-            quotaMeter(profile, compact: false)
-                .frame(width: scaled(330), alignment: .trailing)
-                .layoutPriority(30)
+            if isExternalProvider(profile) {
+                externalProviderStatus(profile, compact: false)
+                    .frame(width: scaled(430), alignment: .trailing)
+                    .layoutPriority(30)
+            } else {
+                quotaMeter(profile, compact: false)
+                    .frame(width: scaled(430), alignment: .trailing)
+                    .layoutPriority(30)
+            }
 
             openButton(profile)
                 .frame(width: scaled(64))
@@ -3715,7 +4079,16 @@ struct AccountsRootView: View {
                 .layoutPriority(20)
         }
         .padding(.horizontal, scaled(14))
-        .frame(maxWidth: .infinity, minHeight: scaled(64), alignment: .center)
+        .padding(.vertical, scaled(isExternalProvider(profile) ? 0 : 6))
+        .frame(maxWidth: .infinity, minHeight: scaled(profileRowMinimumHeight(for: profile)), alignment: .center)
+    }
+
+    private func profileRowMinimumHeight(for profile: CodexProfile) -> CGFloat {
+        guard !isExternalProvider(profile) else { return 64 }
+        guard let resetCredits = resetCreditSummary(for: profile), resetCredits.count > 0 else {
+            return profile.quota == "unknown" ? 64 : 72
+        }
+        return expandedResetCreditProfileIDs.contains(profile.id) ? 148 : 88
     }
 
     private func compactProfileRowContent(_ profile: CodexProfile) -> some View {
@@ -3741,8 +4114,13 @@ struct AccountsRootView: View {
                     .layoutPriority(20)
             }
 
-            quotaMeter(profile, compact: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if isExternalProvider(profile) {
+                externalProviderStatus(profile, compact: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                quotaMeter(profile, compact: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(.horizontal, scaled(12))
         .padding(.vertical, scaled(10))
@@ -3837,12 +4215,17 @@ struct AccountsRootView: View {
     }
 
     private func authBadge(_ profile: CodexProfile, compact: Bool = false) -> some View {
+        let external = isExternalProvider(profile)
         let signedIn = isSignedIn(profile)
         let expired = profile.authStatus == "auth_invalid"
-        let title = signedIn
+        let title = external
+            ? (compact ? tr("外部", "External") : tr("阿里模型", "Aliyun"))
+            : (signedIn
             ? tr("已登入", "Signed in")
-            : (expired ? tr("登入過期", "Expired") : (compact ? tr("要登入", "Login") : tr("要登入", "Login needed")))
-        let color = signedIn ? Color(red: 0.32, green: 0.96, blue: 0.46) : (expired ? Color(red: 1.00, green: 0.22, blue: 0.20) : Color.orange)
+            : (expired ? tr("登入過期", "Expired") : (compact ? tr("要登入", "Login") : tr("要登入", "Login needed"))))
+        let color = external
+            ? Color(red: 0.10, green: 0.86, blue: 0.74)
+            : (signedIn ? Color(red: 0.32, green: 0.96, blue: 0.46) : (expired ? Color(red: 1.00, green: 0.22, blue: 0.20) : Color.orange))
 
         return Text(title)
             .font(appFont(size: 12, weight: .semibold))
@@ -3858,12 +4241,15 @@ struct AccountsRootView: View {
             .minimumScaleFactor(0.72)
     }
 
+    @ViewBuilder
     private func quotaMeter(_ profile: CodexProfile, compact: Bool) -> some View {
         let rows = quotaRows(for: quotaWindows(for: profile))
         let weeklyZero = rows.contains { $0.id == "7d" && $0.percent == 0 }
         let weeklyReset = rows.first { $0.id == "7d" }?.reset
+        let resetCredits = resetCreditSummary(for: profile)
+        let resetCreditsExpanded = expandedResetCreditProfileIDs.contains(profile.id)
 
-        return VStack(spacing: scaled(5)) {
+        VStack(spacing: scaled(compact ? 5 : 7)) {
             ForEach(rows) { window in
                 let blockedByWeekly = weeklyZero && window.id == "5h"
                 quotaMeterLine(
@@ -3875,8 +4261,57 @@ struct AccountsRootView: View {
                     forcedReset: blockedByWeekly ? weeklyReset : nil
                 )
             }
+            if let resetCredits, resetCredits.count > 0 {
+                resetCreditsLine(resetCredits, profileID: profile.id, compact: compact, expanded: resetCreditsExpanded)
+                if resetCreditsExpanded {
+                    resetCreditsDetailPanel(resetCredits, compact: compact)
+                        .transition(.opacity)
+                }
+            }
         }
-        .frame(maxWidth: .infinity, minHeight: scaled(44), alignment: .center)
+        .padding(.vertical, scaled(compact ? 1 : 5))
+        .frame(maxWidth: .infinity, minHeight: scaled(resetCredits == nil ? 44 : (resetCreditsExpanded ? 138 : 84)), alignment: .center)
+    }
+
+    private func externalProviderStatus(_ profile: CodexProfile, compact: Bool) -> some View {
+        let accent = Color(red: 0.10, green: 0.86, blue: 0.74)
+        let model = profile.reset.hasPrefix("aliyun:")
+            ? String(profile.reset.dropFirst("aliyun:".count))
+            : "qwen3.7-plus"
+
+        return HStack(alignment: .center, spacing: scaled(compact ? 8 : 10)) {
+            apiStatusPill(title: tr("外部 API", "External API"), accent: accent, compact: compact)
+            apiStatusPill(title: "Coding Plan", accent: accent.opacity(0.82), compact: compact)
+            Text(model)
+                .font(appFont(size: compact ? 12 : 13, weight: .semibold, monospaced: true))
+                .foregroundStyle(.white.opacity(0.72))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .minimumScaleFactor(0.78)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, scaled(compact ? 9 : 11))
+        .padding(.vertical, scaled(compact ? 7 : 8))
+        .frame(maxWidth: .infinity, minHeight: scaled(38), alignment: .leading)
+        .background(accent.opacity(0.085))
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(12), style: .continuous)
+                .stroke(accent.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(12), style: .continuous))
+        .help(tr("外部 API profile 不使用 OpenAI quota。", "External API profiles do not use OpenAI quota."))
+    }
+
+    private func apiStatusPill(title: String, accent: Color, compact: Bool) -> some View {
+        Text(title)
+            .font(appFont(size: compact ? 11 : 12, weight: .semibold))
+            .foregroundStyle(accent.opacity(0.96))
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+            .padding(.horizontal, scaled(compact ? 7 : 9))
+            .padding(.vertical, scaled(compact ? 4 : 5))
+            .background(accent.opacity(0.12))
+            .clipShape(Capsule())
     }
 
     private func quotaMeterLine(_ window: QuotaWindow, profile: CodexProfile, accent: Color, compact: Bool, blockedByWeeklyZero: Bool = false, forcedReset: String? = nil) -> some View {
@@ -3915,6 +4350,167 @@ struct AccountsRootView: View {
         }
         .frame(maxWidth: .infinity, minHeight: scaled(21), alignment: .center)
         .opacity(window.labelZH.isEmpty ? 0 : 1)
+    }
+
+    private func resetCreditsLine(_ summary: ResetCreditSummary, profileID: String, compact: Bool, expanded: Bool) -> some View {
+        let accent = Color(red: 0.36, green: 0.88, blue: 1.00)
+        let expiryText = resetCreditsExpirySummary(summary)
+
+        return HStack(spacing: scaled(compact ? 5 : 7)) {
+            Image(systemName: "arrow.counterclockwise.circle.fill")
+                .font(.system(size: scaled(compact ? 10 : 11), weight: .semibold))
+                .foregroundStyle(accent.opacity(0.90))
+                .frame(width: scaled(compact ? 16 : 18), alignment: .leading)
+
+            Text(tr("重設券", "Resets"))
+                .font(appFont(size: compact ? 11 : 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.58))
+                .lineLimit(1)
+
+            Text(tr("\(summary.count) 張可用", "\(summary.count) available"))
+                .font(appFont(size: compact ? 11 : 12, weight: .bold, monospaced: true))
+                .foregroundStyle(accent.opacity(0.98))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+
+            Spacer(minLength: scaled(4))
+
+            Text(expiryText)
+                .font(appFont(size: compact ? 10 : 11, weight: .semibold, monospaced: true))
+                .foregroundStyle(summary.expiries.isEmpty ? .white.opacity(0.34) : .white.opacity(0.66))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .minimumScaleFactor(0.72)
+
+            Image(systemName: "chevron.down")
+                .font(.system(size: scaled(compact ? 9 : 10), weight: .heavy))
+                .foregroundStyle(accent.opacity(0.62))
+                .rotationEffect(.degrees(expanded ? 180 : 0))
+                .animation(.easeOut(duration: 0.12), value: expanded)
+                .frame(width: scaled(compact ? 12 : 14), alignment: .trailing)
+        }
+        .padding(.horizontal, scaled(compact ? 7 : 8))
+        .padding(.vertical, scaled(compact ? 5 : 6))
+        .frame(maxWidth: .infinity, minHeight: scaled(compact ? 24 : 26), alignment: .center)
+        .background(accent.opacity(0.08))
+        .overlay(
+            Capsule()
+                .stroke(accent.opacity(0.16), lineWidth: 1)
+        )
+        .clipShape(Capsule())
+        .contentShape(Capsule())
+        .onTapGesture {
+            toggleResetCreditExpansion(profileID: profileID)
+        }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(tr("重設券詳情", "Reset credit details"))
+        .accessibilityHint(tr("展開或收起每張券嘅到期時間", "Expand or collapse per-credit expiry times"))
+        .help(resetCreditsHelp(summary))
+    }
+
+    private func resetCreditsDetailPanel(_ summary: ResetCreditSummary, compact: Bool) -> some View {
+        VStack(spacing: scaled(compact ? 4 : 5)) {
+            if summary.expiries.isEmpty {
+                HStack(spacing: scaled(6)) {
+                    Image(systemName: "clock.badge.questionmark")
+                        .font(.system(size: scaled(10), weight: .semibold))
+                    Text(tr("未能取得每張券嘅到期時間", "Per-credit expiry times unavailable"))
+                        .font(appFont(size: compact ? 10 : 11, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.white.opacity(0.48))
+            } else {
+                resetCreditDetailHeader(compact: compact)
+
+                ForEach(Array(summary.expiries.enumerated()), id: \.offset) { item in
+                    resetCreditDetailRow(index: item.offset, expiry: item.element, compact: compact)
+                }
+            }
+        }
+        .padding(.horizontal, scaled(compact ? 8 : 10))
+        .padding(.vertical, scaled(compact ? 6 : 7))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.050))
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(10), style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(10), style: .continuous))
+    }
+
+    private func resetCreditDetailHeader(compact: Bool) -> some View {
+        let columns = resetCreditDetailColumnWidths(compact: compact)
+
+        return HStack(spacing: scaled(compact ? 6 : 8)) {
+            Text("")
+                .frame(width: columns.label, alignment: .leading)
+
+            Text(tr("到期日期", "Expiry date"))
+                .font(appFont(size: compact ? 9 : 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
+                .frame(width: columns.date, alignment: .leading)
+
+            Text(tr("時間", "Time"))
+                .font(appFont(size: compact ? 9 : 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
+                .frame(width: columns.time, alignment: .leading)
+
+            Spacer(minLength: scaled(4))
+
+            Text(tr("剩餘日數", "Time left"))
+                .font(appFont(size: compact ? 9 : 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
+                .frame(width: columns.remaining, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, minHeight: scaled(compact ? 14 : 16), alignment: .center)
+    }
+
+    private func resetCreditDetailRow(index: Int, expiry: String, compact: Bool) -> some View {
+        let columns = resetCreditDetailColumnWidths(compact: compact)
+
+        return HStack(spacing: scaled(compact ? 6 : 8)) {
+            Text(tr("第 \(index + 1) 張", "#\(index + 1)"))
+                .font(appFont(size: compact ? 10 : 11, weight: .bold))
+                .foregroundStyle(Color(red: 0.36, green: 0.88, blue: 1.00).opacity(0.86))
+                .frame(width: columns.label, alignment: .leading)
+
+            Text(resetCreditDetailDatePartText(expiry))
+                .font(appFont(size: compact ? 10 : 11, weight: .semibold, monospaced: true))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .frame(width: columns.date, alignment: .leading)
+
+            Text(resetCreditDetailTimePartText(expiry))
+                .font(appFont(size: compact ? 10 : 11, weight: .semibold, monospaced: true))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(1)
+                .minimumScaleFactor(0.86)
+                .frame(width: columns.time, alignment: .leading)
+
+            Spacer(minLength: scaled(4))
+
+            Text(resetCreditRemainingText(expiry))
+                .font(appFont(size: compact ? 9 : 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.50))
+                .lineLimit(1)
+                .minimumScaleFactor(0.80)
+                .frame(width: columns.remaining, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, minHeight: scaled(compact ? 16 : 18), alignment: .center)
+    }
+
+    private func resetCreditDetailColumnWidths(compact: Bool) -> (label: CGFloat, date: CGFloat, time: CGFloat, remaining: CGFloat) {
+        (
+            label: scaled(compact ? 42 : 50),
+            date: selectedLanguage == .en ? scaled(compact ? 84 : 96) : scaled(compact ? 98 : 112),
+            time: scaled(compact ? 38 : 44),
+            remaining: selectedLanguage == .en ? scaled(compact ? 48 : 56) : scaled(compact ? 42 : 50)
+        )
     }
 
     private func quotaRows(for windows: [QuotaWindow]) -> [QuotaWindow] {
@@ -4023,6 +4619,147 @@ struct AccountsRootView: View {
         return reset
     }
 
+    private func resetCreditSummary(for profile: CodexProfile) -> ResetCreditSummary? {
+        guard !isExternalProvider(profile) else { return nil }
+        let trimmed = profile.resetCredits.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != "unknown",
+              trimmed != "none"
+        else {
+            return nil
+        }
+
+        let pieces = trimmed.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let rawCount = pieces.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let digits = rawCount.prefix { $0.isNumber }
+        guard let count = Int(String(digits)), count > 0 else { return nil }
+
+        let expiries: [String]
+        if pieces.count > 1 {
+            expiries = pieces[1]
+                .split(separator: ",", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && $0 != "unknown" && $0 != "null" }
+        } else {
+            expiries = []
+        }
+
+        let sortedExpiries = expiries.sorted { lhs, rhs in
+            switch (resetCreditExpiryDate(from: lhs), resetCreditExpiryDate(from: rhs)) {
+            case let (left?, right?):
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs < rhs
+            }
+        }
+
+        return ResetCreditSummary(count: count, expiries: sortedExpiries)
+    }
+
+    private func resetCreditsExpirySummary(_ summary: ResetCreditSummary) -> String {
+        guard let first = summary.expiries.first else {
+            return tr("到期未提供", "Expiry unavailable")
+        }
+        return tr(
+            "最早 \(shortResetCreditExpiryText(first)) · \(resetCreditRemainingText(first))",
+            "First \(shortResetCreditExpiryText(first)) · \(resetCreditRemainingText(first))"
+        )
+    }
+
+    private func resetCreditsHelp(_ summary: ResetCreditSummary) -> String {
+        let title = tr("重設券：\(summary.count) 張可用", "Reset credits: \(summary.count) available")
+        guard !summary.expiries.isEmpty else {
+            return title + "\n" + tr(
+                "暫時未能取得每張券嘅到期時間。",
+                "Per-credit expiry times are currently unavailable."
+            )
+        }
+
+        let details = summary.expiries.enumerated().map { index, raw in
+            tr(
+                "第 \(index + 1) 張：\(fullResetCreditExpiryText(raw))，\(resetCreditRemainingText(raw))",
+                "#\(index + 1): \(fullResetCreditExpiryText(raw)), \(resetCreditRemainingText(raw))"
+            )
+        }.joined(separator: "\n")
+        return title + "\n" + details
+    }
+
+    private func shortResetCreditExpiryText(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else {
+            return tr("到期時間無法讀取", "Expiry unreadable")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = selectedLanguage == .en ? "MMM d, HH:mm" : "M月d日 HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func fullResetCreditExpiryText(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else {
+            return tr("到期時間無法讀取", "Expiry unreadable")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = selectedLanguage == .en ? "MMM d, yyyy HH:mm" : "yyyy年M月d日 HH:mm"
+        return tr("\(formatter.string(from: date)) 到期", "Expires \(formatter.string(from: date))")
+    }
+
+    private func resetCreditDetailDateText(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else {
+            return tr("到期時間無法讀取", "Expiry unreadable")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = selectedLanguage == .en ? "MMM d, yyyy HH:mm" : "yyyy年M月d日 HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func resetCreditDetailDatePartText(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else {
+            return tr("日期無法讀取", "Date unreadable")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = selectedLanguage == .en ? "MMM d, yyyy" : "yyyy年M月d日"
+        return formatter.string(from: date)
+    }
+
+    private func resetCreditDetailTimePartText(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else {
+            return "--:--"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func resetCreditRemainingText(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else {
+            return tr("剩餘時間未知", "Time left unknown")
+        }
+
+        let seconds = date.timeIntervalSince(Date())
+        if seconds <= 0 {
+            return tr("已過期", "Expired")
+        }
+
+        let days = Int(ceil(seconds / 86_400))
+        if days >= 2 {
+            return tr("剩 \(days) 日", "\(days)d left")
+        }
+
+        let hours = max(1, Int(ceil(seconds / 3_600)))
+        if hours >= 24 {
+            return tr("剩 1 日", "1d left")
+        }
+        return tr("剩 \(hours) 小時", "\(hours)h left")
+    }
+
     private func resetCaption(_ reset: String?, windowID: String, profileID: String) -> String {
         let text = shortResetText(reset)
         guard text != "--" else { return text }
@@ -4097,6 +4834,16 @@ struct AccountsRootView: View {
                 expandedResetKeys.remove(key)
             } else {
                 expandedResetKeys.insert(key)
+            }
+        }
+    }
+
+    private func toggleResetCreditExpansion(profileID: String) {
+        withAnimation(.easeOut(duration: 0.14)) {
+            if expandedResetCreditProfileIDs.contains(profileID) {
+                expandedResetCreditProfileIDs.remove(profileID)
+            } else {
+                expandedResetCreditProfileIDs.insert(profileID)
             }
         }
     }
@@ -4199,6 +4946,46 @@ struct AccountsRootView: View {
         return date < now ? calendar.date(byAdding: .day, value: 1, to: date) : date
     }
 
+    private func resetCreditExpiryDate(from raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let epoch = TimeInterval(trimmed) {
+            let normalized = epoch > 10_000_000_000 ? epoch / 1000 : epoch
+            return Date(timeIntervalSince1970: normalized)
+        }
+
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: trimmed) {
+            return date
+        }
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        if let date = isoFormatter.date(from: trimmed) {
+            return date
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd"
+        ] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: trimmed) {
+                return date
+            }
+        }
+        return nil
+    }
+
     private func shouldPreservePreviousUsage(_ previous: CodexProfile) -> Bool {
         previous.quota != "unknown" && !cachedResetHasElapsed(previous.reset)
     }
@@ -4247,6 +5034,9 @@ struct AccountsRootView: View {
     }
 
     private func quotaRemainingPercent(for profile: CodexProfile) -> Int? {
+        if isExternalProvider(profile) {
+            return 100
+        }
         if profile.quota == "unlimited" {
             return 100
         }
@@ -4254,15 +5044,24 @@ struct AccountsRootView: View {
     }
 
     private func isQuotaPoolCandidate(_ profile: CodexProfile) -> Bool {
-        isVisiblySignedIn(profile) && !isLoginNeeded(profile) && quotaPoolScore(for: profile) > 0
+        if isExternalProvider(profile) {
+            return false
+        }
+        return isVisiblySignedIn(profile) && !isLoginNeeded(profile) && quotaPoolScore(for: profile) > 0
     }
 
     private func isQuotaDepleted(_ profile: CodexProfile) -> Bool {
+        if isExternalProvider(profile) {
+            return false
+        }
         guard profile.quota != "unlimited", profile.quota != "unknown" else { return false }
         return (quotaRemainingPercent(for: profile) ?? 0) <= 0
     }
 
     private func quotaPoolScore(for profile: CodexProfile) -> Int {
+        if isExternalProvider(profile) {
+            return -1
+        }
         if profile.quota == "unlimited" {
             return 10_000
         }
@@ -4313,6 +5112,9 @@ struct AccountsRootView: View {
     private func quotaPoolRoute(for requestedID: String) -> QuotaPoolRouteDecision? {
         guard let requested = profiles.first(where: { $0.id == requestedID }) else {
             return nil
+        }
+        if isExternalProvider(requested) {
+            return QuotaPoolRouteDecision(requested: requested, target: requested, didSwitch: false)
         }
         guard autoQuotaPool, isVisiblySignedIn(requested), !isLoginNeeded(requested) else {
             return QuotaPoolRouteDecision(requested: requested, target: requested, didSwitch: false)
@@ -4399,12 +5201,21 @@ struct AccountsRootView: View {
     }
 
     private func quotaHelp(for profile: CodexProfile) -> String {
+        if isExternalProvider(profile) {
+            return tr("阿里 Coding Plan\nqwen3.7-plus\n經本機 bridge 接入", "Aliyun Coding Plan\nqwen3.7-plus\nConnected through local bridge")
+        }
         let quotaText = profile.quota == "unknown" ? tr("用量未知", "Usage unknown") : profile.quota
         let resetText = profile.reset == "unknown" ? tr("重設時間未知", "Reset unknown") : profile.reset
+        if let resetCredits = resetCreditSummary(for: profile) {
+            return "\(quotaText)\n\(resetText)\n\(resetCreditsHelp(resetCredits))"
+        }
         return "\(quotaText)\n\(resetText)"
     }
 
     private func quotaAccent(for profile: CodexProfile) -> Color {
+        if isExternalProvider(profile) {
+            return Color(red: 0.10, green: 0.86, blue: 0.74)
+        }
         if profile.quota == "unlimited" {
             return Color(red: 0.04, green: 0.74, blue: 0.64)
         }
@@ -4422,6 +5233,9 @@ struct AccountsRootView: View {
     }
 
     private func profilePlanAccent(for profile: CodexProfile) -> Color {
+        if isExternalProvider(profile) {
+            return Color(red: 0.10, green: 0.86, blue: 0.74)
+        }
         let windows = quotaWindows(for: profile)
         if windows.contains(where: { $0.id == "5h" && $0.percent != nil }) {
             return Color(red: 1.00, green: 0.72, blue: 0.06)
@@ -4459,7 +5273,7 @@ struct AccountsRootView: View {
         let signedIn = isVisiblySignedIn(profile)
         let title = signedIn ? tr("打開", "Open") : tr("登入", "Log In")
         let hasQuota = (quotaRemainingPercent(for: profile) ?? 0) > 0
-        let depleted = profile.quota != "unknown" && !hasQuota
+        let depleted = !isExternalProvider(profile) && profile.quota != "unknown" && !hasQuota
         let accent = depleted ? Color(red: 1.00, green: 0.12, blue: 0.20) : (signedIn ? Color(red: 0.12, green: 0.92, blue: 0.70) : Color.orange)
 
         return Button {
@@ -4558,6 +5372,14 @@ struct AccountsRootView: View {
         menu.addItem(CallbackMenuItem(title: tr("喺 Finder 顯示", "Reveal Profile Folder")) {
             revealProfile(profile)
         })
+        menu.addItem(.separator())
+        menu.addItem(CallbackMenuItem(title: tr("導出對話包...", "Export Conversation Package...")) {
+            exportConversationPackage(from: profile)
+        })
+        menu.addItem(CallbackMenuItem(title: tr("導入對話包...", "Import Conversation Package...")) {
+            importConversationPackage(defaultTarget: profile)
+        })
+        menu.addItem(.separator())
         menu.addItem(CallbackMenuItem(title: tr("共享對話紀錄", "Share History")) {
             shareHistory(profile)
         })
@@ -4727,343 +5549,6 @@ struct AccountsRootView: View {
         }
     }
 
-    private var remoteBridgePort: Int {
-        47621
-    }
-
-    private var remoteBridgeURLLabel: String {
-        "http://\(cachedLocalIPAddress):\(remoteBridgePort)"
-    }
-
-    private var remoteBridgeScriptPath: String {
-        if let bundled = Bundle.main.path(forResource: "codex_remote_bridge", ofType: "py") {
-            return bundled
-        }
-        let sibling = URL(fileURLWithPath: scriptPath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("codex_remote_bridge.py")
-            .path
-        if FileManager.default.fileExists(atPath: sibling) {
-            return sibling
-        }
-        return "/Applications/Codex Accounts.app/Contents/Resources/codex_remote_bridge.py"
-    }
-
-    private var remoteBridgeStartScriptPath: String {
-        if let bundled = Bundle.main.path(forResource: "start_mac_bridge", ofType: "zsh") {
-            return bundled
-        }
-        let sibling = URL(fileURLWithPath: scriptPath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("start_mac_bridge.zsh")
-            .path
-        if FileManager.default.fileExists(atPath: sibling) {
-            return sibling
-        }
-        return "/Applications/Codex Accounts.app/Contents/Resources/start_mac_bridge.zsh"
-    }
-
-    private var remoteBridgePIDFileURL: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return support
-            .appendingPathComponent("Codex Accounts", isDirectory: true)
-            .appendingPathComponent("remote-bridge.pid")
-    }
-
-    private func runRemoteBridgeUtility(_ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12) -> (Int32, String) {
-        runProcess(
-            executable: "/usr/bin/python3",
-            arguments: [remoteBridgeScriptPath, "--script", scriptPath] + arguments,
-            input: input,
-            timeout: timeout
-        )
-    }
-
-    private func checkRemoteBridgeLANHealth(timeout: TimeInterval = 2.0) -> (Int32, String) {
-        let url = "\(remoteBridgeURLLabel)/health"
-        let seconds = max(1, Int(timeout.rounded(.up)))
-        let result = runProcess(
-            executable: "/usr/bin/curl",
-            arguments: [
-                "--noproxy", "*",
-                "-fsS",
-                "--connect-timeout", "1",
-                "--max-time", "\(seconds)",
-                url
-            ],
-            timeout: timeout + 1.0
-        )
-        guard result.0 == 0, result.1.contains("\"ok\": true") else {
-            let output = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
-            return (result.0 == 0 ? 1 : result.0, output.isEmpty ? "LAN health check failed: \(url)" : output)
-        }
-        return (0, result.1)
-    }
-
-    private func startRemoteBridge() {
-        refreshRemoteBridgeRunningFlag()
-        refreshRemoteBridgeState(force: true)
-        guard !remoteBridgeRunning else {
-            runBackground(tr("檢查手機 Bridge...", "Checking mobile bridge...")) {
-                checkRemoteBridgeLANHealth(timeout: 2.0)
-            } completion: { result in
-                if result.0 == 0 {
-                    remoteBridgeStatus = tr("Bridge 已經運行緊：\(remoteBridgeURLLabel)", "Bridge is already running: \(remoteBridgeURLLabel)")
-                    return
-                }
-                remoteBridgeStatus = tr("偵測到舊 Bridge 只限本機，正在重啟...", "Detected a localhost-only bridge. Restarting...")
-                stopRemoteBridge()
-                launchRemoteBridgeProcess(forceRestart: true)
-            }
-            return
-        }
-
-        launchRemoteBridgeProcess(forceRestart: true)
-    }
-
-    private func launchRemoteBridgeProcess(forceRestart: Bool) {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = [remoteBridgeStartScriptPath]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_ACCOUNTS_SCRIPT"] = scriptPath
-        environment["CODEX_REMOTE_BRIDGE"] = remoteBridgeScriptPath
-        environment["CODEX_REMOTE_HOST"] = "0.0.0.0"
-        environment["CODEX_REMOTE_PORT"] = "\(remoteBridgePort)"
-        environment["CODEX_REMOTE_PID_FILE"] = remoteBridgePIDFileURL.path
-        environment["CODEX_REMOTE_RESTART"] = forceRestart ? "1" : "0"
-        environment["PYTHONUNBUFFERED"] = "1"
-        process.environment = environment
-        process.standardOutput = pipe
-        process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty,
-                  let text = String(data: data, encoding: .utf8)
-            else { return }
-            DispatchQueue.main.async {
-                remoteBridgeLastOutput += text
-                let lines = remoteBridgeLastOutput
-                    .split(separator: "\n")
-                    .map(String.init)
-                    .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                if let last = lines.last {
-                    remoteBridgeStatus = last
-                }
-            }
-        }
-        process.terminationHandler = { _ in
-            DispatchQueue.main.async {
-                pipe.fileHandleForReading.readabilityHandler = nil
-                if let current = remoteBridgeProcess, current === process {
-                    remoteBridgeProcess = nil
-                }
-                refreshRemoteBridgeState(force: true)
-            }
-        }
-
-        do {
-            try process.run()
-            remoteBridgeProcess = process
-            remoteBridgeRunning = true
-            remoteBridgeStatus = tr("Bridge 啟動中...", "Bridge starting...")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
-                refreshRemoteBridgeState(force: true)
-            }
-        } catch {
-            remoteBridgeStatus = error.localizedDescription
-            alertMessage(tr("Bridge 啟動失敗", "Bridge Start Failed"), error.localizedDescription)
-        }
-    }
-
-    private func stopRemoteBridge() {
-        remoteBridgeProcess?.terminate()
-        remoteBridgeProcess = nil
-        if let pid = readRemoteBridgePID(), isProcessRunning(pid: pid) {
-            _ = Darwin.kill(pid_t(pid), SIGTERM)
-        }
-        removeRemoteBridgePIDIfStale()
-        remoteBridgeRunning = false
-        remoteBridgeStatus = tr("Bridge 已停止", "Bridge stopped")
-    }
-
-    private func createRemoteBridgeUser() {
-        guard let credentials = promptForRemoteUserCredentials() else { return }
-        let payload: [String: String] = [
-            "username": credentials.username,
-            "password": credentials.password
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
-            alertMessage(tr("帳號建立失敗", "Could Not Create Login"), tr("無法建立登入 payload。", "Could not create login payload."))
-            return
-        }
-
-        runBackground(tr("建立手機登入帳號...", "Creating mobile login...")) {
-            runRemoteBridgeUtility(["--create-user-stdin"], input: data)
-        } completion: { result in
-            guard result.0 == 0 else {
-                alertMessage(tr("帳號建立失敗", "Could Not Create Login"), result.1)
-                refreshRemoteBridgeState(force: true)
-                return
-            }
-            remoteBridgeStatus = tr("已建立手機登入帳號 \(credentials.username)", "Created mobile login \(credentials.username)")
-            refreshRemoteBridgeState(force: true)
-        }
-    }
-
-    private func refreshRemoteBridgeState(force: Bool = false) {
-        let now = Date()
-        guard force || now.timeIntervalSince(lastRemoteBridgeRefreshAt) >= 25 else { return }
-        guard !remoteBridgeRefreshInFlight else { return }
-        lastRemoteBridgeRefreshAt = now
-        remoteBridgeRefreshInFlight = true
-        refreshLocalIPAddress(force: force)
-
-        refreshRemoteBridgeRunningFlag()
-
-        DispatchQueue.global(qos: .utility).async {
-            let result = runRemoteBridgeUtility(["--list-users"], timeout: 8)
-            let health = checkRemoteBridgeLANHealth(timeout: 2.0)
-            DispatchQueue.main.async {
-                remoteBridgeRefreshInFlight = false
-                let processRunning = remoteBridgeProcess?.isRunning == true
-                let pidRunning = readRemoteBridgePID().map { isProcessRunning(pid: $0) } ?? false
-                let bridgeProcessExists = processRunning || pidRunning
-                let lanReachable = health.0 == 0
-                remoteBridgeRunning = bridgeProcessExists && lanReachable
-
-                if bridgeProcessExists && !lanReachable {
-                    remoteBridgeStatus = tr(
-                        "Bridge 未能被手機連接，請按「啟動 Bridge」自動修復。",
-                        "Bridge is not reachable from your phone. Press Start Bridge to repair it."
-                    )
-                } else if lanReachable {
-                    remoteBridgeStatus = tr("Bridge 可連接：\(remoteBridgeURLLabel)", "Bridge reachable: \(remoteBridgeURLLabel)")
-                }
-
-                guard result.0 == 0,
-                      let data = result.1.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let users = json["users"] as? [Any]
-                else {
-                    remoteBridgeUsersCount = 0
-                    if !result.1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && remoteBridgeStatus.isEmpty {
-                        remoteBridgeStatus = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                    return
-                }
-                remoteBridgeUsersCount = users.count
-            }
-        }
-    }
-
-    private func refreshRemoteBridgeRunningFlag() {
-        let processRunning = remoteBridgeProcess?.isRunning == true
-        let pidRunning = readRemoteBridgePID().map { isProcessRunning(pid: $0) } ?? false
-        remoteBridgeRunning = processRunning || pidRunning
-        if !remoteBridgeRunning {
-            removeRemoteBridgePIDIfStale()
-        }
-    }
-
-    private func readRemoteBridgePID() -> Int32? {
-        guard let text = try? String(contentsOf: remoteBridgePIDFileURL, encoding: .utf8),
-              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              pid > 0
-        else {
-            return nil
-        }
-        return pid
-    }
-
-    private func isProcessRunning(pid: Int32) -> Bool {
-        Darwin.kill(pid_t(pid), 0) == 0
-    }
-
-    private func removeRemoteBridgePIDIfStale() {
-        guard let pid = readRemoteBridgePID(), !isProcessRunning(pid: pid) else { return }
-        try? FileManager.default.removeItem(at: remoteBridgePIDFileURL)
-    }
-
-    private func refreshLocalIPAddress(force: Bool = false) {
-        let now = Date()
-        guard force || now.timeIntervalSince(lastLocalIPAddressRefreshAt) >= 30 else { return }
-        guard !localIPAddressRefreshInFlight else { return }
-        localIPAddressRefreshInFlight = true
-        lastLocalIPAddressRefreshAt = now
-
-        DispatchQueue.global(qos: .utility).async {
-            let address = currentLocalIPv4Address()
-            DispatchQueue.main.async {
-                cachedLocalIPAddress = address
-                localIPAddressRefreshInFlight = false
-            }
-        }
-    }
-
-    private func currentLocalIPv4Address() -> String {
-        var interfaces: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&interfaces) == 0, let firstInterface = interfaces else {
-            return cachedLocalIPAddress
-        }
-        defer { freeifaddrs(interfaces) }
-
-        var candidates: [(score: Int, address: String)] = []
-        var cursor: UnsafeMutablePointer<ifaddrs>? = firstInterface
-        while let interface = cursor {
-            defer { cursor = interface.pointee.ifa_next }
-
-            let flags = Int32(interface.pointee.ifa_flags)
-            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
-            guard let socketAddress = interface.pointee.ifa_addr,
-                  socketAddress.pointee.sa_family == UInt8(AF_INET)
-            else { continue }
-
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            let result = getnameinfo(
-                socketAddress,
-                socklen_t(socketAddress.pointee.sa_len),
-                &host,
-                socklen_t(host.count),
-                nil,
-                0,
-                NI_NUMERICHOST
-            )
-            guard result == 0 else { continue }
-
-            let address = String(cString: host)
-            guard !address.hasPrefix("127."), !address.hasPrefix("169.254.") else { continue }
-
-            let name = String(cString: interface.pointee.ifa_name)
-            var score = 100
-            if name.hasPrefix("en") {
-                score -= 40
-            }
-            if name.hasPrefix("utun") {
-                score -= 20
-            }
-            if isPrivateIPv4(address) {
-                score -= 30
-            }
-            if name.hasPrefix("awdl") || name.hasPrefix("llw") {
-                score += 50
-            }
-            candidates.append((score, address))
-        }
-
-        return candidates.sorted { $0.score < $1.score }.first?.address ?? cachedLocalIPAddress
-    }
-
-    private func isPrivateIPv4(_ address: String) -> Bool {
-        if address.hasPrefix("10.") || address.hasPrefix("192.168.") {
-            return true
-        }
-        let parts = address.split(separator: ".").compactMap { Int($0) }
-        return parts.count == 4 && parts[0] == 172 && (16...31).contains(parts[1])
-    }
-
     private func refreshProfiles(
         showLoading: Bool = true,
         replayQuota: Bool = false,
@@ -5119,7 +5604,8 @@ struct AccountsRootView: View {
                         authMode: "checking",
                         lastRefresh: cachedProfile.lastRefresh,
                         quota: cachedProfile.quota,
-                        reset: cachedProfile.reset
+                        reset: cachedProfile.reset,
+                        resetCredits: cachedProfile.resetCredits
                     )
                 }
                 let preservePreviousUsage = shouldPreservePreviousUsage(previous)
@@ -5131,7 +5617,8 @@ struct AccountsRootView: View {
                     authMode: cachedProfile.authMode == "unknown" || cachedProfile.authMode == "checking" ? previous.authMode : cachedProfile.authMode,
                     lastRefresh: previous.lastRefresh,
                     quota: preservePreviousUsage ? previous.quota : cachedProfile.quota,
-                    reset: preservePreviousUsage ? previous.reset : cachedProfile.reset
+                    reset: preservePreviousUsage ? previous.reset : cachedProfile.reset,
+                    resetCredits: bestResetCredits(primary: cachedProfile.resetCredits, fallback: previous.resetCredits)
                 )
             }
 
@@ -5221,7 +5708,7 @@ struct AccountsRootView: View {
                     : resolvedProfile
                 return [
                     profile.id, profile.displayName, profile.home, profile.authStatus, profile.authMode,
-                    profile.lastRefresh, profile.quota, profile.reset
+                    profile.lastRefresh, profile.quota, profile.reset, profile.resetCredits
                 ].joined(separator: "\t")
             }.joined(separator: "\n")
             return (
@@ -5251,6 +5738,7 @@ struct AccountsRootView: View {
             }
             statusText = tr("\(profiles.count) 個 profile 就緒", "\(profiles.count) profiles ready")
             attemptQuotaPoolFailoverIfNeeded()
+            scheduleLiveUsageBackfillIfNeeded(profiles, triggeredByLiveUsage: liveUsage)
         }
     }
 
@@ -5328,7 +5816,8 @@ struct AccountsRootView: View {
                     authMode: localProfile.authMode,
                     lastRefresh: localProfile.lastRefresh,
                     quota: localProfile.quota,
-                    reset: localProfile.reset
+                    reset: localProfile.reset,
+                    resetCredits: localProfile.resetCredits
                 )
             }
 
@@ -5348,7 +5837,8 @@ struct AccountsRootView: View {
                     authMode: previous.authMode,
                     lastRefresh: previous.lastRefresh,
                     quota: preservePreviousUsage ? previous.quota : profile.quota,
-                    reset: preservePreviousUsage ? previous.reset : profile.reset
+                    reset: preservePreviousUsage ? previous.reset : profile.reset,
+                    resetCredits: bestResetCredits(primary: profile.resetCredits, fallback: previous.resetCredits)
                 )
             }
 
@@ -5361,7 +5851,8 @@ struct AccountsRootView: View {
                     authMode: profile.authMode,
                     lastRefresh: profile.lastRefresh,
                     quota: previous.quota,
-                    reset: previous.reset
+                    reset: previous.reset,
+                    resetCredits: bestResetCredits(primary: profile.resetCredits, fallback: previous.resetCredits)
                 )
             }
 
@@ -5394,7 +5885,8 @@ struct AccountsRootView: View {
                 authMode: profile.authMode,
                 lastRefresh: profile.lastRefresh,
                 quota: profile.quota,
-                reset: profile.reset
+                reset: profile.reset,
+                resetCredits: profile.resetCredits
             )
         }
 
@@ -5406,7 +5898,8 @@ struct AccountsRootView: View {
             authMode: profile.authMode == "unknown" ? "checking" : profile.authMode,
             lastRefresh: profile.lastRefresh,
             quota: profile.quota,
-            reset: profile.reset
+            reset: profile.reset,
+            resetCredits: profile.resetCredits
         )
     }
 
@@ -5426,7 +5919,8 @@ struct AccountsRootView: View {
             authMode: profile.authMode,
             lastRefresh: profile.lastRefresh,
             quota: profile.quota,
-            reset: profile.reset
+            reset: profile.reset,
+            resetCredits: profile.resetCredits
         )
     }
 
@@ -5446,7 +5940,8 @@ struct AccountsRootView: View {
                 authMode: parts[4],
                 lastRefresh: parts[5],
                 quota: parts[6],
-                reset: parts[7]
+                reset: parts[7],
+                resetCredits: parts.count > 8 ? parts[8] : "unknown"
             )
         }
     }
@@ -5661,6 +6156,22 @@ struct AccountsRootView: View {
         }
     }
 
+    private func repairLargeHistoryPayloads() {
+        guard !isRepairingHistoryPayloads else { return }
+        isRepairingHistoryPayloads = true
+
+        runBackground(tr("清理大型對話...", "Cleaning large chats...")) {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH"] = "1"
+            return runCodexScript(scriptPath, ["repair-account1"], wait: true, timeout: 120, environment: environment)
+        } completion: { result in
+            isRepairingHistoryPayloads = false
+            statusText = result.0 == 0
+                ? tr("已清理大型對話", "Large chats cleaned")
+                : tr("清理大型對話失敗", "Large chat cleanup failed")
+        }
+    }
+
     private func shareAll() {
         runBackground(tr("共享對話紀錄...", "Sharing history...")) {
             var environment = ProcessInfo.processInfo.environment
@@ -5732,6 +6243,174 @@ struct AccountsRootView: View {
 
     private func revealProfile(_ profile: CodexProfile) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: profile.home)])
+    }
+
+    private func exportConversationPackage(from profile: CodexProfile) {
+        runBackground(tr("讀取 \(profile.displayName) 可導出對話...", "Loading exportable conversations for \(profile.displayName)...")) {
+            runCodexScript(scriptPath, ["list-exportable-threads", profile.id, "60"], wait: true, timeout: 45)
+        } completion: { result in
+            guard result.0 == 0 else {
+                alertMessage(tr("讀取對話失敗", "Could Not Load Conversations"), result.1)
+                return
+            }
+            let threads = parsedExportableThreads(result.1)
+            guard !threads.isEmpty else {
+                alertMessage(
+                    tr("未搵到可導出對話", "No Exportable Conversations"),
+                    tr("呢個 profile 暫時搵唔到有 rollout 檔案嘅本機對話。", "This profile does not currently have local conversations with rollout files.")
+                )
+                return
+            }
+            presentExportThreadPicker(profile: profile, threads: threads)
+        }
+    }
+
+    private func presentExportThreadPicker(profile: CodexProfile, threads: [ExportableThread]) {
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 520, height: 28), pullsDown: false)
+        for thread in threads {
+            let dateText = thread.updatedAt.isEmpty ? tr("未知時間", "unknown time") : thread.updatedAt
+            picker.addItem(withTitle: "\(thread.title)  ·  \(dateText)  ·  \(humanFileSize(thread.sizeBytes))")
+        }
+        picker.selectItem(at: 0)
+
+        let generatedImages = NSButton(checkboxWithTitle: tr("包含已引用嘅生成圖片", "Include referenced generated images"), target: nil, action: nil)
+        generatedImages.state = .off
+        let localAssets = NSButton(checkboxWithTitle: tr("包含工作區入面被引用嘅檔案", "Include referenced workspace files"), target: nil, action: nil)
+        localAssets.state = .off
+
+        let warning = NSTextField(wrappingLabelWithString: tr(
+            "對話包會包含完整對話、工具輸出同壓縮記憶，可能有路徑、主機名、命令輸出甚至 secret。預設唔會包含 auth、cookies、Codex config 或整個工作區。",
+            "The package includes the full conversation, tool outputs, and compacted context. It may contain paths, hostnames, command output, or secrets. Auth, cookies, Codex config, and full workspace snapshots are not included by default."
+        ))
+        warning.font = NSFont.systemFont(ofSize: 12)
+        warning.textColor = .secondaryLabelColor
+        warning.maximumNumberOfLines = 4
+
+        let fileWarning = NSTextField(wrappingLabelWithString: tr(
+            "勾選檔案選項後，對方可以打開包入面嘅附件；只應分享俾可信隊友。",
+            "If file options are enabled, the receiver can open the packaged attachments. Share only with trusted teammates."
+        ))
+        fileWarning.font = NSFont.systemFont(ofSize: 11)
+        fileWarning.textColor = .secondaryLabelColor
+        fileWarning.maximumNumberOfLines = 3
+
+        let stack = NSStackView(views: [picker, warning, generatedImages, localAssets, fileWarning])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.setFrameSize(NSSize(width: 540, height: 150))
+
+        let alert = NSAlert()
+        alert.messageText = tr("導出對話包", "Export Conversation Package")
+        alert.informativeText = tr("選擇一條對話；匯出後可以用 WhatsApp、Email 或其他方式傳俾另一部機導入。", "Choose one conversation. After export, you can send the package by WhatsApp, email, or another channel for import on another machine.")
+        alert.accessoryView = stack
+        alert.addButton(withTitle: tr("選擇儲存位置", "Choose Save Location"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let index = max(0, picker.indexOfSelectedItem)
+        guard index < threads.count else { return }
+        let thread = threads[index]
+        let panel = NSSavePanel()
+        panel.title = tr("儲存對話包", "Save Conversation Package")
+        panel.nameFieldStringValue = safePackageFileName(title: thread.title, threadID: thread.id)
+        if let packageType = UTType(filenameExtension: "codexshare") {
+            panel.allowedContentTypes = [packageType]
+        }
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        var arguments = ["export-thread-package", profile.id, thread.id, outputURL.path]
+        if generatedImages.state == .on {
+            arguments.append("--include-generated-images")
+        }
+        if localAssets.state == .on {
+            arguments.append("--include-local-assets")
+        }
+
+        runBackground(tr("導出對話包...", "Exporting conversation package...")) {
+            runCodexScript(scriptPath, arguments, wait: true, timeout: 600)
+        } completion: { result in
+            if result.0 == 0 {
+                statusText = tr("已導出對話包", "Conversation package exported")
+                alertMessage(
+                    tr("已導出對話包", "Export Complete"),
+                    trimmedToolOutput(result.1, maxLength: 1600)
+                )
+            } else {
+                alertMessage(tr("導出失敗", "Export Failed"), result.1)
+            }
+        }
+    }
+
+    private func importConversationPackage(defaultTarget profile: CodexProfile) {
+        let panel = NSOpenPanel()
+        panel.title = tr("選擇對話包", "Choose Conversation Package")
+        if let packageType = UTType(filenameExtension: "codexshare") {
+            panel.allowedContentTypes = [packageType]
+        }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let packageURL = panel.url else { return }
+
+        runBackground(tr("檢查對話包...", "Inspecting conversation package...")) {
+            runCodexScript(scriptPath, ["inspect-thread-package", packageURL.path], wait: true, timeout: 60)
+        } completion: { inspectResult in
+            guard inspectResult.0 == 0 else {
+                alertMessage(tr("讀取對話包失敗", "Could Not Inspect Package"), inspectResult.1)
+                return
+            }
+            presentImportPackageConfirmation(packageURL: packageURL, defaultTarget: profile, preview: inspectResult.1)
+        }
+    }
+
+    private func presentImportPackageConfirmation(packageURL: URL, defaultTarget profile: CodexProfile, preview: String) {
+        let alert = NSAlert()
+        alert.messageText = tr("導入對話包？", "Import Conversation Package?")
+        alert.informativeText = tr(
+            "建議導入到全部 profile，咁每個 Codex Account 打開都會見到同一條新對話。匯入會先備份目標 profile 嘅 SQLite/index/global state，並將呢條對話標記成最新。",
+            "Importing into all profiles is recommended so every Codex Account can see the same new conversation. The import backs up each target profile's SQLite/index/global state first, then marks this conversation as the latest."
+        )
+        let previewField = NSTextField(wrappingLabelWithString: trimmedToolOutput(preview, maxLength: 1800))
+        previewField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        previewField.textColor = .secondaryLabelColor
+        previewField.maximumNumberOfLines = 14
+        previewField.setFrameSize(NSSize(width: 560, height: 180))
+        alert.accessoryView = previewField
+        alert.addButton(withTitle: tr("導入全部 Profile", "Import All Profiles"))
+        alert.addButton(withTitle: tr("只導入 \(profile.displayName)", "Only \(profile.displayName)"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        let target: String
+        if response == .alertFirstButtonReturn {
+            target = "all"
+        } else if response == .alertSecondButtonReturn {
+            target = profile.id
+        } else {
+            return
+        }
+
+        runBackground(tr("導入對話包...", "Importing conversation package...")) {
+            runCodexScript(scriptPath, ["import-thread-package", packageURL.path, target, "--mark-latest"], wait: true, timeout: 300)
+        } completion: { result in
+            if result.0 == 0 {
+                statusText = tr("已導入對話包", "Conversation package imported")
+                refreshProfiles(showLoading: false)
+                alertMessage(tr("已導入對話包", "Import Complete"), trimmedToolOutput(result.1, maxLength: 1800))
+            } else {
+                alertMessage(tr("導入失敗", "Import Failed"), result.1)
+            }
+        }
+    }
+
+    private func trimmedToolOutput(_ output: String, maxLength: Int) -> String {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > maxLength else { return trimmed.isEmpty ? tr("完成", "Done") : trimmed }
+        return String(trimmed.prefix(maxLength)) + "\n..."
     }
 
     private func shareHistory(_ profile: CodexProfile) {
@@ -6445,9 +7124,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusResult = runScript(["list-accounts-status"], wait: true)
         guard statusResult.0 == 0 else { return requested }
 
+        let statusLines = statusResult.1.split(separator: "\n")
+        let requestedIsExternal = statusLines.contains { line in
+            let parts = line.split(separator: "|", omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            return parts.count >= 5 && parts[0] == requestedName && parts[4] == "external"
+        }
+        if requestedIsExternal {
+            return requested
+        }
+
         let displayByName = Dictionary(uniqueKeysWithValues: accounts.map { ($0.name, $0.displayName) })
-        let candidates = statusResult.1
-            .split(separator: "\n")
+        let candidates = statusLines
             .compactMap { line -> (name: String, displayName: String, score: Int)? in
                 let parts = line.split(separator: "|", omittingEmptySubsequences: false)
                     .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }

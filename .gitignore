@@ -4,6 +4,7 @@ build/
 *.log
 *.tmp
 *.swp
+*.pyc
+__pycache__/
 *.xcuserstate
 xcuserdata/
-

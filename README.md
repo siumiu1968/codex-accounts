@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.5.0 更新介紹
+
+V2.5.0 新增對話包匯出/導入功能，可以將單一 Codex 對話連同 rollout 記憶、thread state 同必要 metadata 打包成 `.codexshare`，再導入到單一或全部 profile；匯入前會備份本機 SQLite/index/global state，並把導入對話標記成最新。今版亦新增 8 個主題、改用 4 欄主題選擇器，並移除手機遠端 Bridge 功能同相關 bundle resource，避免 app 內再暴露不需要嘅遠端控制入口。
+
 ### V2.4.3 更新介紹
 
 V2.4.3 修復跨 profile 共享對話紀錄時，project 對話一撳就消失或載入過慢嘅問題。同步流程依家會補齊每個 profile 嘅 `state_5.sqlite` thread metadata，並會由 `backups/history-link-*` 復原漏咗嘅 rollout / shell snapshot 檔；同時清理空白 project sidebar cache，令不同帳戶打開時都見到同一套最新對話紀錄。
@@ -68,7 +72,7 @@ V2.3.1 修復三個即時使用問題：當 direct ChatGPT 用量接口暫時被
 
 ### V2.3.0 更新介紹
 
-V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script / 系統 helper 依家唔再用會累積卡住線程嘅等待方式，所有背景 Codex 工作會串行處理；自動刷新同自動同步亦會輪流執行，避免同一時間爭用 profile 檔案。防睡眠同手機 Bridge 狀態檢查加咗 in-flight guard 同節流，減少用耐之後背景 process 疊住跑。
+V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script / 系統 helper 依家唔再用會累積卡住線程嘅等待方式，所有背景 Codex 工作會串行處理；自動刷新同自動同步亦會輪流執行，避免同一時間爭用 profile 檔案。防睡眠狀態檢查加咗 in-flight guard 同節流，減少用耐之後背景 process 疊住跑。
 
 ### v2 主要功能
 
@@ -81,8 +85,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 - 記憶與外掛同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，外掛啟用狀態會喺不同帳號之間合併。
 - 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態；開啟時會監察合蓋狀態，合蓋降內置屏幕亮度，開蓋或關閉功能時恢復亮度。
 - 電腦清潔模式：暫停大部分鍵盤輸入，方便清潔鍵盤，保留滑鼠/觸控板操作去關閉模式。
-- 手機遠端 Bridge：可以喺 Mac app 建立手機登入帳號，Android app 用同一組 username/password 登入後控制 profile、同步、打開/關閉視窗和傳送 prompt。
-- 遠端安全選項：Bridge 預設只接受登入 session，支援配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
+- 對話包匯出/導入：可把單一對話打包成 `.codexshare`，匯入到單一或全部 profile，方便可信團隊交接上下文。
 - 更新通道：檢查 GitHub release，驗證下載檔版本同 bundle id，然後自動替換 `/Applications/Codex Accounts.app`。
 - Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、繁中香港 / 繁中台灣 / 簡中 / 英文介面。
 - 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
@@ -92,7 +95,6 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 - 不會複製 OpenAI auth token、cookie 或 account session 到其他 profile。
 - 不會同步 OpenAI 雲端對話，也不會同步 ChatGPT server-side memory。
 - 不會把帳戶憑證傳到第三方。
-- 手機遠端帳號只儲存在本機 `~/Library/Application Support/Codex Accounts/remote-users.json`，密碼用 PBKDF2 hash 儲存。
 - 用量查詢只會使用該 profile 的本機 token 請求官方 Codex / ChatGPT 用量接口。
 - 這是非官方輔助工具，與 OpenAI 沒有從屬關係。
 
@@ -104,7 +106,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.4.3 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.5.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -127,17 +129,6 @@ scripts/package_release.zsh
 dist/Codex-Accounts-macOS.zip
 ```
 
-建立 Android 遙控 APK：
-
-```zsh
-android/build_apk.zsh
-```
-
-輸出位置：
-
-```text
-android/dist/CodexRemote-debug.apk
-```
 
 ### 本機資料位置
 
@@ -168,6 +159,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.5.0 更新介绍
+
+V2.5.0 新增对话包导出/导入功能，可以将单一 Codex 对话连同 rollout 记忆、thread state 和必要 metadata 打包成 `.codexshare`，再导入到单一或全部 profile；导入前会备份本地 SQLite/index/global state，并把导入对话标记成最新。本版也新增 8 个主题、改用 4 栏主题选择器，并移除手机远程 Bridge 功能和相关 bundle resource，避免 app 内继续暴露不需要的远程控制入口。
 
 ### V2.4.3 更新介绍
 
@@ -215,7 +210,7 @@ V2.3.1 修复三个即时使用问题：当 direct ChatGPT 用量接口临时被
 
 ### V2.3.0 更新介绍
 
-V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script / 系统 helper 现在不再使用会累积卡住线程的等待方式，所有后台 Codex 工作会串行处理；自动刷新和自动同步也会轮流执行，避免同一时间争用 profile 文件。防睡眠和手机 Bridge 状态检查加入 in-flight guard 和节流，减少用久之后后台 process 叠加运行。
+V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script / 系统 helper 现在不再使用会累积卡住线程的等待方式，所有后台 Codex 工作会串行处理；自动刷新和自动同步也会轮流执行，避免同一时间争用 profile 文件。防睡眠状态检查加入 in-flight guard 和节流，减少用久之后后台 process 叠加运行。
 
 ### v2 主要功能
 
@@ -228,8 +223,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 - 记忆与插件同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，插件启用状态会在不同账号之间合并。
 - 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态；开启时会监测合盖状态，合盖降低内置屏幕亮度，开盖或关闭功能时恢复亮度。
 - 电脑清洁模式：暂停大部分键盘输入，方便清洁键盘，保留鼠标/触控板操作去关闭模式。
-- 手机远程 Bridge：可以在 Mac app 创建手机登录账号，Android app 用同一组 username/password 登录后控制 profile、同步、打开/关闭窗口和发送 prompt。
-- 远程安全选项：Bridge 默认只接受登录 session，支持配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
+- 对话包导出/导入：可把单一对话打包成 `.codexshare`，导入到单一或全部 profile，方便可信团队交接上下文。
 - 更新通道：检查 GitHub release，验证下载文件版本和 bundle id，然后自动替换 `/Applications/Codex Accounts.app`。
 - Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、繁中香港 / 繁中台湾 / 简中 / 英文界面。
 - 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
@@ -239,7 +233,6 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 - 不会复制 OpenAI auth token、cookie 或 account session 到其他 profile。
 - 不会同步 OpenAI 云端对话，也不会同步 ChatGPT server-side memory。
 - 不会把账号凭证发送到第三方。
-- 手机远程账号只保存在本机 `~/Library/Application Support/Codex Accounts/remote-users.json`，密码用 PBKDF2 hash 保存。
 - 用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
 - 这是非官方辅助工具，与 OpenAI 没有关联。
 
@@ -251,7 +244,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.4.3 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.5.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -274,17 +267,6 @@ scripts/package_release.zsh
 dist/Codex-Accounts-macOS.zip
 ```
 
-构建 Android 遥控 APK：
-
-```zsh
-android/build_apk.zsh
-```
-
-输出位置：
-
-```text
-android/dist/CodexRemote-debug.apk
-```
 
 ### 本地数据位置
 
@@ -315,6 +297,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.5.0 Update
+
+V2.5.0 adds conversation package export/import. A single Codex thread can be packaged as `.codexshare` with its rollout context, thread state, and required metadata, then imported into one profile or all profiles. Imports back up local SQLite/index/global state first and mark the imported thread as the latest conversation. This release also adds 8 new themes, switches the theme picker to a 4-column grid, and removes the Mobile Remote Bridge feature plus its bundled resources so the app no longer exposes an unused remote-control entry point.
 
 ### V2.4.3 Update
 
@@ -362,7 +348,7 @@ V2.3.1 fixes three live-use issues. When the direct ChatGPT usage endpoint is te
 
 ### V2.3.0 Update
 
-V2.3.0 fixes an intermittent freeze that could appear after the app had been running for a while. External Codex scripts and system helpers no longer use a waiting path that can leak stuck worker threads, and Codex background work is now serialized. Auto refresh and auto sync alternate instead of competing for profile files at the same time. Keep Awake and Mobile Bridge status checks also use in-flight guards and throttling so background processes cannot pile up over time.
+V2.3.0 fixes an intermittent freeze that could appear after the app had been running for a while. External Codex scripts and system helpers no longer use a waiting path that can leak stuck worker threads, and Codex background work is now serialized. Auto refresh and auto sync alternate instead of competing for profile files at the same time. Keep Awake status checks also use in-flight guards and throttling so background processes cannot pile up over time.
 
 ### v2 Highlights
 
@@ -375,8 +361,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 - Optional memory and plugin sync for `AGENTS.md`, `memories/`, `rules/`, `plugins/`, `skills/`, and `vendor_imports/`, including enabled plugin entries across accounts.
 - Keep Awake: uses `caffeinate` to stop macOS from sleeping, follows the real system process state, monitors lid state, dims the built-in display when the lid closes, and restores brightness when opened or turned off.
 - Keyboard Clean Mode: blocks most keyboard input while keeping mouse/trackpad control available so the mode can be turned off safely.
-- Mobile Remote Bridge: create a mobile login in the Mac app, then use the Android app with the same username/password to control profiles, sync, open/close windows, and send prompts.
-- Remote security options: the bridge requires signed-in bearer sessions and can sit behind Tailscale or Cloudflare Tunnel + Access service tokens.
+- Conversation package export/import: package a single thread as `.codexshare` and import it into one profile or all profiles for trusted team handoff.
 - Update channel: checks GitHub releases, validates the downloaded app version and bundle id, then replaces `/Applications/Codex Accounts.app`.
 - Liquid Glass interface: multiple themes, hover glow, profile card animation, Traditional Chinese HK/TW, Simplified Chinese, and English UI.
 - Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
@@ -386,7 +371,6 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 - It does not copy OpenAI auth tokens, cookies, or account sessions between profiles.
 - It does not sync OpenAI cloud chat history or ChatGPT server-side memory.
 - It does not send account credentials to third parties.
-- Mobile remote users stay local in `~/Library/Application Support/Codex Accounts/remote-users.json`, and passwords are stored as PBKDF2 hashes.
 - Usage checks use the profile's local token only against the official Codex / ChatGPT usage endpoint.
 - This is an unofficial helper app and is not affiliated with OpenAI.
 
@@ -398,7 +382,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.4.3, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.5.0, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 
@@ -421,17 +405,6 @@ Output:
 dist/Codex-Accounts-macOS.zip
 ```
 
-Build the Android remote-control APK:
-
-```zsh
-android/build_apk.zsh
-```
-
-Output:
-
-```text
-android/dist/CodexRemote-debug.apk
-```
 
 ### Local Data
 

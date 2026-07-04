@@ -40,7 +40,6 @@ Main features:
 - Optional local history sharing
 - Optional local memory sync for AGENTS.md, memories/, and rules/
 - Keep Awake toggle that follows the real caffeinate state
-- Mobile Remote Bridge with Mac-created username/password login and an Android control app
 - Optional Tailscale or Cloudflare Tunnel + Access service token setup for remote use
 - Liquid Glass UI with multiple themes, hover glow, and Chinese / English UI
 
@@ -75,12 +74,10 @@ Codex Accounts 會為每個 profile 建立獨立嘅 CODEX_HOME 同 Electron user
 - 可選擇共享本機 Codex 對話紀錄
 - 可選擇同步 AGENTS.md、memories/、rules/
 - 防睡眠開關會跟返真實 caffeinate 狀態
-- 手機遠端 Bridge：喺 Mac 建立 username/password，Android app 登入後可以控制 profile、同步同傳送 prompt
 - 遠端可以配合 Tailscale 或 Cloudflare Tunnel + Access service token
 - Liquid Glass UI、多主題、hover 發光、中文/英文介面
 
 注意：佢唔會複製 cookies、auth token、OpenAI 雲端對話或 ChatGPT server-side memory。只係本機 profile 管理工具。
-手機遠端帳號留喺 Mac 本機，密碼會用 PBKDF2 hash 儲存。
 
 GitHub:
 https://github.com/siumiu1968/codex-accounts
@@ -106,7 +103,6 @@ Show HN: Codex Accounts, a macOS helper for multiple Codex/OpenAI accounts
 I use multiple OpenAI accounts with the Codex desktop app and got tired of logging in and out. This helper creates separate local profiles, each with its own CODEX_HOME and Electron user-data-dir, then launches the official Codex app against that profile.
 
 It includes profile creation, open/close, rename, archive, local history sharing, local memory sync, quota meters, multi-theme Liquid Glass UI, and a Keep Awake toggle for long-running Codex sessions.
-The v2 remote bridge also lets an Android app log in with a Mac-created username/password and control profiles remotely. For internet access, put the bridge behind Tailscale or Cloudflare Tunnel + Access.
 
 It does not copy cookies or auth tokens and it does not sync cloud conversations. It is only local profile management.
 
