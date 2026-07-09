@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.5.2 更新介紹
+
+V2.5.2 修正語言切換卡片過闊，撞到左側欄邊緣同 scroll indicator 嘅問題。今版亦加強書面繁體同簡體本地化轉換，避免「邊個」、「搵唔到」、「剔選」、「入面」、「掣」等廣東話詞語殘留喺非廣東話介面。
+
 ### V2.5.1 更新介紹
 
 V2.5.1 將語言切換拆成香港廣東話、書面繁體中文、簡體中文、英文和日本語，修正廣東話介面被簡體字或書面中文規則污染嘅問題。今版亦優化對話包匯出選擇器，可以勾選多條指定對話先匯出；同時改善 quota cache、登入失效 marker 同 stale local thread catalog 清理，減少用量顯示異常同側邊欄出現無法恢復對話嘅情況。
@@ -110,7 +114,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.5.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.5.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -163,6 +167,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.5.2 更新介绍
+
+V2.5.2 修正语言切换卡片过宽，撞到左侧栏边缘和 scroll indicator 的问题。本版也加强书面繁体和简体本地化转换，避免“边个”、“找不到”、“勾选”、“里面”、“按钮”等粤语或转换不完整词语残留在非粤语界面。
 
 ### V2.5.1 更新介绍
 
@@ -252,7 +260,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.5.1 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.5.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -305,6 +313,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.5.2 Update
+
+V2.5.2 narrows the language switcher so it no longer collides with the left sidebar edge or scroll indicator. It also improves written Traditional Chinese and Simplified Chinese localization so Cantonese phrases such as "which one", "not found", "tick", "inside", and "button" do not leak into non-Cantonese UI modes.
 
 ### V2.5.1 Update
 
@@ -394,7 +406,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.5.1, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.5.2, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

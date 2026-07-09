@@ -409,11 +409,34 @@ private enum AppTextLocalizer {
             ("共享", "共享"),
             ("立即", "立即"),
             ("防睡眠", "防止睡眠"),
+            ("選擇要開邊個 Codex 登入視窗。", "選擇要開啟的 Codex 登入視窗。"),
             ("喺呢部 Mac", "在這台 Mac"),
             ("喺 Finder 顯示", "在 Finder 顯示"),
             ("喺長任務期間", "在長任務期間"),
+            ("邊個", "哪個"),
+            ("邊度", "哪裡"),
+            ("邊啲", "哪些"),
+            ("搵唔到", "找不到"),
+            ("搵", "找"),
+            ("無剔選", "未勾選"),
+            ("剔選", "勾選"),
+            ("無勾選", "未勾選"),
+            ("先可以", "才可以"),
+            ("撳返呢粒掣", "按此按鈕"),
+            ("呢粒掣", "此按鈕"),
+            ("掣", "按鈕"),
+            ("傳俾", "傳給"),
+            ("另一部機", "另一台電腦"),
+            ("條可導出對話", "則可匯出的對話"),
+            ("條新對話", "則新對話"),
+            ("一條對話", "一則對話"),
+            ("條對話", "則對話"),
+            ("包入面", "包裡面"),
+            ("入面", "裡面"),
+            ("普通打開", "一般開啟"),
             ("而家", "現在"),
             ("咁樣", "這樣"),
+            ("咁", "這樣"),
             ("撳", "按"),
             ("唔", "不"),
             ("咗", "了"),
@@ -3173,7 +3196,7 @@ struct AccountsRootView: View {
 
     private var languageSwitcher: some View {
         let current = selectedLanguage
-        let menuWidth = scaled(146)
+        let menuWidth = scaled(118)
         let expandedHeight = scaled(54 + CGFloat(AppLanguage.allCases.count) * 45)
 
         return ZStack(alignment: .topLeading) {
@@ -3252,7 +3275,7 @@ struct AccountsRootView: View {
             }
         }
         .padding(scaled(6))
-        .frame(width: scaled(146), alignment: .topLeading)
+        .frame(width: scaled(118), alignment: .topLeading)
         .background(.ultraThinMaterial)
         .background(
             LinearGradient(
@@ -3300,7 +3323,7 @@ struct AccountsRootView: View {
                     .foregroundStyle(selected ? item.accent : .white.opacity(0.26))
             }
             .padding(.horizontal, scaled(8))
-            .frame(width: scaled(134), height: scaled(40), alignment: .leading)
+            .frame(width: scaled(106), height: scaled(40), alignment: .leading)
             .background(
                 ZStack {
                     if selected {
