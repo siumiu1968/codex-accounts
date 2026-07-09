@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.5.1 更新介紹
+
+V2.5.1 將語言切換拆成香港廣東話、書面繁體中文、簡體中文、英文和日本語，修正廣東話介面被簡體字或書面中文規則污染嘅問題。今版亦優化對話包匯出選擇器，可以勾選多條指定對話先匯出；同時改善 quota cache、登入失效 marker 同 stale local thread catalog 清理，減少用量顯示異常同側邊欄出現無法恢復對話嘅情況。
+
 ### V2.5.0 更新介紹
 
 V2.5.0 新增對話包匯出/導入功能，可以將單一 Codex 對話連同 rollout 記憶、thread state 同必要 metadata 打包成 `.codexshare`，再導入到單一或全部 profile；匯入前會備份本機 SQLite/index/global state，並把導入對話標記成最新。今版亦新增 8 個主題、改用 4 欄主題選擇器，並移除手機遠端 Bridge 功能同相關 bundle resource，避免 app 內再暴露不需要嘅遠端控制入口。
@@ -87,7 +91,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 - 電腦清潔模式：暫停大部分鍵盤輸入，方便清潔鍵盤，保留滑鼠/觸控板操作去關閉模式。
 - 對話包匯出/導入：可把單一對話打包成 `.codexshare`，匯入到單一或全部 profile，方便可信團隊交接上下文。
 - 更新通道：檢查 GitHub release，驗證下載檔版本同 bundle id，然後自動替換 `/Applications/Codex Accounts.app`。
-- Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、繁中香港 / 繁中台灣 / 簡中 / 英文介面。
+- Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、廣東話 / 繁體中文 / 簡體中文 / 英文 / 日本語介面。
 - 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
 
 ### 不會做的事
@@ -106,7 +110,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.5.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.5.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -159,6 +163,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.5.1 更新介绍
+
+V2.5.1 将语言切换拆成香港粤语、书面繁体中文、简体中文、英文和日文，修正粤语界面被简体字或书面中文规则污染的问题。本版也优化对话包导出选择器，可以勾选多条指定对话后再导出；同时改善 quota cache、登录失效 marker 和 stale local thread catalog 清理，减少用量显示异常和侧边栏出现无法恢复对话的情况。
 
 ### V2.5.0 更新介绍
 
@@ -225,7 +233,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 - 电脑清洁模式：暂停大部分键盘输入，方便清洁键盘，保留鼠标/触控板操作去关闭模式。
 - 对话包导出/导入：可把单一对话打包成 `.codexshare`，导入到单一或全部 profile，方便可信团队交接上下文。
 - 更新通道：检查 GitHub release，验证下载文件版本和 bundle id，然后自动替换 `/Applications/Codex Accounts.app`。
-- Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、繁中香港 / 繁中台湾 / 简中 / 英文界面。
+- Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、香港粤语 / 繁体中文 / 简体中文 / 英文 / 日文界面。
 - 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
 
 ### 它不会做什么
@@ -244,7 +252,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.5.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.5.1 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -297,6 +305,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.5.1 Update
+
+V2.5.1 separates the language switcher into Cantonese Hong Kong, written Traditional Chinese, Simplified Chinese, English, and Japanese, fixing cases where the Cantonese UI could be polluted by Simplified Chinese or formal written-Chinese conversions. It also improves conversation package export so users can tick multiple specific conversations before exporting, and hardens quota cache, auth-invalid markers, and stale local thread catalog cleanup to reduce broken usage cards and unrecoverable sidebar conversations.
 
 ### V2.5.0 Update
 
@@ -363,7 +375,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 - Keyboard Clean Mode: blocks most keyboard input while keeping mouse/trackpad control available so the mode can be turned off safely.
 - Conversation package export/import: package a single thread as `.codexshare` and import it into one profile or all profiles for trusted team handoff.
 - Update channel: checks GitHub releases, validates the downloaded app version and bundle id, then replaces `/Applications/Codex Accounts.app`.
-- Liquid Glass interface: multiple themes, hover glow, profile card animation, Traditional Chinese HK/TW, Simplified Chinese, and English UI.
+- Liquid Glass interface: multiple themes, hover glow, profile card animation, Cantonese Hong Kong, Traditional Chinese, Simplified Chinese, English, and Japanese UI.
 - Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
 
 ### What It Does Not Do
@@ -382,7 +394,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.5.0, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.5.1, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

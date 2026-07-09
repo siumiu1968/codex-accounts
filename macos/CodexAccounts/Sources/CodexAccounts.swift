@@ -93,6 +93,116 @@ private struct ExportableThread: Identifiable {
     let sizeBytes: Int64
 }
 
+private final class FlippedAccessoryView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class ExportThreadTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    let threads: [ExportableThread]
+    private var selectedIDs: Set<String>
+
+    init(threads: [ExportableThread]) {
+        self.threads = threads
+        self.selectedIDs = Set(threads.first.map { [$0.id] } ?? [])
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        threads.count
+    }
+
+    func selectedThreads() -> [ExportableThread] {
+        threads.filter { selectedIDs.contains($0.id) }
+    }
+
+    func isSelected(_ thread: ExportableThread) -> Bool {
+        selectedIDs.contains(thread.id)
+    }
+
+    @objc func toggleSelection(_ sender: NSButton) {
+        guard sender.tag >= 0, sender.tag < threads.count else { return }
+        let thread = threads[sender.tag]
+        if sender.state == .on {
+            selectedIDs.insert(thread.id)
+        } else {
+            selectedIDs.remove(thread.id)
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row >= 0, row < threads.count, let tableColumn else { return nil }
+        let thread = threads[row]
+        if tableColumn.identifier.rawValue == "selected" {
+            let identifier = NSUserInterfaceItemIdentifier("ExportThreadCell-selected")
+            let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView) ?? {
+                let newCell = NSTableCellView()
+                newCell.identifier = identifier
+                let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSelection(_:)))
+                checkbox.translatesAutoresizingMaskIntoConstraints = false
+                newCell.addSubview(checkbox)
+                NSLayoutConstraint.activate([
+                    checkbox.centerXAnchor.constraint(equalTo: newCell.centerXAnchor),
+                    checkbox.centerYAnchor.constraint(equalTo: newCell.centerYAnchor)
+                ])
+                return newCell
+            }()
+            if let checkbox = cell.subviews.compactMap({ $0 as? NSButton }).first {
+                checkbox.target = self
+                checkbox.action = #selector(toggleSelection(_:))
+                checkbox.tag = row
+                checkbox.state = selectedIDs.contains(thread.id) ? .on : .off
+            }
+            cell.toolTip = thread.title
+            return cell
+        }
+
+        let identifier = NSUserInterfaceItemIdentifier("ExportThreadCell-\(tableColumn.identifier.rawValue)")
+        let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView) ?? {
+            let newCell = NSTableCellView()
+            newCell.identifier = identifier
+            let field = NSTextField(labelWithString: "")
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.font = NSFont.systemFont(ofSize: 12)
+            field.lineBreakMode = .byTruncatingTail
+            field.maximumNumberOfLines = 1
+            newCell.addSubview(field)
+            newCell.textField = field
+            NSLayoutConstraint.activate([
+                field.leadingAnchor.constraint(equalTo: newCell.leadingAnchor, constant: 6),
+                field.trailingAnchor.constraint(equalTo: newCell.trailingAnchor, constant: -6),
+                field.centerYAnchor.constraint(equalTo: newCell.centerYAnchor)
+            ])
+            return newCell
+        }()
+
+        let value: String
+        switch tableColumn.identifier.rawValue {
+        case "updated":
+            value = formattedExportThreadDate(thread.updatedAt)
+            cell.textField?.alignment = .left
+            cell.textField?.textColor = .secondaryLabelColor
+            cell.textField?.lineBreakMode = .byTruncatingTail
+        case "size":
+            value = humanFileSize(thread.sizeBytes)
+            cell.textField?.alignment = .right
+            cell.textField?.textColor = .secondaryLabelColor
+            cell.textField?.lineBreakMode = .byTruncatingTail
+        case "cwd":
+            value = thread.cwd
+            cell.textField?.alignment = .left
+            cell.textField?.textColor = .tertiaryLabelColor
+            cell.textField?.lineBreakMode = .byTruncatingMiddle
+        default:
+            value = thread.title.isEmpty ? "Untitled" : thread.title
+            cell.textField?.alignment = .left
+            cell.textField?.textColor = .labelColor
+            cell.textField?.lineBreakMode = .byTruncatingTail
+        }
+        cell.textField?.stringValue = value
+        cell.toolTip = "\(thread.title)\n\(formattedExportThreadDate(thread.updatedAt))\n\(thread.cwd)"
+        return cell
+    }
+}
+
 private struct QuotaWindow: Identifiable {
     let id: String
     let labelZH: String
@@ -146,22 +256,25 @@ private final class CallbackMenuItem: NSMenuItem {
 
 private enum AppLanguage: String, CaseIterable, Identifiable {
     case zhHK = "zh-HK"
+    case zhHant = "zh-Hant"
     case zhCN = "zh-CN"
-    case zhTW = "zh-TW"
     case en = "en"
+    case ja = "ja"
 
     var id: String { rawValue }
 
     static func normalized(_ rawValue: String?) -> AppLanguage {
         switch rawValue {
-        case "zh", "zh-HK", "zh-Hant-HK":
+        case "zh", "yue", "yue-HK", "zh-HK", "zh-Hant-HK":
             return .zhHK
+        case "zh-Hant", "zh-TW", "zh-Hant-TW":
+            return .zhHant
         case "zh-CN", "zh-Hans", "zh-Hans-CN":
             return .zhCN
-        case "zh-TW", "zh-Hant-TW":
-            return .zhTW
         case "en", "en-US":
             return .en
+        case "ja", "ja-JP":
+            return .ja
         default:
             return .zhHK
         }
@@ -170,54 +283,60 @@ private enum AppLanguage: String, CaseIterable, Identifiable {
     var flag: String {
         switch self {
         case .zhHK: return "🇭🇰"
+        case .zhHant: return "繁"
         case .zhCN: return "🇨🇳"
-        case .zhTW: return "🇹🇼"
         case .en: return "🇺🇸"
+        case .ja: return "🇯🇵"
         }
     }
 
     var shortTitle: String {
         switch self {
-        case .zhHK: return "繁中 HK"
-        case .zhCN: return "简中"
-        case .zhTW: return "繁中 TW"
+        case .zhHK: return "廣東話"
+        case .zhHant: return "繁體"
+        case .zhCN: return "简体"
         case .en: return "English"
+        case .ja: return "日本語"
         }
     }
 
     var displayTitle: String {
         switch self {
-        case .zhHK: return "繁體中文・香港"
+        case .zhHK: return "廣東話・香港"
+        case .zhHant: return "繁體中文"
         case .zhCN: return "简体中文"
-        case .zhTW: return "繁體中文・台灣"
         case .en: return "English"
+        case .ja: return "日本語"
         }
     }
 
     var subtitle: String {
         switch self {
-        case .zhHK: return "香港用語"
+        case .zhHK: return "香港粵語"
+        case .zhHant: return "書面繁中"
         case .zhCN: return "简体界面"
-        case .zhTW: return "台灣用語"
         case .en: return "US English"
+        case .ja: return "日本語 UI"
         }
     }
 
     var localeIdentifier: String {
         switch self {
         case .zhHK: return "zh_Hant_HK"
+        case .zhHant: return "zh_Hant"
         case .zhCN: return "zh_Hans_CN"
-        case .zhTW: return "zh_Hant_TW"
         case .en: return "en_US_POSIX"
+        case .ja: return "ja_JP"
         }
     }
 
     var accent: Color {
         switch self {
         case .zhHK: return Color(red: 0.10, green: 0.56, blue: 1.00)
+        case .zhHant: return Color(red: 0.10, green: 0.86, blue: 0.66)
         case .zhCN: return Color(red: 1.00, green: 0.34, blue: 0.28)
-        case .zhTW: return Color(red: 0.10, green: 0.86, blue: 0.66)
         case .en: return Color(red: 0.58, green: 0.42, blue: 1.00)
+        case .ja: return Color(red: 1.00, green: 0.45, blue: 0.68)
         }
     }
 }
@@ -232,19 +351,54 @@ private enum AppTextLocalizer {
         case .en:
             return en
         case .zhHK:
-            return zhHK
-        case .zhTW:
-            return taiwanTraditional(zhHK)
+            return cantoneseHongKong(zhHK)
+        case .zhHant:
+            return writtenTraditional(zhHK)
         case .zhCN:
-            return simplifiedChinese(taiwanTraditional(zhHK))
+            return simplifiedChinese(writtenTraditional(zhHK))
+        case .ja:
+            return japanese(zhHK, en)
         }
     }
 
-    private static func taiwanTraditional(_ text: String) -> String {
-        var output = text
-        let replacements: [(String, String)] = [
-            ("Codex 帳戶", "Codex 帳號"),
-            ("帳戶", "帳號"),
+    private static func cantoneseHongKong(_ text: String) -> String {
+        applyingReplacements([
+            ("简体中文", "簡體中文"),
+            ("简体", "簡體"),
+            ("账号", "帳戶"),
+            ("账户", "帳戶"),
+            ("登录", "登入"),
+            ("退出登录", "登出"),
+            ("窗口", "視窗"),
+            ("文件夹", "資料夾"),
+            ("本机", "本機"),
+            ("记录", "紀錄"),
+            ("记忆", "記憶"),
+            ("对话", "對話"),
+            ("开启", "開啟"),
+            ("关闭", "關閉"),
+            ("刷新", "重新整理"),
+            ("共享", "共享"),
+            ("等待恢复", "等待恢復"),
+            ("添加", "新增"),
+            ("创建", "建立"),
+            ("选择", "選擇"),
+            ("显示", "顯示"),
+            ("删除", "刪除"),
+            ("切换", "切換"),
+            ("清洁模式", "清潔模式"),
+            ("键盘", "鍵盤"),
+            ("锁", "鎖"),
+            ("无法", "無法"),
+            ("错误", "錯誤"),
+            ("需要登录", "要登入"),
+            ("未登录", "未登入"),
+            ("已登录", "已登入")
+        ], to: text)
+    }
+
+    private static func writtenTraditional(_ text: String) -> String {
+        var output = applyingReplacements([
             ("登入", "登入"),
             ("本機", "本機"),
             ("紀錄", "記錄"),
@@ -252,12 +406,14 @@ private enum AppTextLocalizer {
             ("資料夾", "資料夾"),
             ("用量", "用量"),
             ("重設", "重置"),
-            ("共享", "共用"),
+            ("共享", "共享"),
             ("立即", "立即"),
             ("防睡眠", "防止睡眠"),
             ("喺呢部 Mac", "在這台 Mac"),
             ("喺 Finder 顯示", "在 Finder 顯示"),
             ("喺長任務期間", "在長任務期間"),
+            ("而家", "現在"),
+            ("咁樣", "這樣"),
             ("撳", "按"),
             ("唔", "不"),
             ("咗", "了"),
@@ -273,15 +429,105 @@ private enum AppTextLocalizer {
             ("打開", "開啟"),
             ("刪除 Profile", "刪除 Profile"),
             ("好", "好")
-        ]
-        for replacement in replacements {
-            output = output.replacingOccurrences(of: replacement.0, with: replacement.1)
-        }
+        ], to: text)
         if output == "已開" { return "已開啟" }
         if output == "已關" { return "已關閉" }
         output = output
             .replacingOccurrences(of: "已開啟啟", with: "已開啟")
             .replacingOccurrences(of: "已關閉閉", with: "已關閉")
+        return output
+    }
+
+    private static func japanese(_ zhHK: String, _ en: String) -> String {
+        let exact: [String: String] = [
+            "帳戶": "アカウント",
+            "選擇要開邊個 Codex 登入視窗。": "開く Codex ログイン画面を選択します。",
+            "登入狀態只會手動更新。": "ログイン状態は手動で更新されます。",
+            "語言": "言語",
+            "主題": "テーマ",
+            "外觀": "外観",
+            "更新": "更新",
+            "已登入": "ログイン済み",
+            "未登入": "未ログイン",
+            "等待恢復": "回復待ち",
+            "API": "API",
+            "用量": "使用量",
+            "今日使用": "今日の使用量",
+            "自動化": "自動化",
+            "功能說明": "機能説明",
+            "每分鐘重新整理": "毎分更新",
+            "每分鐘同步對話記憶": "毎分会話メモリを同期",
+            "立即同步": "今すぐ同期",
+            "共享全部": "すべて共有",
+            "系統工具": "システムツール",
+            "防睡眠": "スリープ防止",
+            "電腦清潔": "キーボード清掃",
+            "清理大對話": "大きい会話を整理",
+            "已關": "オフ",
+            "已開": "オン",
+            "打開": "開く",
+            "取消": "キャンセル",
+            "繼續": "続行",
+            "好": "OK",
+            "選擇儲存位置": "保存先を選択",
+            "導出對話包": "会話パッケージを書き出す",
+            "導入對話包": "会話パッケージを読み込む",
+            "包含已引用嘅生成圖片": "参照済みの生成画像を含める",
+            "包含工作區入面被引用嘅檔案": "ワークスペース内の参照ファイルを含める",
+            "語言已切換：": "言語を切り替えました：",
+            "重設券": "リセット券",
+            "張可用": "枚利用可能",
+            "最早": "最短",
+            "剩": "残り",
+            "日": "日"
+        ]
+        if let translated = exact[zhHK] {
+            return translated
+        }
+
+        var output = en
+        let phraseReplacements: [(String, String)] = [
+            ("Codex Accounts", "Codex アカウント"),
+            ("Codex Account", "Codex アカウント"),
+            ("Language", "言語"),
+            ("Account", "アカウント"),
+            ("Accounts", "アカウント"),
+            ("Logged in", "ログイン済み"),
+            ("Not logged in", "未ログイン"),
+            ("Waiting", "待機中"),
+            ("Recovery", "回復"),
+            ("Usage", "使用量"),
+            ("Today", "今日"),
+            ("Open", "開く"),
+            ("Cancel", "キャンセル"),
+            ("Continue", "続行"),
+            ("Choose", "選択"),
+            ("Folder", "フォルダ"),
+            ("Refresh", "更新"),
+            ("Sync", "同期"),
+            ("Share", "共有"),
+            ("Update", "更新"),
+            ("Theme", "テーマ"),
+            ("Settings", "設定"),
+            ("Clean Mode", "清掃モード"),
+            ("Keep Awake", "スリープ防止"),
+            ("Reset", "リセット"),
+            ("Available", "利用可能"),
+            ("Remaining", "残り"),
+            ("Error", "エラー"),
+            ("Failed", "失敗"),
+            ("Disabled", "無効"),
+            ("Enabled", "有効")
+        ]
+        output = applyingReplacements(phraseReplacements, to: output)
+        return output
+    }
+
+    private static func applyingReplacements(_ replacements: [(String, String)], to text: String) -> String {
+        var output = text
+        for replacement in replacements {
+            output = output.replacingOccurrences(of: replacement.0, with: replacement.1)
+        }
         return output
     }
 
@@ -825,7 +1071,22 @@ private func parsedExportableThreads(_ output: String) -> [ExportableThread] {
     }
 }
 
-private func safePackageFileName(title: String, threadID: String) -> String {
+private func formattedExportThreadDate(_ raw: String) -> String {
+    guard !raw.isEmpty else { return "未知時間" }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let fallback = ISO8601DateFormatter()
+    fallback.formatOptions = [.withInternetDateTime]
+    guard let date = formatter.date(from: raw) ?? fallback.date(from: raw) else {
+        return raw
+    }
+    let output = DateFormatter()
+    output.locale = Locale(identifier: "zh_Hant_HK")
+    output.dateFormat = "M月d日 HH:mm"
+    return output.string(from: date)
+}
+
+private func safePackageFileStem(title: String, threadID: String) -> String {
     let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._- "))
     let cleaned = title.unicodeScalars.map { scalar -> Character in
         allowed.contains(scalar) ? Character(scalar) : "-"
@@ -833,7 +1094,23 @@ private func safePackageFileName(title: String, threadID: String) -> String {
     let compact = String(cleaned).split(separator: " ").joined(separator: " ")
     let prefix = String(compact.prefix(60)).trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
     let base = prefix.isEmpty ? "codex-conversation" : prefix
-    return "\(base)-\(threadID.prefix(8)).codexshare"
+    return "\(base)-\(threadID.prefix(8))"
+}
+
+private func safePackageFileName(title: String, threadID: String) -> String {
+    "\(safePackageFileStem(title: title, threadID: threadID)).codexshare"
+}
+
+private func uniquePackageFileURL(directory: URL, thread: ExportableThread, usedNames: inout Set<String>) -> URL {
+    let stem = safePackageFileStem(title: thread.title, threadID: thread.id)
+    var candidate = "\(stem).codexshare"
+    var suffix = 2
+    while usedNames.contains(candidate) || FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate).path) {
+        candidate = "\(stem)-\(suffix).codexshare"
+        suffix += 1
+    }
+    usedNames.insert(candidate)
+    return directory.appendingPathComponent(candidate)
 }
 
 private func humanFileSize(_ bytes: Int64) -> String {
@@ -901,6 +1178,19 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTok
     }
     guard let cachedUsage = cachedUsage(for: profile.id) else {
         return profile
+    }
+    if cachedUsage.quota == "__auth_invalid__" {
+        return CodexProfile(
+            id: externalProfile.id,
+            displayName: externalProfile.displayName,
+            home: externalProfile.home,
+            authStatus: "auth_invalid",
+            authMode: externalProfile.authMode == "unknown" ? "chatgpt" : externalProfile.authMode,
+            lastRefresh: externalProfile.lastRefresh,
+            quota: "unknown",
+            reset: "unknown",
+            resetCredits: "unknown"
+        )
     }
 
     let reset = profile.reset.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2883,6 +3173,8 @@ struct AccountsRootView: View {
 
     private var languageSwitcher: some View {
         let current = selectedLanguage
+        let menuWidth = scaled(146)
+        let expandedHeight = scaled(54 + CGFloat(AppLanguage.allCases.count) * 45)
 
         return ZStack(alignment: .topLeading) {
             Button {
@@ -2914,7 +3206,7 @@ struct AccountsRootView: View {
                         .foregroundStyle(.white.opacity(0.72))
                 }
                 .padding(.horizontal, scaled(10))
-                .frame(width: scaled(122), height: scaled(42), alignment: .leading)
+                .frame(width: menuWidth, height: scaled(42), alignment: .leading)
                 .background(.ultraThinMaterial)
                 .background(
                     LinearGradient(
@@ -2948,7 +3240,7 @@ struct AccountsRootView: View {
                     .zIndex(3)
             }
         }
-        .frame(width: scaled(122), height: showLanguageMenu ? scaled(246) : scaled(42), alignment: .topLeading)
+        .frame(width: menuWidth, height: showLanguageMenu ? expandedHeight : scaled(42), alignment: .topLeading)
         .animation(.spring(response: 0.30, dampingFraction: 0.78), value: showLanguageMenu)
         .zIndex(showLanguageMenu ? 10 : 1)
     }
@@ -2960,7 +3252,7 @@ struct AccountsRootView: View {
             }
         }
         .padding(scaled(6))
-        .frame(width: scaled(122), alignment: .topLeading)
+        .frame(width: scaled(146), alignment: .topLeading)
         .background(.ultraThinMaterial)
         .background(
             LinearGradient(
@@ -3008,7 +3300,7 @@ struct AccountsRootView: View {
                     .foregroundStyle(selected ? item.accent : .white.opacity(0.26))
             }
             .padding(.horizontal, scaled(8))
-            .frame(width: scaled(110), height: scaled(40), alignment: .leading)
+            .frame(width: scaled(134), height: scaled(40), alignment: .leading)
             .background(
                 ZStack {
                     if selected {
@@ -4992,13 +5284,27 @@ struct AccountsRootView: View {
 
     private func cachedResetHasElapsed(_ reset: String) -> Bool {
         guard !reset.isEmpty, reset != "unknown", reset != "none" else { return false }
-        return reset.components(separatedBy: " / ").contains { part in
+        var sawReset = false
+        var sawElapsed = false
+        var sawCurrentOrUnknown = false
+
+        for part in reset.components(separatedBy: " / ") {
             let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let separator = trimmed.firstIndex(of: " ") else { return false }
+            guard let separator = trimmed.firstIndex(of: " ") else { continue }
+            sawReset = true
             let value = String(trimmed[trimmed.index(after: separator)...])
-            guard let date = staleResetDate(from: value) else { return false }
-            return date <= Date().addingTimeInterval(-20)
+            guard let date = staleResetDate(from: value) else {
+                sawCurrentOrUnknown = true
+                continue
+            }
+            if date <= Date().addingTimeInterval(-20) {
+                sawElapsed = true
+            } else {
+                sawCurrentOrUnknown = true
+            }
         }
+
+        return sawReset && sawElapsed && !sawCurrentOrUnknown
     }
 
     private func staleResetDate(from text: String) -> Date? {
@@ -6266,22 +6572,76 @@ struct AccountsRootView: View {
     }
 
     private func presentExportThreadPicker(profile: CodexProfile, threads: [ExportableThread]) {
-        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 520, height: 28), pullsDown: false)
-        for thread in threads {
-            let dateText = thread.updatedAt.isEmpty ? tr("未知時間", "unknown time") : thread.updatedAt
-            picker.addItem(withTitle: "\(thread.title)  ·  \(dateText)  ·  \(humanFileSize(thread.sizeBytes))")
+        let tableController = ExportThreadTableController(threads: threads)
+        let summary = NSTextField(wrappingLabelWithString: tr(
+            "已自動偵測到 \(threads.count) 條可導出對話。請剔選要傳送嘅對話；無剔選嘅對話唔會放入導出檔。",
+            "Detected \(threads.count) exportable conversations. Tick only the conversations you want to send; unchecked conversations are not exported."
+        ))
+        summary.frame = NSRect(x: 0, y: 0, width: 700, height: 38)
+        summary.font = NSFont.systemFont(ofSize: 12)
+        summary.textColor = .secondaryLabelColor
+        summary.maximumNumberOfLines = 3
+
+        let rowHeight: CGFloat = 44
+        let listWidth: CGFloat = 700
+        let contentHeight = max(CGFloat(threads.count) * rowHeight, 300)
+        let listContent = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: listWidth, height: contentHeight))
+        listContent.wantsLayer = true
+        listContent.layer?.backgroundColor = NSColor.clear.cgColor
+
+        for (index, thread) in threads.enumerated() {
+            let y = CGFloat(index) * rowHeight
+            let rowView = FlippedAccessoryView(frame: NSRect(x: 0, y: y, width: listWidth, height: rowHeight))
+            rowView.wantsLayer = true
+            rowView.layer?.backgroundColor = (index.isMultiple(of: 2) ? NSColor.controlBackgroundColor.withAlphaComponent(0.18) : NSColor.clear).cgColor
+
+            let checkbox = NSButton(checkboxWithTitle: "", target: tableController, action: #selector(ExportThreadTableController.toggleSelection(_:)))
+            checkbox.frame = NSRect(x: 8, y: 11, width: 22, height: 22)
+            checkbox.tag = index
+            checkbox.state = tableController.isSelected(thread) ? .on : .off
+            rowView.addSubview(checkbox)
+
+            let titleField = NSTextField(labelWithString: thread.title.isEmpty ? tr("未命名對話", "Untitled Conversation") : thread.title)
+            titleField.frame = NSRect(x: 38, y: 5, width: 634, height: 18)
+            titleField.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+            titleField.textColor = .labelColor
+            titleField.lineBreakMode = .byTruncatingTail
+            titleField.maximumNumberOfLines = 1
+            titleField.toolTip = thread.title
+            rowView.addSubview(titleField)
+
+            let meta = "\(formattedExportThreadDate(thread.updatedAt))  ·  \(humanFileSize(thread.sizeBytes))  ·  \(thread.cwd)"
+            let metaField = NSTextField(labelWithString: meta)
+            metaField.frame = NSRect(x: 38, y: 24, width: 634, height: 15)
+            metaField.font = NSFont.systemFont(ofSize: 10)
+            metaField.textColor = .secondaryLabelColor
+            metaField.lineBreakMode = .byTruncatingMiddle
+            metaField.maximumNumberOfLines = 1
+            metaField.toolTip = meta
+            rowView.addSubview(metaField)
+
+            listContent.addSubview(rowView)
         }
-        picker.selectItem(at: 0)
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 46, width: listWidth, height: 300))
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.documentView = listContent
 
         let generatedImages = NSButton(checkboxWithTitle: tr("包含已引用嘅生成圖片", "Include referenced generated images"), target: nil, action: nil)
+        generatedImages.frame = NSRect(x: 0, y: 420, width: 460, height: 24)
         generatedImages.state = .off
         let localAssets = NSButton(checkboxWithTitle: tr("包含工作區入面被引用嘅檔案", "Include referenced workspace files"), target: nil, action: nil)
+        localAssets.frame = NSRect(x: 0, y: 445, width: 460, height: 24)
         localAssets.state = .off
 
         let warning = NSTextField(wrappingLabelWithString: tr(
             "對話包會包含完整對話、工具輸出同壓縮記憶，可能有路徑、主機名、命令輸出甚至 secret。預設唔會包含 auth、cookies、Codex config 或整個工作區。",
             "The package includes the full conversation, tool outputs, and compacted context. It may contain paths, hostnames, command output, or secrets. Auth, cookies, Codex config, and full workspace snapshots are not included by default."
         ))
+        warning.frame = NSRect(x: 0, y: 356, width: 700, height: 54)
         warning.font = NSFont.systemFont(ofSize: 12)
         warning.textColor = .secondaryLabelColor
         warning.maximumNumberOfLines = 4
@@ -6290,50 +6650,93 @@ struct AccountsRootView: View {
             "勾選檔案選項後，對方可以打開包入面嘅附件；只應分享俾可信隊友。",
             "If file options are enabled, the receiver can open the packaged attachments. Share only with trusted teammates."
         ))
+        fileWarning.frame = NSRect(x: 0, y: 474, width: 700, height: 32)
         fileWarning.font = NSFont.systemFont(ofSize: 11)
         fileWarning.textColor = .secondaryLabelColor
         fileWarning.maximumNumberOfLines = 3
 
-        let stack = NSStackView(views: [picker, warning, generatedImages, localAssets, fileWarning])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.setFrameSize(NSSize(width: 540, height: 150))
+        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 700, height: 510))
+        accessory.addSubview(summary)
+        accessory.addSubview(scroll)
+        accessory.addSubview(warning)
+        accessory.addSubview(generatedImages)
+        accessory.addSubview(localAssets)
+        accessory.addSubview(fileWarning)
 
         let alert = NSAlert()
         alert.messageText = tr("導出對話包", "Export Conversation Package")
-        alert.informativeText = tr("選擇一條對話；匯出後可以用 WhatsApp、Email 或其他方式傳俾另一部機導入。", "Choose one conversation. After export, you can send the package by WhatsApp, email, or another channel for import on another machine.")
-        alert.accessoryView = stack
+        alert.informativeText = tr("選擇要傳送嘅對話；匯出後可以用 WhatsApp、Email 或其他方式傳俾另一部機導入。", "Choose the conversations to send. After export, you can send the package by WhatsApp, email, or another channel for import on another machine.")
+        alert.accessoryView = accessory
         alert.addButton(withTitle: tr("選擇儲存位置", "Choose Save Location"))
         alert.addButton(withTitle: tr("取消", "Cancel"))
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let index = max(0, picker.indexOfSelectedItem)
-        guard index < threads.count else { return }
-        let thread = threads[index]
-        let panel = NSSavePanel()
-        panel.title = tr("儲存對話包", "Save Conversation Package")
-        panel.nameFieldStringValue = safePackageFileName(title: thread.title, threadID: thread.id)
-        if let packageType = UTType(filenameExtension: "codexshare") {
-            panel.allowedContentTypes = [packageType]
-        }
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
-
-        var arguments = ["export-thread-package", profile.id, thread.id, outputURL.path]
-        if generatedImages.state == .on {
-            arguments.append("--include-generated-images")
-        }
-        if localAssets.state == .on {
-            arguments.append("--include-local-assets")
+        let selectedThreads = tableController.selectedThreads()
+        guard !selectedThreads.isEmpty else {
+            alertMessage(
+                tr("未選擇對話", "No Conversations Selected"),
+                tr("請至少剔選一條對話先可以導出。", "Tick at least one conversation before exporting.")
+            )
+            return
         }
 
-        runBackground(tr("導出對話包...", "Exporting conversation package...")) {
-            runCodexScript(scriptPath, arguments, wait: true, timeout: 600)
+        var exportTargets: [(ExportableThread, URL)] = []
+        if selectedThreads.count == 1, let thread = selectedThreads.first {
+            let panel = NSSavePanel()
+            panel.title = tr("儲存對話包", "Save Conversation Package")
+            panel.nameFieldStringValue = safePackageFileName(title: thread.title, threadID: thread.id)
+            if let packageType = UTType(filenameExtension: "codexshare") {
+                panel.allowedContentTypes = [packageType]
+            }
+            panel.canCreateDirectories = true
+            guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+            exportTargets = [(thread, outputURL)]
+        } else {
+            let panel = NSOpenPanel()
+            panel.title = tr("選擇儲存資料夾", "Choose Export Folder")
+            panel.prompt = tr("選擇", "Choose")
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.canCreateDirectories = true
+            panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let folderURL = panel.url else { return }
+            var usedNames: Set<String> = []
+            exportTargets = selectedThreads.map { thread in
+                (thread, uniquePackageFileURL(directory: folderURL, thread: thread, usedNames: &usedNames))
+            }
+        }
+
+        let includeGeneratedImages = generatedImages.state == .on
+        let includeLocalAssets = localAssets.state == .on
+        runBackground(tr("導出 \(exportTargets.count) 條對話...", "Exporting \(exportTargets.count) conversation(s)...")) {
+            var outputLines: [String] = []
+            var failureLines: [String] = []
+            for (thread, outputURL) in exportTargets {
+                var arguments = ["export-thread-package", profile.id, thread.id, outputURL.path]
+                if includeGeneratedImages {
+                    arguments.append("--include-generated-images")
+                }
+                if includeLocalAssets {
+                    arguments.append("--include-local-assets")
+                }
+                let result = runCodexScript(scriptPath, arguments, wait: true, timeout: 600)
+                if result.0 == 0 {
+                    outputLines.append("exported=\(outputURL.path)")
+                    outputLines.append(trimmedToolOutput(result.1, maxLength: 900))
+                } else {
+                    failureLines.append("\(thread.title): \(trimmedToolOutput(result.1, maxLength: 900))")
+                }
+            }
+            if failureLines.isEmpty {
+                return (0, outputLines.joined(separator: "\n"))
+            }
+            return (1, (outputLines + failureLines.map { "failed=\($0)" }).joined(separator: "\n"))
         } completion: { result in
             if result.0 == 0 {
                 statusText = tr("已導出對話包", "Conversation package exported")
+                let urls = exportTargets.map { $0.1 }
+                NSWorkspace.shared.activateFileViewerSelecting(urls)
                 alertMessage(
                     tr("已導出對話包", "Export Complete"),
                     trimmedToolOutput(result.1, maxLength: 1600)

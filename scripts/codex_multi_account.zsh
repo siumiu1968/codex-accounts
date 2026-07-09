@@ -44,6 +44,8 @@ CODEX_AUTO_SYNC_LOCK_MAX_WAITS="${CODEX_AUTO_SYNC_LOCK_MAX_WAITS:-0}"
 CODEX_SYNC_STALE_LOCK_SECONDS="${CODEX_SYNC_STALE_LOCK_SECONDS:-15}"
 CODEX_SKIP_ACTIVE_STATE_DB_WRITES="${CODEX_SKIP_ACTIVE_STATE_DB_WRITES:-1}"
 CODEX_DELETE_STALE_THREAD_ROWS="${CODEX_DELETE_STALE_THREAD_ROWS:-0}"
+CODEX_PRUNE_LOCAL_THREAD_CATALOG="${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-1}"
+CODEX_CATALOG_ORPHAN_GRACE_SECONDS="${CODEX_CATALOG_ORPHAN_GRACE_SECONDS:-120}"
 CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-1}"
 CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES="${CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES:-67108864}"
 CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS="${CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS:-65536}"
@@ -53,7 +55,7 @@ CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS="${CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS:-0.05}"
 CODEX_RSYNC_MAX_WAITS="${CODEX_RSYNC_MAX_WAITS:-80}"
 CODEX_RSYNC_WAIT_SECONDS="${CODEX_RSYNC_WAIT_SECONDS:-0.1}"
 CODEX_USAGE_LIVE_LOOKUP="${CODEX_USAGE_LIVE_LOOKUP:-0}"
-USAGE_CACHE_STALE_SECONDS="${USAGE_CACHE_STALE_SECONDS:-86400}"
+USAGE_CACHE_STALE_SECONDS="${USAGE_CACHE_STALE_SECONDS:-604800}"
 SYNC_LOCK_DIR="${SYNC_LOCK_DIR:-$APP_DATA_ROOT/.sync.lock}"
 CODEX_INJECT_PROXY_ENV="${CODEX_INJECT_PROXY_ENV:-1}"
 CODEX_PROXY_URL="${CODEX_PROXY_URL:-http://127.0.0.1:7897}"
@@ -1266,18 +1268,27 @@ cached_usage_has_elapsed_reset() {
   local quota="${cached%%$'\t'*}"
   local rest="${cached#*$'\t'}"
   local reset="${rest%%$'\t'*}"
-  local part label
+  local part label saw_window saw_elapsed saw_current_or_unknown
+
+  saw_window=0
+  saw_elapsed=0
+  saw_current_or_unknown=0
 
   for part in ${(s: / :)quota}; do
     part="$(printf '%s' "$part" | trim_usage_text)"
     [[ -n "$part" ]] || continue
+    saw_window=1
     label="${part%% *}"
     if cached_reset_has_elapsed "$reset" "$label"; then
-      return 0
+      saw_elapsed=1
+    else
+      # Missing, ambiguous, or future reset values should not blank the whole
+      # account. A live refresh can still replace this cache later.
+      saw_current_or_unknown=1
     fi
   done
 
-  return 1
+  (( saw_window == 1 && saw_elapsed == 1 && saw_current_or_unknown == 0 ))
 }
 
 cached_usage_lacks_reset_credit_expiries() {
@@ -1303,7 +1314,6 @@ read_cached_usage_if_still_current() {
   cached="$(read_cached_usage "$cache_file" "$max_age" 2>/dev/null || true)"
   [[ -n "$cached" ]] || return 1
   cached_usage_has_elapsed_reset "$cached" && return 1
-  cached_usage_lacks_reset_credit_expiries "$cached" && return 1
   printf '%s\n' "$cached"
 }
 
@@ -1318,6 +1328,11 @@ write_cached_usage() {
   tmp_file="${cache_file}.$$"
   printf '%s\t%s\t%s\n' "$quota" "$reset" "$reset_credits" > "$tmp_file"
   mv "$tmp_file" "$cache_file"
+}
+
+write_auth_invalid_usage_marker() {
+  local cache_file="$1"
+  write_cached_usage "$cache_file" "__auth_invalid__" "unknown" "unknown"
 }
 
 invalidate_cached_usage() {
@@ -1570,7 +1585,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.5.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.5.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -1670,7 +1685,7 @@ fetch_usage_summary_via_app_server() {
             || "$error_message" == *"401 Unauthorized"* \
             || "$error_message" == *"authentication"* \
             || "$error_message" == *"Authentication"* ]]; then
-        invalidate_cached_usage "$cache_file"
+        write_auth_invalid_usage_marker "$cache_file"
         printf '%s\t%s\n' "__auth_invalid__" "unknown"
         return 0
       fi
@@ -1713,7 +1728,7 @@ fetch_usage_summary_for() {
       http_status="$(fetch_usage_http_status "$auth_file" "$tmp_file")"
     else
       fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
-      invalidate_cached_usage "$cache_file"
+      write_auth_invalid_usage_marker "$cache_file"
       printf '%s\t%s\n' "__auth_invalid__" "unknown"
       return 0
     fi
@@ -1722,7 +1737,7 @@ fetch_usage_summary_for() {
   if [[ "$http_status" == "403" ]]; then
     rm -f "$tmp_file"
     fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
-    invalidate_cached_usage "$cache_file"
+    write_auth_invalid_usage_marker "$cache_file"
     printf '%s\t%s\n' "__auth_invalid__" "unknown"
     return 0
   fi
@@ -1730,7 +1745,7 @@ fetch_usage_summary_for() {
   if [[ "$http_status" == "401" ]]; then
     rm -f "$tmp_file"
     fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
-    invalidate_cached_usage "$cache_file"
+    write_auth_invalid_usage_marker "$cache_file"
     printf '%s\t%s\n' "__auth_invalid__" "unknown"
     return 0
   fi
@@ -5322,6 +5337,174 @@ if next_state != state:
 PY
 }
 
+prune_local_thread_catalog_for_home() {
+  local account_home="$1"
+
+  [[ "${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-1}" == "1" ]] || return 0
+  [[ -d "$account_home" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  CODEX_PRUNE_ACCOUNT_HOME="$account_home" CODEX_CATALOG_ORPHAN_GRACE_SECONDS="${CODEX_CATALOG_ORPHAN_GRACE_SECONDS:-120}" python3 - <<'PY'
+import os
+import sqlite3
+import time
+from datetime import datetime
+from pathlib import Path
+
+home = Path(os.environ["CODEX_PRUNE_ACCOUNT_HOME"]).expanduser()
+catalog_db = home / "sqlite" / "codex-dev.db"
+state_paths = [path for path in (home / "state_5.sqlite", home / "sqlite" / "state_5.sqlite") if path.exists()]
+
+try:
+    grace_seconds = max(30, int(float(os.environ.get("CODEX_CATALOG_ORPHAN_GRACE_SECONDS", "120"))))
+except ValueError:
+    grace_seconds = 120
+
+if not catalog_db.exists() or not state_paths:
+    raise SystemExit(0)
+
+def table_columns(con, table):
+    try:
+        return [row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()]
+    except sqlite3.Error:
+        return []
+
+def has_table(con, table):
+    try:
+        row = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+
+def good_state_thread_ids():
+    ids = set()
+    for db_path in state_paths:
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
+            con.execute("PRAGMA busy_timeout=1000")
+            cols = table_columns(con, "threads")
+            if not cols or "id" not in cols:
+                con.close()
+                continue
+            rollout_expr = "rollout_path" if "rollout_path" in cols else "''"
+            archived_expr = "archived" if "archived" in cols else "0"
+            for thread_id, rollout_path, archived in con.execute(f"SELECT id, {rollout_expr}, {archived_expr} FROM threads"):
+                if not thread_id:
+                    continue
+                rollout_text = str(rollout_path or "").strip()
+                if rollout_text:
+                    try:
+                        if Path(rollout_text).exists():
+                            ids.add(str(thread_id))
+                            continue
+                    except OSError:
+                        pass
+                try:
+                    if int(archived or 0) == 0:
+                        ids.add(str(thread_id))
+                except (TypeError, ValueError):
+                    ids.add(str(thread_id))
+            con.close()
+        except sqlite3.Error:
+            pass
+    return ids
+
+def maybe_session_dirs():
+    seen = set()
+    candidates = [
+        home / "sessions",
+        Path.home() / ".codex-shared-history" / "sessions",
+        Path.home() / ".codex" / "sessions",
+    ]
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        key = str(resolved)
+        if key in seen or not path.exists() or not path.is_dir():
+            continue
+        seen.add(key)
+        yield path
+
+def rollout_file_exists(thread_id):
+    needle = str(thread_id)
+    for root in maybe_session_dirs():
+        try:
+            if next(root.rglob(f"*{needle}*.jsonl"), None) is not None:
+                return True
+        except OSError:
+            pass
+    return False
+
+def row_age_seconds(row):
+    now = time.time()
+    for key in ("source_updated_at", "source_created_at"):
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            continue
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        return now - timestamp
+    return 0
+
+try:
+    con = sqlite3.connect(catalog_db, timeout=1)
+    con.execute("PRAGMA busy_timeout=1000")
+except sqlite3.Error:
+    raise SystemExit(0)
+
+try:
+    if not has_table(con, "local_thread_catalog"):
+        raise SystemExit(0)
+    cols = table_columns(con, "local_thread_catalog")
+    required = {"thread_id", "host_id", "source_kind", "source_created_at", "source_updated_at"}
+    if not required.issubset(set(cols)):
+        raise SystemExit(0)
+    query_cols = ", ".join(f'"{col}"' for col in cols)
+    catalog_rows = [dict(zip(cols, values)) for values in con.execute(f"SELECT {query_cols} FROM local_thread_catalog")]
+    keep_ids = good_state_thread_ids()
+    delete_ids = []
+    for row in catalog_rows:
+        thread_id = str(row.get("thread_id") or "").strip()
+        if not thread_id or thread_id in keep_ids:
+            continue
+        if str(row.get("host_id") or "") != "local":
+            continue
+        if str(row.get("source_kind") or "") != "vscode":
+            continue
+        if row_age_seconds(row) < grace_seconds:
+            continue
+        if rollout_file_exists(thread_id):
+            continue
+        delete_ids.append(thread_id)
+
+    if not delete_ids:
+        raise SystemExit(0)
+
+    backup_root = home / "recovery-backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup_dir = backup_root / f"codex-dev-auto-prune-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_con = sqlite3.connect(backup_dir / "codex-dev.db")
+    con.backup(backup_con)
+    backup_con.close()
+
+    placeholders = ",".join("?" for _ in delete_ids)
+    con.execute("BEGIN IMMEDIATE")
+    con.execute(f"DELETE FROM local_thread_catalog WHERE thread_id IN ({placeholders})", delete_ids)
+    if has_table(con, "local_thread_catalog_metadata") and "catalog_revision" in table_columns(con, "local_thread_catalog_metadata"):
+        con.execute("UPDATE local_thread_catalog_metadata SET catalog_revision = catalog_revision + 1 WHERE id = 1")
+    con.commit()
+finally:
+    con.close()
+PY
+}
+
 cleanup_empty_projects() {
   list_accounts | while IFS='|' read -r raw_name raw_home _; do
     local name home
@@ -5331,6 +5514,7 @@ cleanup_empty_projects() {
     if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
       cleanup_thread_index_for_home "$home"
     fi
+    prune_local_thread_catalog_for_home "$home" >/dev/null 2>&1 || true
     prune_global_state_for_home "$home" >/dev/null 2>&1 || true
   done
 }
