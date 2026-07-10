@@ -434,6 +434,10 @@ private enum AppTextLocalizer {
             ("包入面", "包裡面"),
             ("入面", "裡面"),
             ("普通打開", "一般開啟"),
+            ("正在同步對話同記憶", "正在同步對話與記憶"),
+            ("同步對話同記憶", "同步對話與記憶"),
+            ("對話同記憶已同步", "對話與記憶已同步"),
+            ("已同全部 profile 共享", "已與全部 profile 共享"),
             ("而家", "現在"),
             ("咁樣", "這樣"),
             ("咁", "這樣"),
@@ -480,6 +484,11 @@ private enum AppTextLocalizer {
             "功能說明": "機能説明",
             "每分鐘重新整理": "毎分更新",
             "每分鐘同步對話記憶": "毎分会話メモリを同期",
+            "每 10 分鐘同步": "10分ごとに同期",
+            "對話同步已開啟": "会話履歴の同期はオンです",
+            "對話同步已暫停": "会話履歴の同期は一時停止中です",
+            "整理側欄": "サイドバーを整理",
+            "整理中": "整理中",
             "立即同步": "今すぐ同期",
             "共享全部": "すべて共有",
             "系統工具": "システムツール",
@@ -2190,10 +2199,9 @@ struct AccountsRootView: View {
     @AppStorage("autoQuotaPool") private var autoQuotaPool = false
     @AppStorage("language") private var language = "zh"
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
-    @State private var lastAutoSync = ""
+    @AppStorage("lastHistorySyncTimestamp") private var lastHistorySyncTimestamp = 0.0
     @State private var launchedAt = Date()
     @State private var lastAutoSyncAt = Date.distantPast
-    @State private var lastSidebarCleanupAt = Date.distantPast
     @State private var layoutScale: CGFloat = 1
     @State private var visibleContentSize: CGSize = .zero
     @State private var activeOperationCount = 0
@@ -2244,8 +2252,6 @@ struct AccountsRootView: View {
     private let resetCreditLiveBackfillInterval: TimeInterval = 90
     private let autoSyncStartupDelay: TimeInterval = 90
     private let autoSyncInterval: TimeInterval = 600
-    private let sidebarCleanupStartupDelay: TimeInterval = 15
-    private let sidebarCleanupInterval: TimeInterval = 60
 
     var body: some View {
         ZStack {
@@ -2287,6 +2293,9 @@ struct AccountsRootView: View {
         .background(WindowContentSizeReader(size: $visibleContentSize))
         .onAppear {
             launchedAt = Date()
+            if lastHistorySyncTimestamp > 0 {
+                lastAutoSyncAt = Date(timeIntervalSince1970: lastHistorySyncTimestamp)
+            }
             let normalizedLanguage = AppLanguage.normalized(language).rawValue
             if normalizedLanguage != language {
                 language = normalizedLanguage
@@ -2308,10 +2317,6 @@ struct AccountsRootView: View {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 refreshProfiles(showLoading: false)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                lastSidebarCleanupAt = Date()
-                cleanupSidebarProjectsSilently()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
                 keepAwake.refreshState(force: true)
@@ -2382,7 +2387,24 @@ struct AccountsRootView: View {
     }
 
     private var lastAutoSyncLabel: String {
-        lastAutoSync.isEmpty ? tr("未同步", "Not yet") : lastAutoSync
+        guard lastHistorySyncTimestamp > 0 else { return tr("未同步", "Not yet") }
+        let date = Date(timeIntervalSince1970: lastHistorySyncTimestamp)
+        if Calendar.current.isDateInToday(date) {
+            return DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .short)
+        }
+        return DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .short)
+    }
+
+    private var syncSummaryText: String {
+        autoSync
+            ? tr("每 10 分鐘 · 上次 \(lastAutoSyncLabel)", "Every 10 min · Last \(lastAutoSyncLabel)")
+            : tr("已關閉 · 上次 \(lastAutoSyncLabel)", "Off · Last \(lastAutoSyncLabel)")
+    }
+
+    private var syncAccent: Color {
+        autoSync
+            ? Color(red: 0.20, green: 0.82, blue: 0.66)
+            : Color(red: 1.00, green: 0.64, blue: 0.24)
     }
 
     private var currentDayKey: String {
@@ -2445,86 +2467,86 @@ struct AccountsRootView: View {
             AppThemeOption(
                 id: "graphite",
                 zhTitle: tr("石墨", "Graphite"),
-                primary: Color(red: 0.22, green: 0.74, blue: 1.00),
-                secondary: Color(red: 0.00, green: 0.92, blue: 0.78),
-                warm: Color(red: 0.82, green: 0.20, blue: 0.12)
+                primary: Color(red: 0.36, green: 0.80, blue: 0.92),
+                secondary: Color(red: 0.62, green: 0.85, blue: 0.48),
+                warm: Color(red: 0.98, green: 0.48, blue: 0.40)
             ),
             AppThemeOption(
                 id: "aurora",
                 zhTitle: tr("極光", "Aurora"),
-                primary: Color(red: 0.02, green: 0.78, blue: 0.72),
-                secondary: Color(red: 0.22, green: 0.95, blue: 0.48),
-                warm: Color(red: 0.18, green: 0.50, blue: 1.00)
+                primary: Color(red: 0.22, green: 0.86, blue: 0.67),
+                secondary: Color(red: 0.42, green: 0.70, blue: 0.96),
+                warm: Color(red: 0.98, green: 0.70, blue: 0.28)
             ),
             AppThemeOption(
                 id: "amber",
                 zhTitle: tr("琥珀", "Amber"),
-                primary: Color(red: 1.00, green: 0.58, blue: 0.16),
-                secondary: Color(red: 1.00, green: 0.76, blue: 0.20),
-                warm: Color(red: 0.88, green: 0.22, blue: 0.10)
+                primary: Color(red: 0.96, green: 0.68, blue: 0.28),
+                secondary: Color(red: 0.38, green: 0.72, blue: 0.92),
+                warm: Color(red: 0.88, green: 0.38, blue: 0.52)
             ),
             AppThemeOption(
                 id: "violet",
                 zhTitle: tr("紫晶", "Violet"),
-                primary: Color(red: 0.62, green: 0.42, blue: 1.00),
-                secondary: Color(red: 0.30, green: 0.84, blue: 1.00),
-                warm: Color(red: 0.94, green: 0.30, blue: 0.64)
+                primary: Color(red: 0.72, green: 0.58, blue: 0.94),
+                secondary: Color(red: 0.31, green: 0.80, blue: 0.72),
+                warm: Color(red: 0.98, green: 0.55, blue: 0.34)
             ),
             AppThemeOption(
                 id: "ocean",
                 zhTitle: tr("深海", "Ocean"),
-                primary: Color(red: 0.05, green: 0.70, blue: 1.00),
-                secondary: Color(red: 0.00, green: 0.84, blue: 0.70),
-                warm: Color(red: 1.00, green: 0.45, blue: 0.28)
+                primary: Color(red: 0.28, green: 0.74, blue: 0.88),
+                secondary: Color(red: 0.30, green: 0.84, blue: 0.66),
+                warm: Color(red: 0.98, green: 0.62, blue: 0.30)
             ),
             AppThemeOption(
                 id: "sage",
                 zhTitle: tr("苔原", "Sage"),
-                primary: Color(red: 0.44, green: 0.82, blue: 0.52),
-                secondary: Color(red: 0.86, green: 0.76, blue: 0.36),
-                warm: Color(red: 0.95, green: 0.44, blue: 0.22)
+                primary: Color(red: 0.48, green: 0.76, blue: 0.54),
+                secondary: Color(red: 0.46, green: 0.70, blue: 0.92),
+                warm: Color(red: 0.92, green: 0.68, blue: 0.30)
             ),
             AppThemeOption(
                 id: "rose",
                 zhTitle: tr("玫瑰", "Rose"),
-                primary: Color(red: 1.00, green: 0.42, blue: 0.62),
-                secondary: Color(red: 0.56, green: 0.64, blue: 1.00),
-                warm: Color(red: 1.00, green: 0.64, blue: 0.42)
+                primary: Color(red: 0.94, green: 0.48, blue: 0.62),
+                secondary: Color(red: 0.38, green: 0.74, blue: 0.88),
+                warm: Color(red: 0.94, green: 0.70, blue: 0.30)
             ),
             AppThemeOption(
                 id: "indigo",
                 zhTitle: tr("靛藍", "Indigo"),
-                primary: Color(red: 0.35, green: 0.50, blue: 1.00),
-                secondary: Color(red: 0.00, green: 0.82, blue: 0.95),
-                warm: Color(red: 0.96, green: 0.42, blue: 0.88)
+                primary: Color(red: 0.52, green: 0.58, blue: 0.94),
+                secondary: Color(red: 0.34, green: 0.82, blue: 0.68),
+                warm: Color(red: 0.98, green: 0.48, blue: 0.38)
             ),
             AppThemeOption(
                 id: "slate",
                 zhTitle: tr("鋼灰", "Slate"),
-                primary: Color(red: 0.55, green: 0.72, blue: 0.82),
-                secondary: Color(red: 0.34, green: 0.92, blue: 0.82),
-                warm: Color(red: 0.94, green: 0.68, blue: 0.36)
+                primary: Color(red: 0.60, green: 0.72, blue: 0.78),
+                secondary: Color(red: 0.42, green: 0.78, blue: 0.62),
+                warm: Color(red: 0.92, green: 0.64, blue: 0.32)
             ),
             AppThemeOption(
                 id: "copper",
                 zhTitle: tr("銅綠", "Copper"),
-                primary: Color(red: 0.96, green: 0.46, blue: 0.22),
-                secondary: Color(red: 0.16, green: 0.76, blue: 0.64),
-                warm: Color(red: 0.98, green: 0.72, blue: 0.34)
+                primary: Color(red: 0.88, green: 0.50, blue: 0.30),
+                secondary: Color(red: 0.28, green: 0.76, blue: 0.68),
+                warm: Color(red: 0.46, green: 0.68, blue: 0.92)
             ),
             AppThemeOption(
                 id: "glacier",
                 zhTitle: tr("冰川", "Glacier"),
-                primary: Color(red: 0.52, green: 0.82, blue: 1.00),
-                secondary: Color(red: 0.56, green: 0.96, blue: 0.82),
-                warm: Color(red: 0.74, green: 0.58, blue: 1.00)
+                primary: Color(red: 0.58, green: 0.80, blue: 0.92),
+                secondary: Color(red: 0.50, green: 0.88, blue: 0.76),
+                warm: Color(red: 0.90, green: 0.52, blue: 0.62)
             ),
             AppThemeOption(
                 id: "ember",
                 zhTitle: tr("星火", "Ember"),
-                primary: Color(red: 1.00, green: 0.32, blue: 0.22),
-                secondary: Color(red: 0.92, green: 0.64, blue: 0.18),
-                warm: Color(red: 0.50, green: 0.66, blue: 1.00)
+                primary: Color(red: 0.94, green: 0.40, blue: 0.30),
+                secondary: Color(red: 0.94, green: 0.72, blue: 0.32),
+                warm: Color(red: 0.36, green: 0.68, blue: 0.94)
             )
         ]
     }
@@ -2549,127 +2571,127 @@ struct AccountsRootView: View {
         switch appTheme {
         case "aurora":
             return [
-                Color(red: 0.00, green: 0.16, blue: 0.19).opacity(0.68),
-                Color(red: 0.00, green: 0.30, blue: 0.25).opacity(0.50),
-                Color(red: 0.03, green: 0.12, blue: 0.22).opacity(0.58)
+                Color(red: 0.04, green: 0.10, blue: 0.10).opacity(0.78),
+                Color(red: 0.06, green: 0.18, blue: 0.15).opacity(0.62),
+                Color(red: 0.08, green: 0.11, blue: 0.15).opacity(0.70)
             ]
         case "amber":
             return [
-                Color(red: 0.30, green: 0.12, blue: 0.04).opacity(0.72),
-                Color(red: 0.52, green: 0.24, blue: 0.06).opacity(0.56),
-                Color(red: 0.16, green: 0.07, blue: 0.04).opacity(0.62)
+                Color(red: 0.10, green: 0.08, blue: 0.06).opacity(0.80),
+                Color(red: 0.18, green: 0.12, blue: 0.06).opacity(0.64),
+                Color(red: 0.07, green: 0.09, blue: 0.12).opacity(0.72)
             ]
         case "violet":
             return [
-                Color(red: 0.16, green: 0.07, blue: 0.28).opacity(0.72),
-                Color(red: 0.26, green: 0.12, blue: 0.42).opacity(0.54),
-                Color(red: 0.05, green: 0.10, blue: 0.24).opacity(0.58)
+                Color(red: 0.10, green: 0.08, blue: 0.12).opacity(0.80),
+                Color(red: 0.16, green: 0.10, blue: 0.18).opacity(0.64),
+                Color(red: 0.07, green: 0.12, blue: 0.13).opacity(0.72)
             ]
         case "ocean":
             return [
-                Color(red: 0.02, green: 0.08, blue: 0.16).opacity(0.72),
-                Color(red: 0.00, green: 0.20, blue: 0.28).opacity(0.56),
-                Color(red: 0.06, green: 0.10, blue: 0.18).opacity(0.62)
+                Color(red: 0.04, green: 0.09, blue: 0.11).opacity(0.80),
+                Color(red: 0.06, green: 0.15, blue: 0.18).opacity(0.64),
+                Color(red: 0.11, green: 0.09, blue: 0.07).opacity(0.72)
             ]
         case "sage":
             return [
-                Color(red: 0.03, green: 0.15, blue: 0.10).opacity(0.72),
-                Color(red: 0.14, green: 0.25, blue: 0.12).opacity(0.54),
-                Color(red: 0.07, green: 0.09, blue: 0.07).opacity(0.64)
+                Color(red: 0.06, green: 0.10, blue: 0.08).opacity(0.80),
+                Color(red: 0.10, green: 0.16, blue: 0.11).opacity(0.64),
+                Color(red: 0.12, green: 0.10, blue: 0.07).opacity(0.72)
             ]
         case "rose":
             return [
-                Color(red: 0.24, green: 0.05, blue: 0.13).opacity(0.72),
-                Color(red: 0.36, green: 0.12, blue: 0.28).opacity(0.52),
-                Color(red: 0.05, green: 0.08, blue: 0.20).opacity(0.58)
+                Color(red: 0.11, green: 0.07, blue: 0.09).opacity(0.80),
+                Color(red: 0.18, green: 0.09, blue: 0.12).opacity(0.64),
+                Color(red: 0.07, green: 0.11, blue: 0.13).opacity(0.72)
             ]
         case "indigo":
             return [
-                Color(red: 0.04, green: 0.05, blue: 0.23).opacity(0.74),
-                Color(red: 0.10, green: 0.14, blue: 0.38).opacity(0.56),
-                Color(red: 0.02, green: 0.12, blue: 0.20).opacity(0.60)
+                Color(red: 0.07, green: 0.08, blue: 0.12).opacity(0.80),
+                Color(red: 0.10, green: 0.12, blue: 0.20).opacity(0.64),
+                Color(red: 0.07, green: 0.13, blue: 0.12).opacity(0.72)
             ]
         case "slate":
             return [
-                Color(red: 0.06, green: 0.09, blue: 0.12).opacity(0.74),
-                Color(red: 0.12, green: 0.18, blue: 0.22).opacity(0.54),
-                Color(red: 0.05, green: 0.06, blue: 0.08).opacity(0.62)
+                Color(red: 0.07, green: 0.08, blue: 0.09).opacity(0.82),
+                Color(red: 0.12, green: 0.14, blue: 0.15).opacity(0.66),
+                Color(red: 0.10, green: 0.09, blue: 0.07).opacity(0.72)
             ]
         case "copper":
             return [
-                Color(red: 0.20, green: 0.09, blue: 0.05).opacity(0.72),
-                Color(red: 0.08, green: 0.22, blue: 0.18).opacity(0.52),
-                Color(red: 0.22, green: 0.15, blue: 0.06).opacity(0.58)
+                Color(red: 0.10, green: 0.08, blue: 0.06).opacity(0.80),
+                Color(red: 0.17, green: 0.10, blue: 0.07).opacity(0.64),
+                Color(red: 0.06, green: 0.13, blue: 0.13).opacity(0.72)
             ]
         case "glacier":
             return [
-                Color(red: 0.03, green: 0.12, blue: 0.18).opacity(0.70),
-                Color(red: 0.08, green: 0.24, blue: 0.30).opacity(0.50),
-                Color(red: 0.13, green: 0.10, blue: 0.24).opacity(0.54)
+                Color(red: 0.06, green: 0.10, blue: 0.12).opacity(0.80),
+                Color(red: 0.08, green: 0.16, blue: 0.18).opacity(0.64),
+                Color(red: 0.12, green: 0.08, blue: 0.10).opacity(0.72)
             ]
         case "ember":
             return [
-                Color(red: 0.18, green: 0.05, blue: 0.04).opacity(0.74),
-                Color(red: 0.30, green: 0.14, blue: 0.06).opacity(0.54),
-                Color(red: 0.06, green: 0.07, blue: 0.15).opacity(0.62)
+                Color(red: 0.11, green: 0.07, blue: 0.06).opacity(0.80),
+                Color(red: 0.18, green: 0.09, blue: 0.07).opacity(0.64),
+                Color(red: 0.06, green: 0.10, blue: 0.14).opacity(0.72)
             ]
         default:
             return [
-                Color(red: 0.03, green: 0.06, blue: 0.09).opacity(0.70),
-                Color(red: 0.07, green: 0.11, blue: 0.14).opacity(0.52),
-                Color(red: 0.04, green: 0.05, blue: 0.07).opacity(0.62)
+                Color(red: 0.06, green: 0.07, blue: 0.08).opacity(0.82),
+                Color(red: 0.10, green: 0.13, blue: 0.15).opacity(0.66),
+                Color(red: 0.08, green: 0.09, blue: 0.11).opacity(0.74)
             ]
         }
     }
 
     private var themeMainTint: Color {
         switch appTheme {
-        case "aurora": return Color(red: 0.00, green: 0.45, blue: 0.38)
-        case "amber": return Color(red: 0.58, green: 0.26, blue: 0.08)
-        case "violet": return Color(red: 0.38, green: 0.18, blue: 0.58)
-        case "ocean": return Color(red: 0.00, green: 0.28, blue: 0.38)
-        case "sage": return Color(red: 0.16, green: 0.34, blue: 0.18)
-        case "rose": return Color(red: 0.44, green: 0.14, blue: 0.28)
-        case "indigo": return Color(red: 0.18, green: 0.22, blue: 0.56)
-        case "slate": return Color(red: 0.18, green: 0.26, blue: 0.32)
-        case "copper": return Color(red: 0.42, green: 0.22, blue: 0.12)
-        case "glacier": return Color(red: 0.14, green: 0.34, blue: 0.42)
-        case "ember": return Color(red: 0.48, green: 0.16, blue: 0.12)
-        default: return Color(red: 0.06, green: 0.18, blue: 0.24)
+        case "aurora": return Color(red: 0.08, green: 0.31, blue: 0.26)
+        case "amber": return Color(red: 0.34, green: 0.23, blue: 0.10)
+        case "violet": return Color(red: 0.28, green: 0.20, blue: 0.34)
+        case "ocean": return Color(red: 0.10, green: 0.26, blue: 0.31)
+        case "sage": return Color(red: 0.18, green: 0.29, blue: 0.20)
+        case "rose": return Color(red: 0.34, green: 0.18, blue: 0.23)
+        case "indigo": return Color(red: 0.20, green: 0.23, blue: 0.39)
+        case "slate": return Color(red: 0.20, green: 0.25, blue: 0.27)
+        case "copper": return Color(red: 0.34, green: 0.21, blue: 0.14)
+        case "glacier": return Color(red: 0.18, green: 0.29, blue: 0.33)
+        case "ember": return Color(red: 0.36, green: 0.18, blue: 0.14)
+        default: return Color(red: 0.14, green: 0.21, blue: 0.24)
         }
     }
 
     private var themeSidebarTint: Color {
         switch appTheme {
-        case "aurora": return Color(red: 0.00, green: 0.34, blue: 0.29)
-        case "amber": return Color(red: 0.38, green: 0.15, blue: 0.05)
-        case "violet": return Color(red: 0.24, green: 0.10, blue: 0.38)
-        case "ocean": return Color(red: 0.02, green: 0.14, blue: 0.24)
-        case "sage": return Color(red: 0.10, green: 0.24, blue: 0.13)
-        case "rose": return Color(red: 0.28, green: 0.08, blue: 0.18)
-        case "indigo": return Color(red: 0.10, green: 0.12, blue: 0.36)
-        case "slate": return Color(red: 0.12, green: 0.18, blue: 0.23)
-        case "copper": return Color(red: 0.26, green: 0.12, blue: 0.07)
-        case "glacier": return Color(red: 0.08, green: 0.22, blue: 0.28)
-        case "ember": return Color(red: 0.30, green: 0.08, blue: 0.07)
-        default: return Color(red: 0.04, green: 0.11, blue: 0.16)
+        case "aurora": return Color(red: 0.07, green: 0.24, blue: 0.21)
+        case "amber": return Color(red: 0.25, green: 0.16, blue: 0.08)
+        case "violet": return Color(red: 0.20, green: 0.15, blue: 0.26)
+        case "ocean": return Color(red: 0.08, green: 0.20, blue: 0.24)
+        case "sage": return Color(red: 0.14, green: 0.23, blue: 0.16)
+        case "rose": return Color(red: 0.25, green: 0.14, blue: 0.18)
+        case "indigo": return Color(red: 0.15, green: 0.17, blue: 0.29)
+        case "slate": return Color(red: 0.15, green: 0.19, blue: 0.21)
+        case "copper": return Color(red: 0.25, green: 0.16, blue: 0.11)
+        case "glacier": return Color(red: 0.14, green: 0.23, blue: 0.26)
+        case "ember": return Color(red: 0.27, green: 0.14, blue: 0.11)
+        default: return Color(red: 0.11, green: 0.16, blue: 0.18)
         }
     }
 
     private var themeRowTint: Color {
         switch appTheme {
-        case "aurora": return Color(red: 0.00, green: 0.62, blue: 0.48)
-        case "amber": return Color(red: 0.92, green: 0.40, blue: 0.10)
-        case "violet": return Color(red: 0.56, green: 0.25, blue: 0.88)
-        case "ocean": return Color(red: 0.00, green: 0.52, blue: 0.72)
-        case "sage": return Color(red: 0.34, green: 0.62, blue: 0.34)
-        case "rose": return Color(red: 0.80, green: 0.24, blue: 0.46)
-        case "indigo": return Color(red: 0.30, green: 0.40, blue: 0.86)
-        case "slate": return Color(red: 0.34, green: 0.48, blue: 0.56)
-        case "copper": return Color(red: 0.72, green: 0.34, blue: 0.18)
-        case "glacier": return Color(red: 0.32, green: 0.66, blue: 0.82)
-        case "ember": return Color(red: 0.78, green: 0.24, blue: 0.16)
-        default: return Color(red: 0.08, green: 0.34, blue: 0.46)
+        case "aurora": return Color(red: 0.18, green: 0.55, blue: 0.44)
+        case "amber": return Color(red: 0.68, green: 0.46, blue: 0.18)
+        case "violet": return Color(red: 0.48, green: 0.38, blue: 0.64)
+        case "ocean": return Color(red: 0.18, green: 0.48, blue: 0.58)
+        case "sage": return Color(red: 0.36, green: 0.54, blue: 0.38)
+        case "rose": return Color(red: 0.64, green: 0.34, blue: 0.44)
+        case "indigo": return Color(red: 0.38, green: 0.42, blue: 0.66)
+        case "slate": return Color(red: 0.42, green: 0.50, blue: 0.53)
+        case "copper": return Color(red: 0.62, green: 0.38, blue: 0.24)
+        case "glacier": return Color(red: 0.40, green: 0.58, blue: 0.64)
+        case "ember": return Color(red: 0.66, green: 0.32, blue: 0.24)
+        default: return Color(red: 0.30, green: 0.46, blue: 0.52)
         }
     }
 
@@ -2862,18 +2884,10 @@ struct AccountsRootView: View {
         guard activeOperationCount == 0 else { return }
         let now = Date()
 
-        if !isCleaningSidebarState,
-           now.timeIntervalSince(launchedAt) >= sidebarCleanupStartupDelay,
-           now.timeIntervalSince(lastSidebarCleanupAt) >= sidebarCleanupInterval {
-            lastSidebarCleanupAt = now
-            cleanupSidebarProjectsSilently()
-        }
-
         if autoSync,
            !isSyncing,
            now.timeIntervalSince(launchedAt) >= autoSyncStartupDelay,
            now.timeIntervalSince(lastAutoSyncAt) >= autoSyncInterval {
-            lastAutoSyncAt = now
             syncMemories(silent: true)
             return
         }
@@ -3011,9 +3025,9 @@ struct AccountsRootView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            RadialGradient(colors: [themePrimary.opacity(0.24), Color.clear], center: .topTrailing, startRadius: 70, endRadius: 560)
-            RadialGradient(colors: [themeSecondary.opacity(0.17), Color.clear], center: .topLeading, startRadius: 50, endRadius: 430)
-            RadialGradient(colors: [themeWarm.opacity(0.18), Color.clear], center: .bottomLeading, startRadius: 70, endRadius: 520)
+            RadialGradient(colors: [themePrimary.opacity(0.18), Color.clear], center: .topTrailing, startRadius: 70, endRadius: 560)
+            RadialGradient(colors: [themeSecondary.opacity(0.13), Color.clear], center: .topLeading, startRadius: 50, endRadius: 430)
+            RadialGradient(colors: [themeWarm.opacity(0.10), Color.clear], center: .bottomLeading, startRadius: 70, endRadius: 520)
             RadialGradient(colors: [Color.black.opacity(0.14), Color.clear], center: .bottomTrailing, startRadius: 90, endRadius: 620)
         }
         .ignoresSafeArea()
@@ -3043,7 +3057,7 @@ struct AccountsRootView: View {
                 introPoint("2.circle.fill", tr("切換帳戶前，先撳右上角紅色關閉全部，再打開你要用嗰個 profile。", "Before switching accounts, press the red close-all button, then open the profile you want."))
                 introPoint("3.circle.fill", tr("卡片中間會顯示 5H / 1W / 1M 用量；紅色代表等待恢復。", "The card shows 5H / 1W / 1M usage; red means it is waiting for reset."))
                 introPoint("4.circle.fill", tr("頂部三段掣可以快速跳去：已登入、未登入、等待恢復。", "The segmented control jumps to Signed in, Login needed, and Waiting sections."))
-                introPoint("5.circle.fill", tr("立即同步會同步本機記憶；共享全部會令所有 profile 共用同一份本機對話紀錄。普通打開唔會自動共享。", "Sync now syncs local memories; Share all links every profile to one local chat history. Normal opens do not share history automatically."))
+                introPoint("5.circle.fill", tr("開啟 profile 前會先補齊本機對話索引；共享全部會令所有 profile 共用同一份本機對話紀錄。", "Before a profile opens, its local conversation index is synchronized. Share all links every profile to one local chat history."))
                 introPoint("6.circle.fill", tr("防睡眠會阻止 Mac 喺長任務期間自動睡眠。", "Keep Awake prevents Mac sleep during long tasks."))
             }
 
@@ -3120,38 +3134,42 @@ struct AccountsRootView: View {
     }
 
     private var sidebar: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: scaled(16)) {
-                HStack(alignment: .center, spacing: scaled(12)) {
-                    appIconView
-                    languageSwitcher
+        VStack(spacing: 0) {
+            Color.clear.frame(height: scaled(48))
+
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: scaled(16)) {
+                    HStack(alignment: .center, spacing: scaled(12)) {
+                        appIconView
+                        languageSwitcher
+                    }
+
+                    VStack(alignment: .leading, spacing: scaled(8)) {
+                        Text(tr("Codex 帳戶", "Codex Accounts"))
+                            .font(appFont(size: 26, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        Text(tr("多帳戶登入，紀錄預設分開。", "Separate logins. Separate local history by default."))
+                            .font(appFont(size: 13))
+                            .foregroundStyle(.white.opacity(0.64))
+                            .lineSpacing(scaled(3))
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                    }
+
+                    sidebarSettings
                 }
-
-                VStack(alignment: .leading, spacing: scaled(8)) {
-                    Text(tr("Codex 帳戶", "Codex Accounts"))
-                        .font(appFont(size: 26, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Text(tr("多帳戶登入，紀錄預設分開。", "Separate logins. Separate local history by default."))
-                        .font(appFont(size: 13))
-                        .foregroundStyle(.white.opacity(0.64))
-                        .lineSpacing(scaled(3))
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-                }
-
-                sidebarSettings
+                .padding(.top, scaled(14))
+                .padding(.bottom, scaled(22))
+                .padding(.leading, scaled(28))
+                .padding(.trailing, scaled(24))
+                .frame(width: scaled(272), alignment: .topLeading)
             }
-            .padding(.top, scaled(62))
-            .padding(.bottom, scaled(22))
-            .padding(.leading, scaled(28))
-            .padding(.trailing, scaled(24))
-            .frame(width: scaled(272), alignment: .topLeading)
+            .scrollIndicators(.automatic)
+            .scrollClipDisabled(false)
         }
-        .scrollIndicators(.automatic)
-        .scrollClipDisabled(false)
         .frame(width: scaled(272), alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(
@@ -3445,20 +3463,23 @@ struct AccountsRootView: View {
             sidebarDisclosureSection(
                 title: tr("自動化", "Automation"),
                 systemName: "bolt.fill",
-                subtitle: tr("同步：\(lastAutoSyncLabel)", "Sync: \(lastAutoSyncLabel)"),
-                accent: Color(red: 0.28, green: 0.70, blue: 1.00),
+                subtitle: syncSummaryText,
+                accent: syncAccent,
                 expanded: $sidebarAutomationExpanded
             ) {
                 HStack(spacing: scaled(6)) {
-                    Text(tr("功能說明", "Help"))
+                    Image(systemName: autoSync ? "checkmark.circle.fill" : "pause.circle.fill")
+                        .font(.system(size: scaled(10), weight: .semibold))
+                        .foregroundStyle(syncAccent)
+                    Text(autoSync ? tr("對話同步已開啟", "History sync on") : tr("對話同步已暫停", "History sync paused"))
                         .font(appFont(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.48))
-                    syncInfoIcon
+                        .foregroundStyle(.white.opacity(0.62))
                     Spacer(minLength: 0)
+                    syncInfoIcon
                 }
 
                 sidebarToggle(tr("每分鐘重新整理", "Auto refresh"), isOn: $autoRefresh, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
-                sidebarToggle(tr("每分鐘同步對話同記憶", "Auto sync"), isOn: $autoSync, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
+                sidebarToggle(tr("每 10 分鐘同步", "Sync every 10 min"), isOn: $autoSync, tint: syncAccent)
 
                 HStack(spacing: scaled(8)) {
                     miniButton(tr("立即同步", "Sync now")) { syncMemories() }
@@ -3480,6 +3501,9 @@ struct AccountsRootView: View {
                 HStack(spacing: scaled(8)) {
                     miniButton(isRepairingHistoryPayloads ? tr("清理中", "Cleaning") : tr("清理大對話", "Clean large chats")) {
                         repairLargeHistoryPayloads()
+                    }
+                    miniButton(isCleaningSidebarState ? tr("整理中", "Cleaning") : tr("整理側欄", "Clean sidebar")) {
+                        cleanupSidebarProjects()
                     }
                 }
             }
@@ -3952,8 +3976,8 @@ struct AccountsRootView: View {
 
     private var syncHelpText: String {
         tr(
-            "立即同步：同步本機記憶檔案。\n\n共享全部：將所有 profile 連到同一份本機對話紀錄；普通打開 profile 唔會自動共享。",
-            "Sync now: syncs local memories and conversation history.\n\nShare all: links every profile to the same local chat history; normal profile opens do not auto-share."
+            "立即同步：安全同步未使用中 profile 嘅對話索引同本機記憶；使用中 profile 會喺下次開啟前完成。\n\n共享全部：將所有 profile 連到同一份本機對話紀錄，再補齊可安全更新嘅索引。",
+            "Sync now: safely updates conversation indexes and local memory for inactive profiles. Active profiles finish before their next launch.\n\nShare all: links every profile to one local history, then reconciles indexes that are safe to update."
         )
     }
 
@@ -6292,7 +6316,7 @@ struct AccountsRootView: View {
             displayNames[sanitizedProfileId(name)] = name
             UserDefaults.standard.set(displayNames, forKey: "profileDisplayNames")
             refreshProfiles(showLoading: false)
-            openAccount(name, displayName: name)
+            openAccount(name, displayName: name, syncBeforeLaunch: false)
         }
     }
 
@@ -6323,12 +6347,13 @@ struct AccountsRootView: View {
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = false) {
+    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = true) {
         let requestedName = displayName ?? name
         let route = quotaPoolRoute(for: name)
         let targetID = route?.target.id ?? name
         let targetName = route?.target.displayName ?? requestedName
-        var launchArguments = ["launch-account-nosync", targetID]
+        let launchCommand = syncBeforeLaunch ? "launch-account" : "launch-account-nosync"
+        var launchArguments = [launchCommand, targetID]
         if !targetName.isEmpty {
             launchArguments.append(targetName)
         }
@@ -6344,35 +6369,24 @@ struct AccountsRootView: View {
             loadingText = tr("正在打開 \(targetName)...", "Opening \(targetName)...")
         }
         runBackground(loadingText) {
-            if syncBeforeLaunch {
-                var syncEnvironment = ProcessInfo.processInfo.environment
-                syncEnvironment["CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS"] = "8"
-                syncEnvironment["CODEX_RSYNC_MAX_WAITS"] = "50"
-                syncEnvironment["CODEX_RSYNC_WAIT_SECONDS"] = "0.08"
-                syncEnvironment["CODEX_SYNC_THREAD_HISTORY"] = "1"
-                let syncResult = runCodexScript(
-                    scriptPath,
-                    ["sync-account-for-launch", targetID],
-                    wait: true,
-                    timeout: 24,
-                    environment: syncEnvironment
-                )
-                guard syncResult.0 == 0 else { return syncResult }
-            }
-
             if route?.didSwitch == true {
                 _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 12)
             }
 
             var launchEnvironment = ProcessInfo.processInfo.environment
-            launchEnvironment["CODEX_PRELAUNCH_SYNC"] = "0"
+            launchEnvironment["CODEX_PRELAUNCH_SYNC"] = syncBeforeLaunch ? "1" : "0"
             launchEnvironment["CODEX_SHARED_SESSIONS"] = "1"
-            launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = "0"
+            launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = syncBeforeLaunch ? "1" : "0"
+            if syncBeforeLaunch {
+                launchEnvironment["CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS"] = "8"
+                launchEnvironment["CODEX_RSYNC_MAX_WAITS"] = "50"
+                launchEnvironment["CODEX_RSYNC_WAIT_SECONDS"] = "0.08"
+            }
             return runCodexScript(
                 scriptPath,
                 launchArguments,
                 wait: true,
-                timeout: 28,
+                timeout: syncBeforeLaunch ? 60 : 28,
                 environment: launchEnvironment
             )
         } completion: { result in
@@ -6448,6 +6462,9 @@ struct AccountsRootView: View {
     private func syncMemories(silent: Bool = false) {
         guard !isSyncing else { return }
         isSyncing = true
+        if silent {
+            lastAutoSyncAt = Date()
+        }
         let loading = silent ? nil : tr("同步對話同記憶...", "Syncing history and memory...")
 
         runBackground(loading) {
@@ -6462,9 +6479,10 @@ struct AccountsRootView: View {
         } completion: { result in
             isSyncing = false
             let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
-            lastAutoSyncAt = Date()
             if result.0 == 0 {
-                lastAutoSync = time
+                let completedAt = Date()
+                lastAutoSyncAt = completedAt
+                lastHistorySyncTimestamp = completedAt.timeIntervalSince1970
                 statusText = silent ? tr("已自動同步 \(time)", "Auto synced at \(time)") : tr("對話同記憶已同步", "History and memory synced")
             } else if !silent {
                 statusText = tr("同步失敗", "Sync failed")
@@ -6472,16 +6490,19 @@ struct AccountsRootView: View {
         }
     }
 
-    private func cleanupSidebarProjectsSilently() {
+    private func cleanupSidebarProjects() {
         guard !isCleaningSidebarState else { return }
         isCleaningSidebarState = true
 
-        runBackground(nil) {
+        runBackground(tr("整理側欄...", "Cleaning sidebar...")) {
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_SYNC_THREAD_HISTORY"] = "0"
             return runCodexScript(scriptPath, ["cleanup-empty-projects"], wait: true, timeout: 45, environment: environment)
-        } completion: { _ in
+        } completion: { result in
             isCleaningSidebarState = false
+            statusText = result.0 == 0
+                ? tr("側欄整理完成", "Sidebar cleaned")
+                : tr("側欄整理失敗", "Sidebar cleanup failed")
         }
     }
 
@@ -6505,7 +6526,10 @@ struct AccountsRootView: View {
         runBackground(tr("共享對話紀錄...", "Sharing history...")) {
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_SHARED_SESSIONS"] = "1"
-            return runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60, environment: environment)
+            let linkResult = runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60, environment: environment)
+            guard linkResult.0 == 0 else { return linkResult }
+            environment["CODEX_SYNC_THREAD_HISTORY"] = "1"
+            return runCodexScript(scriptPath, ["sync-history-once"], wait: true, timeout: 60, environment: environment)
         } completion: { result in
             statusText = result.0 == 0 ? tr("已同全部 profile 共享對話紀錄", "History shared with all profiles") : tr("共享失敗", "History share failed")
             refreshProfiles(showLoading: false)
@@ -7216,7 +7240,6 @@ private final class UpdateController: ObservableObject {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var syncProcess: Process?
-    private var sidebarPruneProcess: Process?
     private var window: NSWindow!
     private var cachedAccounts: [Account] = []
     private var accountsCacheRefreshInFlight = false
@@ -7252,7 +7275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(updateStateChanged), name: .updateStateChanged, object: nil)
         showAccountsWindow()
         refreshAccountsCacheAsync()
-        startSidebarPruneLoop()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -7512,10 +7534,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_SHARED_SESSIONS"] = "1"
         let command = arguments.first ?? ""
-        if ["sync-once", "sync-history-once", "sync-account", "sync-account-for-launch", "sync-loop", "sync-history-loop"].contains(command) {
+        if ["launch-account", "sync-once", "sync-history-once", "sync-account", "sync-account-for-launch", "sync-loop", "sync-history-loop"].contains(command) {
             environment["CODEX_SYNC_THREAD_HISTORY"] = "1"
         } else if !["link-history", "link-all-history", "link-account2-history"].contains(command) {
             environment["CODEX_SYNC_THREAD_HISTORY"] = "0"
+        }
+        if command == "launch-account" {
+            environment["CODEX_PRELAUNCH_SYNC"] = "1"
         }
         if wait {
             return runProcess(executable: "/bin/zsh", arguments: processArguments, environment: environment, timeout: timeout)
@@ -7534,7 +7559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openAccount(_ name: String, displayName: String? = nil) {
         let routed = quotaPoolRouteForMenu(requestedName: name)
-        var arguments = ["launch-account-nosync", routed.name]
+        var arguments = ["launch-account", routed.name]
         if !routed.displayName.isEmpty {
             arguments.append(routed.displayName)
         }
@@ -7714,34 +7739,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    private func startSidebarPruneLoop() {
-        guard sidebarPruneProcess == nil else { return }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = [scriptPath, "prune-loop"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_DELETE_STALE_THREAD_ROWS"] = "0"
-        environment["CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS"] = "5"
-        process.environment = environment
-        if let nullOutput = FileHandle(forWritingAtPath: "/dev/null") {
-            process.standardOutput = nullOutput
-            process.standardError = nullOutput
-        }
-        process.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.sidebarPruneProcess = nil
-            }
-        }
-
-        do {
-            try process.run()
-            sidebarPruneProcess = process
-        } catch {
-            sidebarPruneProcess = nil
-        }
-    }
-
     @objc private func toggleKeepAwake() {
         KeepAwakeController.shared.toggle()
     }
@@ -7766,7 +7763,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         syncProcess?.terminate()
-        sidebarPruneProcess?.terminate()
         KeyboardCleanController.shared.stop()
         KeepAwakeController.shared.stop()
         NSApp.terminate(nil)
@@ -7774,7 +7770,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         syncProcess?.terminate()
-        sidebarPruneProcess?.terminate()
         KeyboardCleanController.shared.stop()
         KeepAwakeController.shared.stop()
     }

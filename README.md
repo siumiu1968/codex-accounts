@@ -22,6 +22,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.5.3 更新介紹
+
+V2.5.3 配合新版 ChatGPT Codex 同 GPT-5.6：移除會將對話模型強制改返 GPT-5.5 嘅資料庫 trigger，保留每個 profile 同每條對話自己揀嘅模型。對話同步改為避開使用中嘅 SQLite，開啟 profile 前先安全補齊索引；同時停止每 5 秒自動清理側欄，避免新對話或 project 被誤刪。自動化介面亦會顯示真實 10 分鐘同步週期、上次成功時間同手動整理入口，12 套外觀主題亦換成對比更清楚嘅冷暖配色。
+
 ### V2.5.2 更新介紹
 
 V2.5.2 修正語言切換卡片過闊，撞到左側欄邊緣同 scroll indicator 嘅問題。今版亦加強書面繁體同簡體本地化轉換，避免「邊個」、「搵唔到」、「剔選」、「入面」、「掣」等廣東話詞語殘留喺非廣東話介面。
@@ -114,7 +118,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.5.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.5.3 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -167,6 +171,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.5.3 更新介绍
+
+V2.5.3 适配新版 ChatGPT Codex 和 GPT-5.6：移除会把对话模型强制改回 GPT-5.5 的数据库 trigger，保留每个 profile 和每条对话自行选择的模型。对话同步现在会避开正在使用的 SQLite，并在打开 profile 前安全补齐索引；同时停止每 5 秒自动清理侧栏，避免误删新对话或 project。自动化界面也会显示真实的 10 分钟同步周期、上次成功时间和手动整理入口，12 套外观主题也改为对比更清晰的冷暖配色。
 
 ### V2.5.2 更新介绍
 
@@ -260,7 +268,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.5.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.5.3 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -313,6 +321,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.5.3 Update
+
+V2.5.3 adds compatibility for the unified ChatGPT Codex app and GPT-5.6. It removes database triggers that forced conversation models back to GPT-5.5, preserves each profile and thread model choice, skips SQLite databases that are currently in use, and reconciles indexes before opening a profile. The five-second sidebar cleanup loop is removed to avoid deleting new tasks or projects. Automation UI now shows the real ten-minute cadence, last successful sync, and a manual sidebar cleanup action. All 12 appearance themes now use clearer, balanced cool-and-warm palettes.
 
 ### V2.5.2 Update
 
@@ -406,7 +418,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.5.2, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.5.3, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 
