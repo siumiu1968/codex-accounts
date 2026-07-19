@@ -2,46 +2,43 @@
 
 **语言：** [繁體中文 / 简体中文 / English](README.md) | 简体中文
 
-![Codex Accounts v2 overview](docs/assets/codex-accounts-v2-hero.png)
+Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / OpenAI profile。每个 profile 都有独立的 `CODEX_HOME` 和应用数据目录，因此可以保持不同的登录状态，不必反复退出和重新登录。
 
-> 截图使用的是演示 profile 名称和假的本地路径，不包含真实账号名称或真实用户路径。
+![Codex Accounts 2.5.5 演示界面](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
 
-## 简介
+![Codex Accounts 2.5.5 主题与设置](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
 
-Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+> 两张图片都只使用虚构 profile 名称、`/tmp/demo-profiles/...` 演示路径和模拟用量，不包含真实账号、姓名、电脑用户名、token 或对话内容。
 
-## v2 功能
+## 2.5.5 更新
 
-- 新增、打开、关闭、改名、显示资料夹、归档和删除多个 profile。
-- 每个 profile 使用独立登录状态，不同 OpenAI / GPT 账号互不混用。
-- 打开 profile 前会先同步本地记忆，再共享本地对话记录，然后才打开账号窗口。
-- 显示 5H / 1W 用量、百分比和恢复时间，并支持快速 reload 动画。
-- 每分钟刷新登录状态和 quota，并保留最近可用数据。
-- 可选本地 Codex 对话记录共享。
-- 可选同步 `AGENTS.md`、`memories/`、`rules/`。
-- 防睡眠开关使用 `caffeinate`，并会跟随真实系统进程状态。
-- 手机远程 Bridge：在 Mac app 创建手机登录账号，Android app 用同一组 username/password 登录后控制 profile、同步、打开/关闭窗口和发送 prompt。
-- 远程安全选项：Bridge 默认只接受登录 session，支持配合 Tailscale 或 Cloudflare Tunnel + Access service token 使用。
-- Liquid Glass 界面、多主题、hover 发光、profile 卡片动画。
-- 菜单栏快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
+- 修复“今日使用”在睡眠、断电或异常关机后可能超过 24 小时的问题；睡眠和关机时间不会计入。
+- 登录状态以当前检查结果为准，避免旧缓存或临时网络错误把已登录 profile 错误显示为“未登录”。
+- 防睡眠改为三档彩色滑杆：关闭、开屏防睡眠、合盖继续运行。合盖模式需要 macOS 管理员确认，应用不会保存管理员密码。
+- 提供 8 个辨识度更高的主题：石墨、极光、日落、霓虹、深海、樱花、森林和午夜。
+- 修复主题名称被省略、主题卡片重叠及小窗口排版问题。
+- 改善 GPT-5.6 模型选择和本地对话同步，减少 profile 切换后模型设置或侧栏记录异常。
 
-## 图片
+## 主要功能
 
-![Profile list with quota meters](docs/assets/codex-accounts-v2-profiles.png)
-
-![Automation and Keep Awake controls](docs/assets/codex-accounts-v2-sidebar.png)
-
-![Toolbar controls](docs/assets/codex-accounts-v2-toolbar.png)
-
-![Mobile Remote Bridge and Android control app](docs/assets/codex-accounts-v2-remote.png)
+- 创建、打开、关闭、改名、显示目录、归档和删除多个 profile。
+- 每个 profile 保持独立的 Codex / OpenAI 登录状态。
+- 打开 profile 前同步本地记忆、规则、插件设置和可选的本地对话记录。
+- 显示官方接口当前提供的 quota、剩余百分比和恢复时间，并支持手动刷新。
+- 统计当天实际运行时间，睡眠和关机时间不计入。
+- 导出或导入 `.codexshare` 对话包，方便在可信设备或团队成员之间交接本地上下文。
+- 三档防睡眠控制，以及键盘清洁模式。
+- 8 个 Liquid Glass 风格主题，支持香港粤语、繁体中文、简体中文、英语和日语界面。
+- 菜单栏可快速新增 profile、同步、关闭受管理的 Codex 窗口和切换防睡眠模式。
+- 应用内检查并安装新的 GitHub Release。
 
 ## 安装
 
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下载 `Codex-Accounts-macOS.zip`。
 2. 解压后把 `Codex Accounts.app` 移到 `/Applications`。
-3. 从 Finder 打开 app。
+3. 从 Finder 打开应用。
 
-如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
+如果 macOS 阻止首次打开，请进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts` 并选择 `Open Anyway`。
 
 ## 从源码构建
 
@@ -52,39 +49,24 @@ scripts/build_codex_accounts_app.zsh
 open "/Applications/Codex Accounts.app"
 ```
 
-创建 release ZIP：
+创建 Release ZIP：
 
 ```zsh
 scripts/package_release.zsh
 ```
 
-输出位置：
-
-```text
-dist/Codex-Accounts-macOS.zip
-```
-
-构建 Android 遥控 APK：
-
-```zsh
-android/build_apk.zsh
-```
-
-输出位置：
-
-```text
-android/dist/CodexRemote-debug.apk
-```
+输出文件：`dist/Codex-Accounts-macOS.zip`
 
 ## 隐私
 
-- 不会复制 OpenAI auth token、cookie 或 account session 到其他 profile。
-- 不会同步 OpenAI 云端对话，也不会同步 ChatGPT server-side memory。
-- 不会把账号凭证发送到第三方。
-- 手机远程账号只保存在本机 `~/Library/Application Support/Codex Accounts/remote-users.json`，密码用 PBKDF2 hash 保存。
-- 用量查询只会使用该 profile 的本地 token 请求官方 Codex / ChatGPT 用量接口。
-- 这是非官方辅助工具，与 OpenAI 没有关联。
+- 不会把某个 profile 的 OpenAI auth token、cookie 或登录 session 复制到其他 profile。
+- 不会同步 OpenAI 云端对话或 ChatGPT server-side memory。
+- 不会把账号凭证发送给第三方。
+- 本地对话、记忆和设置只会在用户选择的本机 profile 之间处理。
+- 用量查询只使用对应 profile 的本地凭证请求官方 Codex / ChatGPT 接口。
+- 合盖防睡眠只在 macOS 管理员确认后更改系统睡眠设置，应用不会保存密码。
+- 本项目是非官方辅助工具，与 OpenAI 没有从属关系。
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT，详见 [LICENSE](LICENSE)。

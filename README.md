@@ -2,17 +2,11 @@
 
 **Languages:** [繁體中文](#繁體中文) | [简体中文](#简体中文) | [English](#english)
 
-![Codex Accounts V2.2 overview](docs/assets/codex-accounts-v2.2-real-zh-HK.png)
+![Codex Accounts 2.5.5 overview with fictional profiles and quota data](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
 
-> The screenshots use an anonymized local user path. They do not expose the real macOS account name.
+![Codex Accounts 2.5.5 eight-theme selector](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
 
-## Screenshots
-
-![Codex Accounts V2.2 Traditional Chinese Hong Kong](docs/assets/codex-accounts-v2.2-real-zh-HK.png)
-
-![Codex Accounts V2.2 Simplified Chinese](docs/assets/codex-accounts-v2.2-real-zh-CN.png)
-
-![Codex Accounts V2.2 English](docs/assets/codex-accounts-v2.2-real-en.png)
+> 私隱說明 / Privacy: 圖中所有 profile 名稱、`/tmp/demo-profiles` 路徑及 quota 數值均為虛構示範資料。All profile names, `/tmp/demo-profiles` paths, and quota values shown above are fictional demo data.
 
 ---
 
@@ -21,6 +15,14 @@
 ## 繁體中文
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
+
+### V2.5.5 更新介紹
+
+V2.5.5 修正「今日使用」喺睡眠、斷電或異常關機後可能超過 24 小時嘅問題，睡眠同關機時間唔會計算；登入狀態改以即時檢查為準，避免舊 cache 或暫時 403 將已登入帳戶誤標為未登入。防睡眠改為三段彩色滑桿：關閉、開屏防睡眠、合蓋繼續運行；合蓋模式需要 macOS 管理員確認，App 唔會保存密碼。主題整理成石墨、極光、日落、霓虹、深海、櫻花、森林、午夜 8 款，並修正名稱省略及卡片重疊。
+
+### V2.5.3 更新介紹
+
+V2.5.3 配合新版 ChatGPT Codex 同 GPT-5.6：移除會將對話模型強制改返 GPT-5.5 嘅資料庫 trigger，保留每個 profile 同每條對話自己揀嘅模型。對話同步改為避開使用中嘅 SQLite，開啟 profile 前先安全補齊索引；同時停止每 5 秒自動清理側欄，避免新對話或 project 被誤刪。自動化介面亦會顯示真實 10 分鐘同步週期、上次成功時間同手動整理入口，外觀主題亦重新調整冷暖配色，令介面層次更清楚。
 
 ### V2.5.2 更新介紹
 
@@ -87,15 +89,15 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
 - 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
 - 打開 profile 前先同步：先同步本機記憶、rules、AGENTS 同外掛設定，之後才打開該帳戶視窗。
-- 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間，並支援快速 reload 動畫。
+- 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間；「今日使用」只計 Codex 實際運行時間，睡眠同關機時間唔會計算。
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
 - 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
 - 記憶與外掛同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，外掛啟用狀態會喺不同帳號之間合併。
-- 防睡眠：用 `caffeinate` 防止 Mac 自動睡眠，按鈕會跟隨實際系統狀態；開啟時會監察合蓋狀態，合蓋降內置屏幕亮度，開蓋或關閉功能時恢復亮度。
+- 三段防睡眠：關閉、開屏防睡眠、合蓋繼續運行；開屏模式使用 `caffeinate`，合蓋模式需要 macOS 管理員確認，離開時會恢復系統設定。
 - 電腦清潔模式：暫停大部分鍵盤輸入，方便清潔鍵盤，保留滑鼠/觸控板操作去關閉模式。
 - 對話包匯出/導入：可把單一對話打包成 `.codexshare`，匯入到單一或全部 profile，方便可信團隊交接上下文。
 - 更新通道：檢查 GitHub release，驗證下載檔版本同 bundle id，然後自動替換 `/Applications/Codex Accounts.app`。
-- Liquid Glass 介面：多主題、hover 發光、profile 卡片動效、廣東話 / 繁體中文 / 簡體中文 / 英文 / 日本語介面。
+- Liquid Glass 介面：8 款高辨識主題、hover 發光、profile 卡片動效、廣東話 / 繁體中文 / 簡體中文 / 英文 / 日本語介面。
 - 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
 
 ### 不會做的事
@@ -114,7 +116,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.5.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.5.5 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -167,6 +169,14 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.5.5 更新介绍
+
+V2.5.5 修正“今日使用”在睡眠、断电或异常关机后可能超过 24 小时的问题，睡眠和关机时间不会计入；登录状态改为以实时检查为准，避免旧 cache 或临时 403 将已登录账号误标为未登录。防睡眠改为三段彩色滑杆：关闭、开屏防睡眠、合盖继续运行；合盖模式需要 macOS 管理员确认，App 不会保存密码。主题整理为石墨、极光、日落、霓虹、深海、樱花、森林、午夜 8 款，并修正名称省略和卡片重叠。
+
+### V2.5.3 更新介绍
+
+V2.5.3 适配新版 ChatGPT Codex 和 GPT-5.6：移除会把对话模型强制改回 GPT-5.5 的数据库 trigger，保留每个 profile 和每条对话自行选择的模型。对话同步现在会避开正在使用的 SQLite，并在打开 profile 前安全补齐索引；同时停止每 5 秒自动清理侧栏，避免误删新对话或 project。自动化界面也会显示真实的 10 分钟同步周期、上次成功时间和手动整理入口，外观主题也重新调整冷暖配色，让界面层次更清晰。
 
 ### V2.5.2 更新介绍
 
@@ -233,15 +243,15 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
 - 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
 - 打开 profile 前先同步：先同步本地记忆、rules、AGENTS 和插件设置，然后才打开该账号窗口。
-- 用量显示：显示 5H / 1W 额度、百分比和恢复时间，并支持快速 reload 动画。
+- 用量显示：显示 5H / 1W 额度、百分比和恢复时间；“今日使用”只计算 Codex 实际运行时间，睡眠和关机时间不会计入。
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
 - 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
 - 记忆与插件同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，插件启用状态会在不同账号之间合并。
-- 防睡眠：用 `caffeinate` 防止 Mac 自动睡眠，按钮会跟随实际系统状态；开启时会监测合盖状态，合盖降低内置屏幕亮度，开盖或关闭功能时恢复亮度。
+- 三段防睡眠：关闭、开屏防睡眠、合盖继续运行；开屏模式使用 `caffeinate`，合盖模式需要 macOS 管理员确认，离开时会恢复系统设置。
 - 电脑清洁模式：暂停大部分键盘输入，方便清洁键盘，保留鼠标/触控板操作去关闭模式。
 - 对话包导出/导入：可把单一对话打包成 `.codexshare`，导入到单一或全部 profile，方便可信团队交接上下文。
 - 更新通道：检查 GitHub release，验证下载文件版本和 bundle id，然后自动替换 `/Applications/Codex Accounts.app`。
-- Liquid Glass 界面：多主题、hover 发光、profile 卡片动效、香港粤语 / 繁体中文 / 简体中文 / 英文 / 日文界面。
+- Liquid Glass 界面：8 款高辨识度主题、hover 发光、profile 卡片动效、香港粤语 / 繁体中文 / 简体中文 / 英文 / 日文界面。
 - 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
 
 ### 它不会做什么
@@ -260,7 +270,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.5.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.5.5 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -313,6 +323,14 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.5.5 Update
+
+V2.5.5 fixes Today usage exceeding 24 hours after sleep, power loss, or an unexpected shutdown; sleep and offline time are no longer counted. Live checks now take priority over stale cache or temporary 403 responses so signed-in profiles are not incorrectly marked as signed out. Keep Awake is now a color-coded three-level slider for Off, Screen Awake, and Lid Closed; Lid Closed mode requires macOS administrator approval, and the app never stores the password. The theme set is streamlined to eight distinct choices—Graphite, Aurora, Sunset, Neon, Ocean, Sakura, Forest, and Midnight—with fixes for truncated labels and overlapping cards.
+
+### V2.5.3 Update
+
+V2.5.3 adds compatibility for the unified ChatGPT Codex app and GPT-5.6. It removes database triggers that forced conversation models back to GPT-5.5, preserves each profile and thread model choice, skips SQLite databases that are currently in use, and reconciles indexes before opening a profile. The five-second sidebar cleanup loop is removed to avoid deleting new tasks or projects. Automation UI now shows the real ten-minute cadence, last successful sync, and a manual sidebar cleanup action. Appearance themes also receive clearer, balanced cool-and-warm palettes.
 
 ### V2.5.2 Update
 
@@ -379,15 +397,15 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
 - Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
 - Sync before opening: when opening a profile, the app syncs local memory, rules, AGENTS, and plugin settings first, then opens the account window.
-- Usage meters: show 5H / 1W quota, percentage, and reset time with a fast reload animation.
+- Usage meters: show 5H / 1W quota, percentage, and reset time; Today counts only actual Codex runtime and excludes sleep and offline time.
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
 - Optional local history sharing across profiles.
 - Optional memory and plugin sync for `AGENTS.md`, `memories/`, `rules/`, `plugins/`, `skills/`, and `vendor_imports/`, including enabled plugin entries across accounts.
-- Keep Awake: uses `caffeinate` to stop macOS from sleeping, follows the real system process state, monitors lid state, dims the built-in display when the lid closes, and restores brightness when opened or turned off.
+- Three-level Keep Awake: Off, Screen Awake, and Lid Closed; Screen Awake uses `caffeinate`, while Lid Closed requires macOS administrator approval and restores the system setting when disabled.
 - Keyboard Clean Mode: blocks most keyboard input while keeping mouse/trackpad control available so the mode can be turned off safely.
 - Conversation package export/import: package a single thread as `.codexshare` and import it into one profile or all profiles for trusted team handoff.
 - Update channel: checks GitHub releases, validates the downloaded app version and bundle id, then replaces `/Applications/Codex Accounts.app`.
-- Liquid Glass interface: multiple themes, hover glow, profile card animation, Cantonese Hong Kong, Traditional Chinese, Simplified Chinese, English, and Japanese UI.
+- Liquid Glass interface: eight distinct themes, hover glow, profile card animation, Cantonese Hong Kong, Traditional Chinese, Simplified Chinese, English, and Japanese UI.
 - Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
 
 ### What It Does Not Do
@@ -406,7 +424,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.5.2, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.5.5, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

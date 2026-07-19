@@ -16,7 +16,11 @@ SHARED_HISTORY_ROOT="${SHARED_HISTORY_ROOT:-$HOME/.codex-shared-history}"
 SHARED_SESSION_INDEX_FILE="${SHARED_SESSION_INDEX_FILE:-$SHARED_HISTORY_ROOT/session_index.jsonl}"
 SHARED_SESSIONS_DIR="${SHARED_SESSIONS_DIR:-$SHARED_HISTORY_ROOT/sessions}"
 SHARED_SHELL_SNAPSHOTS_DIR="${SHARED_SHELL_SNAPSHOTS_DIR:-$SHARED_HISTORY_ROOT/shell_snapshots}"
-CODEX_HISTORY_ANCHOR_HOME="${CODEX_HISTORY_ANCHOR_HOME:-$ACCOUNTS_ROOT/250345400}"
+CODEX_HISTORY_ANCHOR_FILE="${CODEX_HISTORY_ANCHOR_FILE:-$APP_DATA_ROOT/history-anchor-home}"
+if [[ -z "${CODEX_HISTORY_ANCHOR_HOME:-}" && -r "$CODEX_HISTORY_ANCHOR_FILE" ]]; then
+  IFS= read -r CODEX_HISTORY_ANCHOR_HOME < "$CODEX_HISTORY_ANCHOR_FILE" || true
+fi
+CODEX_HISTORY_ANCHOR_HOME="${CODEX_HISTORY_ANCHOR_HOME:-$PRIMARY_CODEX_HOME}"
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
 CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS="${CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS:-5}"
 USAGE_API_URL="${USAGE_API_URL:-https://chatgpt.com/backend-api/wham/usage}"
@@ -44,6 +48,9 @@ CODEX_AUTO_SYNC_LOCK_MAX_WAITS="${CODEX_AUTO_SYNC_LOCK_MAX_WAITS:-0}"
 CODEX_SYNC_STALE_LOCK_SECONDS="${CODEX_SYNC_STALE_LOCK_SECONDS:-15}"
 CODEX_SKIP_ACTIVE_STATE_DB_WRITES="${CODEX_SKIP_ACTIVE_STATE_DB_WRITES:-1}"
 CODEX_DELETE_STALE_THREAD_ROWS="${CODEX_DELETE_STALE_THREAD_ROWS:-0}"
+CODEX_DEFAULT_OPENAI_MODEL="${CODEX_DEFAULT_OPENAI_MODEL:-gpt-5.6-sol}"
+CODEX_DEFAULT_OPENAI_REASONING_EFFORT="${CODEX_DEFAULT_OPENAI_REASONING_EFFORT:-xhigh}"
+CODEX_PRUNE_GLOBAL_STATE_ON_SYNC="${CODEX_PRUNE_GLOBAL_STATE_ON_SYNC:-0}"
 CODEX_PRUNE_LOCAL_THREAD_CATALOG="${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-1}"
 CODEX_CATALOG_ORPHAN_GRACE_SECONDS="${CODEX_CATALOG_ORPHAN_GRACE_SECONDS:-120}"
 CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-1}"
@@ -55,9 +62,10 @@ CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS="${CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS:-0.05}"
 CODEX_RSYNC_MAX_WAITS="${CODEX_RSYNC_MAX_WAITS:-80}"
 CODEX_RSYNC_WAIT_SECONDS="${CODEX_RSYNC_WAIT_SECONDS:-0.1}"
 CODEX_USAGE_LIVE_LOOKUP="${CODEX_USAGE_LIVE_LOOKUP:-0}"
+CODEX_USAGE_LIVE_MIN_PARALLELISM="${CODEX_USAGE_LIVE_MIN_PARALLELISM:-10}"
 USAGE_CACHE_STALE_SECONDS="${USAGE_CACHE_STALE_SECONDS:-604800}"
 SYNC_LOCK_DIR="${SYNC_LOCK_DIR:-$APP_DATA_ROOT/.sync.lock}"
-CODEX_INJECT_PROXY_ENV="${CODEX_INJECT_PROXY_ENV:-1}"
+CODEX_INJECT_PROXY_ENV="${CODEX_INJECT_PROXY_ENV:-auto}"
 CODEX_PROXY_URL="${CODEX_PROXY_URL:-http://127.0.0.1:7897}"
 CODEX_NO_PROXY="${CODEX_NO_PROXY:-localhost,127.0.0.1,::1}"
 DASHSCOPE_SECRET_ENV_FILE="${DASHSCOPE_SECRET_ENV_FILE:-$ACCOUNTS_ROOT/.secrets/dashscope.env}"
@@ -93,6 +101,7 @@ Usage:
   scripts/codex_multi_account.zsh sync-account <account-name>
   scripts/codex_multi_account.zsh sync-account-for-launch <account-name>
   scripts/codex_multi_account.zsh repair-account1
+  scripts/codex_multi_account.zsh restore-openai-config-home <CODEX_HOME>
   scripts/codex_multi_account.zsh repair-compactions <account-name>
   scripts/codex_multi_account.zsh sync-loop
   scripts/codex_multi_account.zsh init-account <account-name>
@@ -163,10 +172,31 @@ Notes:
   - Conversation packages (.codexshare) export/import one selected local Codex
     conversation, including the rollout JSONL and thread SQLite row. They never
     include auth.json, cookies, or Codex config by default.
-  - Codex profile launches inject HTTP_PROXY/HTTPS_PROXY/ALL_PROXY by default
-    so WSS and HTTPS traffic use the same local proxy. Set
-    CODEX_INJECT_PROXY_ENV=0 to disable this.
+  - Proxy injection defaults to auto: the bundled localhost proxy URL is used
+    only while its listener is available. Set CODEX_INJECT_PROXY_ENV=1 to force
+    a configured proxy, or CODEX_INJECT_PROXY_ENV=0 to disable proxy injection.
 USAGE
+}
+
+proxy_injection_enabled() {
+  local target host port
+
+  [[ -n "$CODEX_PROXY_URL" ]] || return 1
+  case "$CODEX_INJECT_PROXY_ENV" in
+    1) return 0 ;;
+    0) return 1 ;;
+    auto) ;;
+    *) return 1 ;;
+  esac
+
+  target="${CODEX_PROXY_URL#*://}"
+  target="${target%%/*}"
+  host="${target%:*}"
+  port="${target##*:}"
+  [[ "$host" == "127.0.0.1" || "$host" == "localhost" ]] || return 1
+  [[ "$port" == <-> && "$port" -ge 1 && "$port" -le 65535 ]] || return 1
+  command -v nc >/dev/null 2>&1 || return 1
+  nc -z "$host" "$port" >/dev/null 2>&1
 }
 
 require_rsync() {
@@ -340,24 +370,27 @@ write_top_level_model_config() {
   local config_file="$1"
   local model="$2"
   local provider="$3"
+  local reasoning_effort="${4:-}"
   [[ -f "$config_file" ]] || return 0
 
-  MODEL_VALUE="$model" PROVIDER_VALUE="$provider" CONFIG_FILE="$config_file" python3 - <<'PY'
+  MODEL_VALUE="$model" PROVIDER_VALUE="$provider" REASONING_EFFORT_VALUE="$reasoning_effort" CONFIG_FILE="$config_file" python3 - <<'PY'
 from pathlib import Path
 import os
 
 path = Path(os.environ["CONFIG_FILE"])
 model = os.environ["MODEL_VALUE"]
 provider = os.environ["PROVIDER_VALUE"]
+reasoning_effort = os.environ["REASONING_EFFORT_VALUE"]
 lines = path.read_text(errors="replace").splitlines()
 out = []
 in_table = False
 seen_model = False
 seen_provider = False
+seen_reasoning_effort = False
 inserted = False
 
 def insert_missing():
-    global inserted, seen_model, seen_provider
+    global inserted, seen_model, seen_provider, seen_reasoning_effort
     if inserted:
         return
     if not seen_model:
@@ -366,6 +399,9 @@ def insert_missing():
     if not seen_provider:
         out.append(f'model_provider = "{provider}"')
         seen_provider = True
+    if reasoning_effort and not seen_reasoning_effort:
+        out.append(f'model_reasoning_effort = "{reasoning_effort}"')
+        seen_reasoning_effort = True
     inserted = True
 
 for line in lines:
@@ -383,6 +419,14 @@ for line in lines:
         if not seen_provider:
             out.append(f'model_provider = "{provider}"')
             seen_provider = True
+        continue
+    if not in_table and stripped.startswith("model_reasoning_effort"):
+        if reasoning_effort:
+            if not seen_reasoning_effort:
+                out.append(f'model_reasoning_effort = "{reasoning_effort}"')
+                seen_reasoning_effort = True
+        else:
+            out.append(line)
         continue
     out.append(line)
 
@@ -631,6 +675,111 @@ backup_config_once() {
   cp -p "$config_file" "$backup_dir/config.toml" 2>/dev/null || true
 }
 
+preferred_openai_model_for_home() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  local cache_file="$home_dir/models_cache.json"
+  local codex_bin="$CODEX_APP/Contents/Resources/codex"
+  local current_model current_provider selected
+
+  if [[ -f "$config_file" ]]; then
+    current_model="$(awk '
+      BEGIN { in_table = 0 }
+      /^\[/ { in_table = 1 }
+      in_table == 0 && /^model[[:space:]]*=/ {
+        value = $0
+        sub(/^[^=]*=[[:space:]]*"/, "", value)
+        sub(/"[[:space:]]*$/, "", value)
+        print value
+        exit
+      }
+    ' "$config_file" 2>/dev/null || true)"
+    current_provider="$(awk '
+      BEGIN { in_table = 0 }
+      /^\[/ { in_table = 1 }
+      in_table == 0 && /^model_provider[[:space:]]*=/ {
+        value = $0
+        sub(/^[^=]*=[[:space:]]*"/, "", value)
+        sub(/"[[:space:]]*$/, "", value)
+        print value
+        exit
+      }
+    ' "$config_file" 2>/dev/null || true)"
+    if [[ "$current_provider" == "openai" && "$current_model" =~ '^gpt-[A-Za-z0-9._:-]+$' ]]; then
+      printf '%s\n' "$current_model"
+      return 0
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1 && [[ -f "$cache_file" ]]; then
+    selected="$(jq -r '
+      [.models[]?
+        | select((.visibility // "list") != "hide")
+        | select((.slug // "") | startswith("gpt-"))]
+      | sort_by(.priority // 9999)
+      | (.[0].slug // empty)
+    ' "$cache_file" 2>/dev/null || true)"
+    if [[ "$selected" =~ '^[A-Za-z0-9._:-]+$' ]]; then
+      printf '%s\n' "$selected"
+      return 0
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1 && [[ -x "$codex_bin" ]]; then
+    selected="$(CODEX_HOME="$home_dir" "$codex_bin" debug models --bundled 2>/dev/null | jq -r '
+      [.models[]?
+        | select((.visibility // "list") != "hide")
+        | select((.slug // "") | startswith("gpt-"))]
+      | sort_by(.priority // 9999)
+      | (.[0].slug // empty)
+    ' 2>/dev/null || true)"
+    if [[ "$selected" =~ '^[A-Za-z0-9._:-]+$' ]]; then
+      printf '%s\n' "$selected"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+preferred_openai_reasoning_effort_for_home() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  local effort
+
+  [[ -f "$config_file" ]] || return 1
+  effort="$(awk '
+    BEGIN { in_table = 0 }
+    /^\[/ { in_table = 1 }
+    in_table == 0 && /^model_reasoning_effort[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*$/, "", value)
+      print value
+      exit
+    }
+  ' "$config_file" 2>/dev/null || true)"
+
+  if [[ "$effort" =~ '^(none|minimal|low|medium|high|xhigh|max|ultra)$' ]]; then
+    printf '%s\n' "$effort"
+    return 0
+  fi
+  return 1
+}
+
+clear_top_level_model_config() {
+  local config_file="$1"
+  local tmp_file="$config_file.codex-accounts.$$"
+
+  awk '
+    BEGIN { in_table = 0 }
+    /^\[/ { in_table = 1 }
+    in_table == 0 && /^(model|model_provider|model_catalog_json)[[:space:]]*=/ { next }
+    { print }
+  ' "$config_file" > "$tmp_file" && mv "$tmp_file" "$config_file"
+  rm -f "$tmp_file" 2>/dev/null || true
+}
+
 configure_account1_aliyun_proxy_for_home() {
   local home_dir="$1"
   local config_file="$home_dir/config.toml"
@@ -657,15 +806,17 @@ restore_non_account1_openai_config_for_home() {
   is_primary_codex_home "$home_dir" && return 0
   [[ -f "$config_file" ]] || return 0
 
-  if awk '
-    BEGIN { in_table = 0; bad = 0 }
+  if ! awk -v wanted_model="$CODEX_DEFAULT_OPENAI_MODEL" -v wanted_effort="$CODEX_DEFAULT_OPENAI_REASONING_EFFORT" '
+    BEGIN { in_table = 0; ok_model = 0; ok_provider = 0; ok_effort = 0 }
     /^\[/ { in_table = 1 }
-    in_table == 0 && ($0 == "model_provider = \"Model_Studio\"" || $0 == "model_provider = \"Model_Studio_Coding_Plan\"" || $0 == "model_provider = \"ai_proxy\"") { bad = 1 }
-    END { exit bad ? 0 : 1 }
+    in_table == 0 && $0 == "model = \"" wanted_model "\"" { ok_model = 1 }
+    in_table == 0 && $0 == "model_provider = \"openai\"" { ok_provider = 1 }
+    in_table == 0 && $0 == "model_reasoning_effort = \"" wanted_effort "\"" { ok_effort = 1 }
+    END { exit (ok_model && ok_provider && ok_effort) ? 0 : 1 }
   ' "$config_file" >/dev/null 2>&1; then
-    backup_config_once "$home_dir" "non-account1-openai-restore"
-    write_top_level_model_config "$config_file" "gpt-5.5" "openai"
+    backup_config_once "$home_dir" "openai-default-model"
   fi
+  write_top_level_model_config "$config_file" "$CODEX_DEFAULT_OPENAI_MODEL" "openai" "$CODEX_DEFAULT_OPENAI_REASONING_EFFORT"
 }
 
 home_uses_account1_ai_proxy() {
@@ -759,18 +910,8 @@ normalize_thread_sources_for_home() {
     [[ -f "$db" ]] || continue
     sqlite3 "$db" "
       PRAGMA busy_timeout = 5000;
-      CREATE TRIGGER IF NOT EXISTS codex_accounts_thread_source_ai
-      AFTER INSERT ON threads
-      WHEN NEW.archived = 0 AND NEW.source = 'vscode' AND (NEW.thread_source IS NULL OR NEW.thread_source = '')
-      BEGIN
-        UPDATE threads SET thread_source = 'user' WHERE id = NEW.id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS codex_accounts_thread_source_au
-      AFTER UPDATE OF source, thread_source, archived ON threads
-      WHEN NEW.archived = 0 AND NEW.source = 'vscode' AND (NEW.thread_source IS NULL OR NEW.thread_source = '')
-      BEGIN
-        UPDATE threads SET thread_source = 'user' WHERE id = NEW.id;
-      END;
+      DROP TRIGGER IF EXISTS codex_accounts_thread_source_ai;
+      DROP TRIGGER IF EXISTS codex_accounts_thread_source_au;
     " >/dev/null 2>&1 || true
     count="$(sqlite3 "$db" "SELECT count(*) FROM threads WHERE archived = 0 AND source = 'vscode' AND (thread_source IS NULL OR thread_source = '');" 2>/dev/null || echo 0)"
     [[ "$count" == <-> ]] || count=0
@@ -788,12 +929,19 @@ normalize_thread_sources_for_home() {
 restore_default_thread_model_providers_for_home() {
   local home_dir="$1"
   local backup_mode="${2:-backup}"
-  local db count timestamp backup_dir
+  local db count timestamp backup_dir preferred_model preferred_effort
+  local legacy_model_condition reasoning_column_count reasoning_update
 
   [[ "${CODEX_PRESERVE_TOP_LEVEL_OPENAI_HTTP_PROVIDER:-0}" == "1" ]] && return 0
   is_primary_codex_home "$home_dir" && return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
   timestamp="$(date '+%Y%m%d-%H%M%S')"
+  preferred_model="$(preferred_openai_model_for_home "$home_dir" 2>/dev/null || true)"
+  preferred_effort="$(preferred_openai_reasoning_effort_for_home "$home_dir" 2>/dev/null || true)"
+  legacy_model_condition=""
+  if [[ "$preferred_model" != "gpt-5.5" ]]; then
+    legacy_model_condition=" OR COALESCE(model, '') IN ('', 'gpt-5.5')"
+  fi
 
   for db in "$home_dir/state_5.sqlite" "$home_dir/sqlite/state_5.sqlite"; do
     [[ -f "$db" ]] || continue
@@ -803,26 +951,11 @@ restore_default_thread_model_providers_for_home() {
       DROP TRIGGER IF EXISTS codex_accounts_thread_model_provider_au;
       DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_ai;
       DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_au;
-      CREATE TRIGGER IF NOT EXISTS codex_accounts_openai_thread_provider_ai
-      AFTER INSERT ON threads
-      WHEN NEW.archived = 0
-        AND (COALESCE(NEW.model_provider, '') <> 'openai' OR COALESCE(NEW.model, '') <> 'gpt-5.5')
-      BEGIN
-        UPDATE threads
-        SET model_provider = 'openai', model = 'gpt-5.5'
-        WHERE id = NEW.id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS codex_accounts_openai_thread_provider_au
-      AFTER UPDATE OF source, archived, model_provider, model ON threads
-      WHEN NEW.archived = 0
-        AND (COALESCE(NEW.model_provider, '') <> 'openai' OR COALESCE(NEW.model, '') <> 'gpt-5.5')
-      BEGIN
-        UPDATE threads
-        SET model_provider = 'openai', model = 'gpt-5.5'
-        WHERE id = NEW.id;
-      END;
+      DROP TRIGGER IF EXISTS codex_accounts_openai_thread_provider_ai;
+      DROP TRIGGER IF EXISTS codex_accounts_openai_thread_provider_au;
     " >/dev/null 2>&1 || true
-    count="$(sqlite3 "$db" "SELECT count(*) FROM threads WHERE archived = 0 AND (COALESCE(model_provider, '') <> 'openai' OR COALESCE(model, '') <> 'gpt-5.5');" 2>/dev/null || echo 0)"
+    [[ "$preferred_model" =~ '^[A-Za-z0-9._:-]+$' ]] || continue
+    count="$(sqlite3 "$db" "SELECT count(*) FROM threads WHERE archived = 0 AND (COALESCE(model_provider, '') NOT IN ('', 'openai') OR COALESCE(model, '') LIKE 'qwen%' OR COALESCE(model, '') LIKE 'glm-%' OR COALESCE(model, '') LIKE 'kimi-%' OR COALESCE(model, '') LIKE 'MiniMax-%'$legacy_model_condition);" 2>/dev/null || echo 0)"
     [[ "$count" == <-> ]] || count=0
     (( count > 0 )) || continue
 
@@ -833,7 +966,12 @@ restore_default_thread_model_providers_for_home() {
       [[ -f "$db-wal" ]] && cp -p "$db-wal" "$backup_dir/$(basename "$db")-wal" 2>/dev/null || true
       [[ -f "$db-shm" ]] && cp -p "$db-shm" "$backup_dir/$(basename "$db")-shm" 2>/dev/null || true
     fi
-    sqlite3 "$db" "UPDATE threads SET model_provider = 'openai', model = 'gpt-5.5' WHERE archived = 0 AND (COALESCE(model_provider, '') <> 'openai' OR COALESCE(model, '') <> 'gpt-5.5');" >/dev/null 2>&1 || true
+    reasoning_column_count="$(sqlite3 "$db" "SELECT count(*) FROM pragma_table_info('threads') WHERE name = 'reasoning_effort';" 2>/dev/null || echo 0)"
+    reasoning_update=""
+    if [[ "$reasoning_column_count" == "1" && -n "$preferred_effort" ]]; then
+      reasoning_update=", reasoning_effort = '$preferred_effort'"
+    fi
+    sqlite3 "$db" "UPDATE threads SET model_provider = 'openai', model = '$preferred_model'$reasoning_update WHERE archived = 0 AND (COALESCE(model_provider, '') NOT IN ('', 'openai') OR COALESCE(model, '') LIKE 'qwen%' OR COALESCE(model, '') LIKE 'glm-%' OR COALESCE(model, '') LIKE 'kimi-%' OR COALESCE(model, '') LIKE 'MiniMax-%'$legacy_model_condition);" >/dev/null 2>&1 || true
   done
 }
 
@@ -850,6 +988,8 @@ restore_account1_visible_thread_model_providers_for_home() {
       PRAGMA busy_timeout = 5000;
       DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_ai;
       DROP TRIGGER IF EXISTS codex_accounts_account1_thread_provider_au;
+      DROP TRIGGER IF EXISTS codex_accounts_openai_thread_provider_ai;
+      DROP TRIGGER IF EXISTS codex_accounts_openai_thread_provider_au;
     " >/dev/null 2>&1 || true
   done
 }
@@ -881,31 +1021,6 @@ normalize_top_level_model_provider_for_home() {
     { print }
   ' "$config_file" > "$tmp_file" && mv "$tmp_file" "$config_file"
   rm -f "$tmp_file" 2>/dev/null || true
-}
-
-post_launch_thread_index_repair_for_home() {
-  local home_dir="$1"
-  local script_path="${0:A}"
-  command -v sqlite3 >/dev/null 2>&1 || return 0
-  nohup zsh -lc '
-    home_dir="$1"
-    script_path="$2"
-    sleep 3
-    for i in {1..60}; do
-      for db in "$home_dir/state_5.sqlite" "$home_dir/sqlite/state_5.sqlite"; do
-        [[ -f "$db" ]] || continue
-        sqlite3 "$db" "
-          PRAGMA busy_timeout = 5000;
-          UPDATE threads SET thread_source = '\''user'\'' WHERE archived = 0 AND source = '\''vscode'\'' AND (thread_source IS NULL OR thread_source = '\'''\'');
-          DROP TRIGGER IF EXISTS codex_accounts_thread_model_provider_ai;
-          DROP TRIGGER IF EXISTS codex_accounts_thread_model_provider_au;
-        " >/dev/null 2>&1 || true
-      done
-      "$script_path" restore-thread-models-home "$home_dir" >/dev/null 2>&1 || true
-      "$script_path" prune-global-state-home "$home_dir" >/dev/null 2>&1 || true
-      sleep 3
-    done
-  ' _ "$home_dir" "$script_path" >/dev/null 2>&1 &
 }
 
 sync_lock_is_stale() {
@@ -1263,32 +1378,50 @@ cached_reset_has_elapsed() {
   return 1
 }
 
+cached_usage_window_age_has_elapsed() {
+  local cache_file="$1"
+  local label="$2"
+  local amount unit window_seconds mtime now age
+
+  if [[ "$label" =~ '^([0-9]+)([mhd])$' ]]; then
+    amount="${match[1]}"
+    unit="${match[2]}"
+  else
+    return 1
+  fi
+
+  case "$unit" in
+    m) window_seconds=$(( amount * 60 )) ;;
+    h) window_seconds=$(( amount * 3600 )) ;;
+    d) window_seconds=$(( amount * 86400 )) ;;
+    *) return 1 ;;
+  esac
+
+  mtime="$(stat -f '%m' "$cache_file" 2>/dev/null || echo 0)"
+  now="$(date '+%s')"
+  age=$(( now - mtime ))
+  (( mtime > 0 && age >= window_seconds ))
+}
+
 cached_usage_has_elapsed_reset() {
-  local cached="$1"
+  local cache_file="$1"
+  local cached="$2"
   local quota="${cached%%$'\t'*}"
   local rest="${cached#*$'\t'}"
   local reset="${rest%%$'\t'*}"
-  local part label saw_window saw_elapsed saw_current_or_unknown
-
-  saw_window=0
-  saw_elapsed=0
-  saw_current_or_unknown=0
+  local part label
 
   for part in ${(s: / :)quota}; do
     part="$(printf '%s' "$part" | trim_usage_text)"
     [[ -n "$part" ]] || continue
-    saw_window=1
     label="${part%% *}"
-    if cached_reset_has_elapsed "$reset" "$label"; then
-      saw_elapsed=1
-    else
-      # Missing, ambiguous, or future reset values should not blank the whole
-      # account. A live refresh can still replace this cache later.
-      saw_current_or_unknown=1
+    if cached_usage_window_age_has_elapsed "$cache_file" "$label" \
+        || cached_reset_has_elapsed "$reset" "$label"; then
+      return 0
     fi
   done
 
-  (( saw_window == 1 && saw_elapsed == 1 && saw_current_or_unknown == 0 ))
+  return 1
 }
 
 cached_usage_lacks_reset_credit_expiries() {
@@ -1309,11 +1442,20 @@ cached_usage_lacks_reset_credit_expiries() {
 read_cached_usage_if_still_current() {
   local cache_file="$1"
   local max_age="$2"
-  local cached
+  local cached raw_cached
+
+  if [[ -f "$cache_file" ]]; then
+    raw_cached="$(cat "$cache_file" 2>/dev/null || true)"
+    if [[ -n "$raw_cached" ]] && cached_usage_has_elapsed_reset "$cache_file" "$raw_cached"; then
+      # Remove the whole snapshot when any advertised window has expired.
+      # Otherwise Swift's local fallback can resurrect the stale sub-window.
+      invalidate_cached_usage "$cache_file"
+      return 1
+    fi
+  fi
 
   cached="$(read_cached_usage "$cache_file" "$max_age" 2>/dev/null || true)"
   [[ -n "$cached" ]] || return 1
-  cached_usage_has_elapsed_reset "$cached" && return 1
   printf '%s\n' "$cached"
 }
 
@@ -1501,16 +1643,35 @@ fetch_reset_credits_detail_for() {
 merge_reset_credits_detail_into_raw_summary() {
   local auth_file="$1"
   local raw_summary="$2"
-  local detail
+  local cache_file="${3:-}"
+  local detail raw_detail cached_line cached_detail
   local -a parts
+
+  parts=("${(@ps:\t:)raw_summary}")
+  raw_detail="${parts[3]:-unknown}"
+
+  # Quota percentages are the time-sensitive part. Avoid a second HTTP call
+  # when the usage response already has enough reset-credit information.
+  if [[ "$raw_detail" == "0" || "$raw_detail" == *"@"* ]]; then
+    printf '%s\n' "$raw_summary"
+    return 0
+  fi
+
+  # Reuse a matching cached expiry instead of delaying every account refresh.
+  if [[ "$raw_detail" =~ '^[1-9][0-9]*$' && -n "$cache_file" && -f "$cache_file" ]]; then
+    cached_line="$(awk 'NR == 1 { print; exit }' "$cache_file" 2>/dev/null || true)"
+    cached_detail="${cached_line##*$'\t'}"
+    if [[ "$cached_detail" == "$raw_detail@"* ]]; then
+      printf '%s\t%s\t%s\n' "${parts[1]:-}" "${parts[2]:-}" "$cached_detail"
+      return 0
+    fi
+  fi
 
   detail="$(fetch_reset_credits_detail_for "$auth_file" 2>/dev/null || true)"
   [[ -n "$detail" ]] || {
     printf '%s\n' "$raw_summary"
     return 0
   }
-
-  parts=("${(@ps:\t:)raw_summary}")
   printf '%s\t%s\t%s\n' "${parts[1]:-}" "${parts[2]:-}" "$detail"
 }
 
@@ -1585,12 +1746,12 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.5.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.5.5"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
   app_server_env=(CODEX_HOME="$home_dir")
-  if [[ "$CODEX_INJECT_PROXY_ENV" == "1" && -n "$CODEX_PROXY_URL" ]]; then
+  if proxy_injection_enabled; then
     app_server_env+=(
       HTTP_PROXY="$CODEX_PROXY_URL"
       HTTPS_PROXY="$CODEX_PROXY_URL"
@@ -1673,7 +1834,7 @@ fetch_usage_summary_via_app_server() {
     ' 2>/dev/null || true)"
     if [[ -n "$raw_summary" ]]; then
       cleanup_app_server_process "$server_pid"
-      raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary")"
+      raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary" "$cache_file")"
       emit_usage_summary_from_raw "$cache_file" "$raw_summary"
       return 0
     fi
@@ -1683,8 +1844,8 @@ fetch_usage_summary_via_app_server() {
       cleanup_app_server_process "$server_pid"
       if [[ "$error_message" == *"token has been invalidated"* \
             || "$error_message" == *"401 Unauthorized"* \
-            || "$error_message" == *"authentication"* \
-            || "$error_message" == *"Authentication"* ]]; then
+            || "$error_message" == *"authentication token is invalid"* \
+            || "$error_message" == *"Authentication token is invalid"* ]]; then
         write_auth_invalid_usage_marker "$cache_file"
         printf '%s\t%s\n' "__auth_invalid__" "unknown"
         return 0
@@ -1704,10 +1865,16 @@ fetch_usage_summary_for() {
   local cache_file
   cache_file="$(usage_cache_file_for "$name")"
 
-  if read_cached_usage_if_still_current "$cache_file" "$USAGE_CACHE_SECONDS"; then
-    return 0
+  # Never reuse an invalid-login marker as a new verdict. A live request can
+  # recreate it immediately when Codex explicitly rejects the current token.
+  if [[ -f "$cache_file" ]] && head -n 1 "$cache_file" 2>/dev/null | grep -q '^__auth_invalid__'; then
+    invalidate_cached_usage "$cache_file"
   fi
+
   if [[ "$CODEX_USAGE_LIVE_LOOKUP" != "1" ]]; then
+    if read_cached_usage_if_still_current "$cache_file" "$USAGE_CACHE_SECONDS"; then
+      return 0
+    fi
     read_cached_usage_if_still_current "$cache_file" "$USAGE_CACHE_STALE_SECONDS" 2>/dev/null || return 1
     return 0
   fi
@@ -1728,8 +1895,9 @@ fetch_usage_summary_for() {
       http_status="$(fetch_usage_http_status "$auth_file" "$tmp_file")"
     else
       fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
-      write_auth_invalid_usage_marker "$cache_file"
-      printf '%s\t%s\n' "__auth_invalid__" "unknown"
+      # Refresh can fail because the network or identity endpoint is unavailable.
+      # Preserve the signed-in state unless a live endpoint explicitly rejects it.
+      read_cached_usage_if_still_current "$cache_file" 600 2>/dev/null || return 1
       return 0
     fi
   fi
@@ -1737,8 +1905,9 @@ fetch_usage_summary_for() {
   if [[ "$http_status" == "403" ]]; then
     rm -f "$tmp_file"
     fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
-    write_auth_invalid_usage_marker "$cache_file"
-    printf '%s\t%s\n' "__auth_invalid__" "unknown"
+    # 403 can mean the quota endpoint is unavailable for this account or route;
+    # it does not prove that the local Codex login is invalid.
+    read_cached_usage_if_still_current "$cache_file" 600 2>/dev/null || return 1
     return 0
   fi
 
@@ -1833,7 +2002,7 @@ fetch_usage_summary_for() {
   rm -f "$tmp_file"
   [[ -n "$raw_summary" ]] || return 1
 
-  raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary")"
+  raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary" "$cache_file")"
   emit_usage_summary_from_raw "$cache_file" "$raw_summary"
 }
 
@@ -1889,11 +2058,17 @@ account_status_for() {
 }
 
 list_accounts_status() {
-  local tmp_dir index name status_parallelism
+  local tmp_dir index name status_parallelism live_min_parallelism
   local -a pids
   tmp_dir="$(mktemp -d)"
   index=0
   status_parallelism="${STATUS_PARALLELISM:-2}"
+  live_min_parallelism="$CODEX_USAGE_LIVE_MIN_PARALLELISM"
+  [[ "$status_parallelism" =~ '^[1-9][0-9]*$' ]] || status_parallelism=2
+  [[ "$live_min_parallelism" =~ '^[1-9][0-9]*$' ]] || live_min_parallelism=10
+  if [[ "$CODEX_USAGE_LIVE_LOOKUP" == "1" && status_parallelism -lt live_min_parallelism ]]; then
+    status_parallelism="$live_min_parallelism"
+  fi
   pids=()
 
   while read -r name; do
@@ -2455,8 +2630,19 @@ sync_global_state_for_homes() {
   homes_payload="$(printf '%s\n' "${homes[@]}")"
   local dest_payload
   dest_payload="${CODEX_GLOBAL_STATE_DEST_HOMES:-}"
+  local active_home_payload
+  active_home_payload=""
+  if [[ "$CODEX_SKIP_ACTIVE_STATE_DB_WRITES" == "1" ]]; then
+    local -a active_probe_homes
+    if [[ -n "$dest_payload" ]]; then
+      active_probe_homes=("${(@f)dest_payload}")
+    else
+      active_probe_homes=("${homes[@]}")
+    fi
+    active_home_payload="$(active_sqlite_homes_payload "${active_probe_homes[@]}")"
+  fi
 
-  CODEX_GLOBAL_STATE_HOMES="$homes_payload" CODEX_GLOBAL_STATE_DEST_HOMES="$dest_payload" python3 - <<'PY'
+  CODEX_GLOBAL_STATE_HOMES="$homes_payload" CODEX_GLOBAL_STATE_DEST_HOMES="$dest_payload" CODEX_ACTIVE_DB_HOMES="$active_home_payload" python3 - <<'PY'
 import json
 import os
 import re
@@ -2481,6 +2667,7 @@ dest_homes = parse_home_lines(os.environ.get("CODEX_GLOBAL_STATE_DEST_HOMES", ""
 if not dest_homes:
     dest_homes = homes
 dest_home_keys = {str(home) for home in dest_homes}
+active_home_keys = {str(home) for home in parse_home_lines(os.environ.get("CODEX_ACTIVE_DB_HOMES", ""))}
 
 STATE_NAME = ".codex-global-state.json"
 ROOT_LIST_KEYS = (
@@ -2768,7 +2955,7 @@ if thread_cwds:
     merged_dicts["thread-workspace-root-hints"].update(thread_cwds)
 
 for home, path, data in states:
-    if str(home) not in dest_home_keys:
+    if str(home) not in dest_home_keys or str(home) in active_home_keys:
         continue
     next_data = dict(data)
     for key in ROOT_LIST_KEYS:
@@ -3371,7 +3558,9 @@ cleanup_thread_indexes_for_homes() {
     if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
       cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
     fi
-    prune_global_state_for_home "$home_dir" >/dev/null 2>&1 || true
+    if [[ "$CODEX_PRUNE_GLOBAL_STATE_ON_SYNC" == "1" ]]; then
+      prune_global_state_for_home "$home_dir" >/dev/null 2>&1 || true
+    fi
   done
 }
 
@@ -3397,9 +3586,6 @@ sync_history_selected_homes() {
   (( ${#homes[@]} > 0 )) || return 0
 
   local home_dir
-  local previous_skip_active
-  previous_skip_active="$CODEX_SKIP_ACTIVE_STATE_DB_WRITES"
-  CODEX_SKIP_ACTIVE_STATE_DB_WRITES=0
   for home_dir in "${homes[@]}"; do
     seed_shared_history_from_home "$home_dir"
   done
@@ -3407,9 +3593,8 @@ sync_history_selected_homes() {
   sync_thread_index_for_homes "${homes[@]}"
   sync_global_state_for_homes "${homes[@]}"
   sync_goal_state_for_homes "${homes[@]}"
-  CODEX_SKIP_ACTIVE_STATE_DB_WRITES="$previous_skip_active"
   cleanup_thread_indexes_for_homes "${homes[@]}"
-  echo "Synced shared Codex history at $(date '+%Y-%m-%d %H:%M:%S')."
+  echo "Synced shared Codex history for inactive profiles at $(date '+%Y-%m-%d %H:%M:%S'). Active profiles finish syncing before their next launch."
 }
 
 dedupe_homes() {
@@ -3728,7 +3913,8 @@ stop_codex_windows_for_app_data() {
 
   while read -r pid args; do
     [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
-    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* ]] || continue
+    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
+      || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
     if args_has_user_data_dir "$args" "$app_data"; then
       pids+=("$pid")
       continue
@@ -3846,7 +4032,8 @@ close_all_accounts_fast() {
 
     for pid in "${(@k)args_by_pid}"; do
       args="${args_by_pid[$pid]}"
-      [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* ]] || continue
+      [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
+        || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
       process_args_match_app_data_snapshot "$args" "$app_data" || continue
       if [[ -n "${active_ancestor[$pid]:-}" ]]; then
         kept_window_pids+=("$pid")
@@ -3908,7 +4095,7 @@ launch_account() {
   fi
 
   local home_dir app_data
-  local -a launch_env
+  local -a launch_env launch_args
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
   mkdir -p "$home_dir" "$app_data"
@@ -3936,7 +4123,6 @@ launch_account() {
   if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
     cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
   fi
-  prune_global_state_for_home "$home_dir" >/dev/null 2>&1 || true
   normalize_top_level_model_provider_for_home "$home_dir"
   normalize_thread_sources_for_home "$home_dir"
   restore_default_thread_model_providers_for_home "$home_dir"
@@ -3947,7 +4133,7 @@ launch_account() {
   echo "  app=$CODEX_APP"
   echo "  CODEX_HOME=$home_dir"
   echo "  user-data-dir=$app_data"
-  if [[ "$CODEX_INJECT_PROXY_ENV" == "1" && -n "$CODEX_PROXY_URL" ]]; then
+  if proxy_injection_enabled; then
     echo "  proxy=$CODEX_PROXY_URL"
   fi
 
@@ -3968,7 +4154,7 @@ launch_account() {
       launch_env+=(--env "DASHSCOPE_API_KEY=$DASHSCOPE_API_KEY")
     fi
   fi
-  if [[ "$CODEX_INJECT_PROXY_ENV" == "1" && -n "$CODEX_PROXY_URL" ]]; then
+  if proxy_injection_enabled; then
     launch_env+=(
       --env "HTTP_PROXY=$CODEX_PROXY_URL"
       --env "HTTPS_PROXY=$CODEX_PROXY_URL"
@@ -3980,10 +4166,16 @@ launch_account() {
       --env "no_proxy=$CODEX_NO_PROXY"
     )
   fi
+  launch_args=(--user-data-dir="$app_data")
+  if proxy_injection_enabled; then
+    # Chromium/Electron does not reliably honor HTTP_PROXY on macOS. Pass the
+    # same per-profile proxy explicitly so account, usage, and profile requests
+    # do not bypass Clash and get challenged by Cloudflare.
+    launch_args+=(--proxy-server="$CODEX_PROXY_URL")
+  fi
   open -na "$CODEX_APP" \
     "${launch_env[@]}" \
-    --args --user-data-dir="$app_data"
-  post_launch_thread_index_repair_for_home "$home_dir"
+    --args "${launch_args[@]}"
 
   echo "Started Codex profile."
 }
@@ -5655,6 +5847,7 @@ main() {
     sync-account) sync_account "${2:-}" ;;
     sync-account-for-launch) sync_account_for_launch "${2:-}" ;;
     repair-account1) repair_account1 ;;
+    restore-openai-config-home) restore_non_account1_openai_config_for_home "${2:-}" ;;
     ensure-aliyun-bridge) ensure_aliyun_coding_plan_bridge_running ;;
     repair-compactions) repair_compactions_for_account "${2:-}" ;;
     restore-thread-models-home) restore_default_thread_model_providers_for_home "${2:-}" "no-backup" ;;

@@ -1,4 +1,4 @@
-# Promotion Kit
+# Codex Accounts 2.5.5 Promotion Kit
 
 This file gives you ready-to-post copy for GitHub, forums, Reddit, X, V2EX, and Hacker News. Edit the repo URL before publishing.
 
@@ -6,9 +6,9 @@ This file gives you ready-to-post copy for GitHub, forums, Reddit, X, V2EX, and 
 
 - Add repo topics: `macos`, `codex`, `openai`, `swiftui`, `productivity`, `multi-account`.
 - Upload `dist/Codex-Accounts-macOS.zip` to GitHub Releases.
-- Add the generated v2 screenshots from `docs/assets/codex-accounts-v2-hero.png`,
-  `docs/assets/codex-accounts-v2-profiles.png`, `docs/assets/codex-accounts-v2-sidebar.png`,
-  `docs/assets/codex-accounts-v2-toolbar.png`, and `docs/assets/codex-accounts-v2-remote.png`.
+- Add only the anonymized V2.5.5 screenshots:
+  `docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg` and
+  `docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg`.
 - Mention that the app is unofficial and does not copy auth tokens or cookies.
 - Add install notes for Gatekeeper: right-click `Open` if macOS blocks the first launch.
 
@@ -27,7 +27,7 @@ Codex Accounts: a small macOS helper for switching between multiple Codex/OpenAI
 Body:
 
 ```text
-I built Codex Accounts, a small macOS helper app for people who use multiple Codex/OpenAI accounts.
+I built Codex Accounts 2.5.5, a small macOS helper app for people who use multiple Codex/OpenAI accounts.
 
 It creates separate local Codex profiles, then opens the official Codex desktop app with a separate CODEX_HOME and user-data-dir for each profile. That means each profile can stay logged into a different account.
 
@@ -37,14 +37,13 @@ Main features:
 - Separate login state per profile
 - Sync local memory and share local history before opening a profile
 - Usage meters for 5H / 1W quota windows with reset times
+- A Today Usage counter that excludes time while the Mac is asleep or powered off
 - Optional local history sharing
 - Optional local memory sync for AGENTS.md, memories/, and rules/
-- Keep Awake toggle that follows the real caffeinate state
-- Optional Tailscale or Cloudflare Tunnel + Access service token setup for remote use
-- Liquid Glass UI with multiple themes, hover glow, and Chinese / English UI
+- Three-level Keep Awake control: Off, keep awake while the display is open, or keep running with the lid closed
+- Liquid Glass UI with 8 distinct themes, hover glow, and Chinese / English UI
 
 It does not copy cookies, auth tokens, cloud conversations, or ChatGPT server-side memory. It is only a local macOS helper around the official Codex app.
-Mobile remote users stay local on the Mac and passwords are stored as PBKDF2 hashes.
 
 GitHub:
 https://github.com/siumiu1968/codex-accounts
@@ -61,7 +60,7 @@ Codex Accounts：macOS 上管理多個 Codex/OpenAI 帳戶嘅小工具
 內文：
 
 ```text
-我整咗一個 macOS helper app，主要解決成日切換 Codex/OpenAI 帳戶要登入登出嘅問題。
+我整咗 Codex Accounts 2.5.5，主要解決成日切換 Codex/OpenAI 帳戶要登入登出嘅問題。
 
 Codex Accounts 會為每個 profile 建立獨立嘅 CODEX_HOME 同 Electron user-data-dir，然後用官方 Codex desktop app 開新視窗。所以每個 profile 可以登入唔同帳戶。
 
@@ -71,11 +70,11 @@ Codex Accounts 會為每個 profile 建立獨立嘅 CODEX_HOME 同 Electron user
 - 每個 profile 保留獨立登入狀態
 - 打開 profile 前先同步本機記憶同共享本機對話紀錄
 - 顯示 5H / 1W quota、百分比同恢復時間
+- 「今日使用」只計實際使用時間，Mac 睡眠或關機期間唔會計入去
 - 可選擇共享本機 Codex 對話紀錄
 - 可選擇同步 AGENTS.md、memories/、rules/
-- 防睡眠開關會跟返真實 caffeinate 狀態
-- 遠端可以配合 Tailscale 或 Cloudflare Tunnel + Access service token
-- Liquid Glass UI、多主題、hover 發光、中文/英文介面
+- 三段防睡眠滑桿：關閉、開屏防睡眠、合蓋繼續運行
+- Liquid Glass UI、8 款分別更明顯嘅主題、hover 發光、中文/英文介面
 
 注意：佢唔會複製 cookies、auth token、OpenAI 雲端對話或 ChatGPT server-side memory。只係本機 profile 管理工具。
 
@@ -86,11 +85,11 @@ https://github.com/siumiu1968/codex-accounts
 ## X / Twitter Post
 
 ```text
-Built Codex Accounts for macOS.
+Built Codex Accounts 2.5.5 for macOS.
 
 It lets you keep separate Codex desktop profiles for different OpenAI accounts, so you can switch accounts without constantly logging out.
 
-Separate CODEX_HOME, separate app data, optional local history/memory sync.
+Separate CODEX_HOME, separate app data, accurate Today Usage, a three-level Keep Awake control, and 8 themes.
 
 GitHub: https://github.com/siumiu1968/codex-accounts
 ```
@@ -102,7 +101,7 @@ Show HN: Codex Accounts, a macOS helper for multiple Codex/OpenAI accounts
 
 I use multiple OpenAI accounts with the Codex desktop app and got tired of logging in and out. This helper creates separate local profiles, each with its own CODEX_HOME and Electron user-data-dir, then launches the official Codex app against that profile.
 
-It includes profile creation, open/close, rename, archive, local history sharing, local memory sync, quota meters, multi-theme Liquid Glass UI, and a Keep Awake toggle for long-running Codex sessions.
+It includes profile creation, open/close, rename, archive, local history sharing, local memory sync, quota meters, a Today Usage counter that excludes sleep and power-off time, 8 Liquid Glass themes, and a three-level Keep Awake control.
 
 It does not copy cookies or auth tokens and it does not sync cloud conversations. It is only local profile management.
 
@@ -121,12 +120,11 @@ Repo: https://github.com/siumiu1968/codex-accounts
 ## Demo Video Script
 
 1. Open Codex Accounts.
-2. Create a new profile with the `+` button.
-3. Click `Log In`.
-4. Show that the profile opens a separate Codex window.
-5. Rename the profile.
-6. Close the profile with the `x` button.
-7. Toggle Keep Awake.
-8. End on the GitHub release page.
+2. Show the anonymized profile list, quota meters, and Today Usage counter.
+3. Create a demo profile with the `+` button, then show the separate Codex window.
+4. Close the demo profile with the `x` button.
+5. Open System Tools and show all three slider levels: Off, Screen, and Lid. Return it to Off.
+6. Open Appearance and switch through the 8 themes, pausing briefly on two contrasting choices.
+7. End on the GitHub release page with the V2.5.5 overview and themes screenshots visible.
 
 Keep the video under 45 seconds.
