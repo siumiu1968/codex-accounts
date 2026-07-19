@@ -233,6 +233,15 @@ private struct AppThemeOption: Identifiable {
     let primary: Color
     let secondary: Color
     let warm: Color
+    let background: [Color]
+    let mainTint: Color
+    let sidebarTint: Color
+    let rowTint: Color
+}
+
+private struct DailyUsageRecord: Codable {
+    var dayKey: String
+    var seconds: TimeInterval
 }
 
 private final class CallbackMenuItem: NSMenuItem {
@@ -1212,17 +1221,9 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTok
         return profile
     }
     if cachedUsage.quota == "__auth_invalid__" {
-        return CodexProfile(
-            id: externalProfile.id,
-            displayName: externalProfile.displayName,
-            home: externalProfile.home,
-            authStatus: "auth_invalid",
-            authMode: externalProfile.authMode == "unknown" ? "chatgpt" : externalProfile.authMode,
-            lastRefresh: externalProfile.lastRefresh,
-            quota: "unknown",
-            reset: "unknown",
-            resetCredits: "unknown"
-        )
+        // A cached marker can be left behind by a temporary quota endpoint failure.
+        // Only the current account-status probe may confirm an invalid login.
+        return externalProfile
     }
 
     let reset = profile.reset.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1855,22 +1856,131 @@ final class DisplayBrightnessController {
     }
 }
 
+enum KeepAwakeMode: Int, CaseIterable, Identifiable {
+    case off = 0
+    case display = 1
+    case clamshell = 2
+
+    var id: Int { rawValue }
+}
+
+private struct KeepAwakeLevelSlider: View {
+    @Binding var mode: KeepAwakeMode
+    let isEnabled: Bool
+    let accessibilityLabelText: String
+    let accessibilityValueText: String
+
+    @State private var rawValue: Double
+    @State private var isEditing = false
+
+    private var previewMode: KeepAwakeMode {
+        KeepAwakeMode(rawValue: Int(rawValue.rounded())) ?? mode
+    }
+
+    private var accentColors: [Color] {
+        switch previewMode {
+        case .off:
+            return [
+                Color(red: 0.58, green: 0.63, blue: 0.70),
+                Color(red: 0.36, green: 0.41, blue: 0.49)
+            ]
+        case .display:
+            return [
+                Color(red: 0.08, green: 0.88, blue: 0.72),
+                Color(red: 0.08, green: 0.64, blue: 0.92)
+            ]
+        case .clamshell:
+            return [
+                Color(red: 0.96, green: 0.40, blue: 0.78),
+                Color(red: 0.62, green: 0.34, blue: 1.00)
+            ]
+        }
+    }
+
+    init(
+        mode: Binding<KeepAwakeMode>,
+        isEnabled: Bool,
+        accessibilityLabelText: String,
+        accessibilityValueText: String
+    ) {
+        _mode = mode
+        _rawValue = State(initialValue: Double(mode.wrappedValue.rawValue))
+        self.isEnabled = isEnabled
+        self.accessibilityLabelText = accessibilityLabelText
+        self.accessibilityValueText = accessibilityValueText
+    }
+
+    var body: some View {
+        Slider(
+            value: $rawValue,
+            in: 0...2,
+            step: 1,
+            onEditingChanged: { editing in
+                isEditing = editing
+                guard !editing, isEnabled else { return }
+                if let nextMode = KeepAwakeMode(rawValue: Int(rawValue.rounded())), nextMode != mode {
+                    mode = nextMode
+                }
+            }
+        )
+        .tint(accentColors.last ?? Color.gray)
+        .controlSize(.large)
+        .padding(.horizontal, 8)
+        .frame(height: 38)
+        .background(
+            LinearGradient(
+                colors: accentColors.map { $0.opacity(0.24) },
+                startPoint: .leading,
+                endPoint: .trailing
+            ),
+            in: Capsule()
+        )
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+        .opacity(isEnabled ? 1 : 0.58)
+        .accessibilityLabel(Text(accessibilityLabelText))
+        .accessibilityValue(Text(accessibilityValueText))
+        .disabled(!isEnabled)
+        .onAppear {
+            rawValue = Double(mode.rawValue)
+        }
+        .onChange(of: mode) { _, newMode in
+            guard !isEditing else { return }
+            rawValue = Double(newMode.rawValue)
+        }
+        .onChange(of: isEnabled) { _, enabled in
+            if enabled {
+                rawValue = Double(mode.rawValue)
+            }
+        }
+        .animation(.easeInOut(duration: 0.20), value: previewMode)
+    }
+}
+
 final class KeepAwakeController: ObservableObject {
     static let shared = KeepAwakeController()
 
-    @Published private(set) var isAwake = false
+    @Published private(set) var mode: KeepAwakeMode = .off
     @Published private(set) var isSwitching = false
 
+    var isAwake: Bool { mode != .off }
+
     private var caffeinateProcess: Process?
-    private var jiggleTimer: Timer?
     private var clamshellTimer: Timer?
     private var stateMonitorTimer: Timer?
     private var stateRefreshInFlight = false
     private var lastStateRefreshAt = Date.distantPast
     private var storedBrightnessBeforeLidClose: Float?
     private var dimmedForClosedLid = false
+    private var ownsSystemSleepOverrideThisRun = false
     private let pidFileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/Codex Accounts/keep-awake.pid")
+    private let sleepOwnershipFileURL = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Library/Application Support/Codex Accounts/keep-awake-clamshell-owned")
+
+    var ownsSystemSleepOverride: Bool {
+        ownsSystemSleepOverrideThisRun
+            || FileManager.default.fileExists(atPath: sleepOwnershipFileURL.path)
+    }
 
     private init() {
         recoverExistingCaffeinate()
@@ -1888,89 +1998,93 @@ final class KeepAwakeController: ObservableObject {
 
             DispatchQueue.global(qos: .utility).async {
                 defer { self.finishStateRefresh() }
-
-                if let pid = self.readPid(), self.isRunningCaffeinate(pid) {
-                    self.startMouseJiggle()
-                    self.startClamshellMonitor()
-                    self.updateState(true)
-                    return
+                let sleepDisabled = self.systemSleepDisabled()
+                if !sleepDisabled {
+                    self.clearSystemSleepOwnership()
+                }
+                var hasCaffeinate = self.runningManagedCaffeinatePID() != nil
+                if sleepDisabled, !hasCaffeinate {
+                    hasCaffeinate = self.ensureManagedCaffeinate().0
                 }
 
-                if let pid = self.matchingCaffeinatePIDs().first {
-                    self.writePid(pid)
-                    self.startMouseJiggle()
-                    self.startClamshellMonitor()
-                    self.updateState(true)
-                    return
+                let detectedMode: KeepAwakeMode = sleepDisabled
+                    ? .clamshell
+                    : (hasCaffeinate ? .display : .off)
+                if !hasCaffeinate {
+                    self.removePidFile()
                 }
+                self.updateMode(detectedMode)
+            }
+        }
+    }
 
-                self.stopMouseJiggle()
-                self.stopClamshellMonitor(restoreBrightness: true)
-                self.removePidFile()
-                self.updateState(false)
+    func setMode(_ requestedMode: KeepAwakeMode, completion: ((Bool) -> Void)? = nil) {
+        DispatchQueue.main.async {
+            guard !self.isSwitching else {
+                completion?(false)
+                return
+            }
+            if self.mode == requestedMode, requestedMode != .off {
+                self.refreshState(force: true)
+                completion?(true)
+                return
+            }
+
+            let previousMode = self.mode
+            self.isSwitching = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.applyMode(requestedMode, previousMode: previousMode)
+                DispatchQueue.main.async {
+                    self.isSwitching = false
+                    if result.0 {
+                        self.updateMode(requestedMode)
+                    } else {
+                        self.updateMode(previousMode)
+                        let language = UserDefaults.standard.string(forKey: "language")
+                        alertMessage(
+                            localizedText("防睡眠模式切換失敗", "Could Not Change Keep Awake Mode", language: language),
+                            result.1
+                        )
+                    }
+                    completion?(result.0)
+                    self.refreshState(force: true)
+                }
             }
         }
     }
 
     func setAwake(_ enabled: Bool) {
-        DispatchQueue.main.async {
-            guard !self.isSwitching else { return }
-            if self.isAwake == enabled {
-                self.updateState(enabled)
-                return
-            }
-            self.isSwitching = true
-            enabled ? self.start() : self.stop()
-            self.finishSwitchingAfterDelay()
-        }
+        setMode(enabled ? .display : .off)
     }
 
     func toggle() {
-        setAwake(!isAwake)
+        setMode(isAwake ? .off : .display)
     }
 
     func start() {
-        if caffeinateProcess?.isRunning == true {
-            updateState(true)
-            return
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-d", "-i", "-m", "-s"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            caffeinateProcess = process
-            writePid(process.processIdentifier)
-            startMouseJiggle()
-            startClamshellMonitor()
-            updateState(true)
-        } catch {
-            updateState(false)
-            let language = UserDefaults.standard.string(forKey: "language")
-            alertMessage(localizedText("防睡眠啟動失敗", "Keep Awake Failed", language: language), error.localizedDescription)
-        }
+        setMode(.display)
     }
 
     func stop() {
-        stopMouseJiggle()
+        setMode(.off)
+    }
+
+    func stopCaffeinateForTermination() {
+        stopManagedCaffeinate()
         stopClamshellMonitor(restoreBrightness: true)
+    }
+
+    private func stopManagedCaffeinate() {
         let runningProcess = caffeinateProcess
         let savedPID = readPid()
         caffeinateProcess = nil
         removePidFile()
-        updateState(false)
 
-        DispatchQueue.global(qos: .utility).async {
-            runningProcess?.terminate()
-            if let savedPID, self.isRunningCaffeinate(savedPID) {
-                Darwin.kill(savedPID, SIGTERM)
-            }
-            self.terminateMatchingCaffeinateProcesses()
+        runningProcess?.terminate()
+        if let savedPID, isRunningCaffeinate(savedPID) {
+            Darwin.kill(savedPID, SIGTERM)
         }
+        terminateMatchingCaffeinateProcesses()
     }
 
     private func recoverExistingCaffeinate() {
@@ -1984,6 +2098,114 @@ final class KeepAwakeController: ObservableObject {
                 self.refreshState()
             }
         }
+    }
+
+    private func applyMode(_ requestedMode: KeepAwakeMode, previousMode: KeepAwakeMode) -> (Bool, String) {
+        if requestedMode != .off {
+            let caffeinateResult = ensureManagedCaffeinate()
+            guard caffeinateResult.0 else { return caffeinateResult }
+        }
+
+        let shouldDisableSystemSleep = requestedMode == .clamshell
+        if systemSleepDisabled() != shouldDisableSystemSleep {
+            let privilegeResult = setSystemSleepDisabled(shouldDisableSystemSleep)
+            guard privilegeResult.0 else {
+                if previousMode == .off {
+                    stopManagedCaffeinate()
+                }
+                return privilegeResult
+            }
+        }
+
+        if requestedMode == .off {
+            stopManagedCaffeinate()
+        }
+        if requestedMode != .clamshell {
+            clearSystemSleepOwnership()
+        }
+        return (true, "")
+    }
+
+    private func ensureManagedCaffeinate() -> (Bool, String) {
+        if let pid = runningManagedCaffeinatePID() {
+            writePid(pid)
+            return (true, "")
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        process.arguments = ["-d", "-i", "-m", "-s"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            caffeinateProcess = process
+            writePid(process.processIdentifier)
+            return (true, "")
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    private func runningManagedCaffeinatePID() -> Int32? {
+        if let pid = readPid(), isRunningCaffeinate(pid) {
+            return pid
+        }
+        if let pid = matchingCaffeinatePIDs().first {
+            writePid(pid)
+            return pid
+        }
+        return nil
+    }
+
+    private func systemSleepDisabled() -> Bool {
+        let result = runProcess(executable: "/usr/bin/pmset", arguments: ["-g"], timeout: 4)
+        guard result.0 == 0 else { return false }
+        return result.1.split(separator: "\n").contains { line in
+            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            return fields.count >= 2 && fields[0] == "SleepDisabled" && fields[1] == "1"
+        }
+    }
+
+    private func setSystemSleepDisabled(_ disabled: Bool) -> (Bool, String) {
+        let value = disabled ? "1" : "0"
+        let script = "do shell script \"/usr/bin/pmset -a disablesleep \(value)\" with administrator privileges"
+        let result = runProcess(
+            executable: "/usr/bin/osascript",
+            arguments: ["-e", script],
+            timeout: 300
+        )
+        guard result.0 == 0 else {
+            let message = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (false, message.isEmpty ? "Administrator authorization was cancelled." : message)
+        }
+        let applied = systemSleepDisabled() == disabled
+        guard applied else { return (false, "pmset did not keep the requested setting.") }
+        if disabled {
+            markSystemSleepOwnership()
+        } else {
+            clearSystemSleepOwnership()
+        }
+        return (true, "")
+    }
+
+    private func markSystemSleepOwnership() {
+        ownsSystemSleepOverrideThisRun = true
+        do {
+            try FileManager.default.createDirectory(
+                at: sleepOwnershipFileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try "managed\n".write(to: sleepOwnershipFileURL, atomically: true, encoding: .utf8)
+        } catch {
+            // In-memory ownership still guarantees cleanup during this run.
+        }
+    }
+
+    private func clearSystemSleepOwnership() {
+        ownsSystemSleepOverrideThisRun = false
+        try? FileManager.default.removeItem(at: sleepOwnershipFileURL)
     }
 
     private func writePid(_ pid: Int32) {
@@ -2059,43 +2281,28 @@ final class KeepAwakeController: ObservableObject {
         return result.1
     }
 
-    private func updateState(_ newValue: Bool) {
-        DispatchQueue.main.async {
-            guard self.isAwake != newValue else { return }
-            self.isAwake = newValue
-            NotificationCenter.default.post(name: .keepAwakeStateChanged, object: nil)
+    private func updateMode(_ newMode: KeepAwakeMode) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                self.updateMode(newMode)
+            }
+            return
         }
-    }
 
-    private func finishSwitchingAfterDelay() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
-            self.isSwitching = false
-            NotificationCenter.default.post(name: .keepAwakeStateChanged, object: nil)
-            self.refreshState(force: true)
+        let changed = mode != newMode
+        mode = newMode
+        if newMode == .clamshell {
+            startClamshellMonitor()
+        } else {
+            stopClamshellMonitor(restoreBrightness: true)
         }
+        guard changed else { return }
+        NotificationCenter.default.post(name: .keepAwakeStateChanged, object: nil)
     }
 
     private func finishStateRefresh() {
         DispatchQueue.main.async {
             self.stateRefreshInFlight = false
-        }
-    }
-
-    private func startMouseJiggle() {
-        DispatchQueue.main.async {
-            if self.jiggleTimer?.isValid == true {
-                return
-            }
-            self.jiggleTimer = Timer.scheduledTimer(withTimeInterval: 55, repeats: true) { _ in
-                self.jiggleMouse()
-            }
-        }
-    }
-
-    private func stopMouseJiggle() {
-        DispatchQueue.main.async {
-            self.jiggleTimer?.invalidate()
-            self.jiggleTimer = nil
         }
     }
 
@@ -2123,7 +2330,7 @@ final class KeepAwakeController: ObservableObject {
     }
 
     private func handleClamshellState() {
-        guard isAwake else {
+        guard mode == .clamshell else {
             restoreBrightnessAfterLidOpen()
             return
         }
@@ -2166,24 +2373,6 @@ final class KeepAwakeController: ObservableObject {
         return value
     }
 
-    private func jiggleMouse() {
-        guard let current = CGEvent(source: nil) else { return }
-        let point = current.location
-        moveMouse(to: CGPoint(x: point.x + 1, y: point.y))
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            self.moveMouse(to: point)
-        }
-    }
-
-    private func moveMouse(to point: CGPoint) {
-        CGEvent(
-            mouseEventSource: nil,
-            mouseType: .mouseMoved,
-            mouseCursorPosition: point,
-            mouseButton: .left
-        )?.post(tap: .cghidEventTap)
-    }
 }
 
 struct AccountsRootView: View {
@@ -2227,7 +2416,9 @@ struct AccountsRootView: View {
     @State private var resetScrambleReturning = false
     @State private var resetScrambleSeed = 0
     @State private var resetScrambleRunID = 0
-    @State private var codexUsageSessionStart: Date?
+    @State private var codexUsageSessionActive = false
+    @State private var codexUsageLastSample: Date?
+    @State private var usageProcessCheckInFlight = false
     @State private var usageTicker = Date()
     @State private var activeQuotaPoolProfileID: String?
     @State private var quotaPoolFailoverInProgress = false
@@ -2242,14 +2433,17 @@ struct AccountsRootView: View {
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
     @AppStorage("sidebarAppearanceExpanded") private var sidebarAppearanceExpanded = false
     @AppStorage("sidebarUpdatesExpanded") private var sidebarUpdatesExpanded = false
-    @AppStorage("codexUsageDayKey") private var codexUsageDayKey = ""
-    @AppStorage("codexUsageSecondsToday") private var codexUsageSecondsToday = 0.0
+    @AppStorage("codexUsageRecordV2") private var codexUsageRecordData = ""
+    @AppStorage("codexUsageDayKey") private var legacyCodexUsageDayKey = ""
+    @AppStorage("codexUsageSecondsToday") private var legacyCodexUsageSecondsToday = 0.0
     @AppStorage("appTheme") private var appTheme = "graphite"
     @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
     private let autoQuotaLiveRefreshInterval: TimeInterval = 900
     private let resetCreditLiveBackfillInterval: TimeInterval = 90
+    private let liveUsageParallelism = 10
+    private let liveUsageStatusTimeout: TimeInterval = 60
     private let autoSyncStartupDelay: TimeInterval = 90
     private let autoSyncInterval: TimeInterval = 600
 
@@ -2300,6 +2494,10 @@ struct AccountsRootView: View {
             if normalizedLanguage != language {
                 language = normalizedLanguage
             }
+            let normalizedTheme = canonicalThemeID(appTheme)
+            if normalizedTheme != appTheme {
+                appTheme = normalizedTheme
+            }
             hasEntered = true
             languageTransitionActive = false
             showLanguageMenu = false
@@ -2315,6 +2513,8 @@ struct AccountsRootView: View {
             if autoQuotaPool {
                 autoQuotaPool = false
             }
+            normalizeUsageRecord()
+            reconcileUsageSession()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 refreshProfiles(showLoading: false)
             }
@@ -2344,10 +2544,11 @@ struct AccountsRootView: View {
             }
         }
         .onReceive(timer) { _ in
+            sampleUsageSession()
+            reconcileUsageSession()
             runPeriodicMaintenance()
             keepAwake.refreshState()
             usageTicker = Date()
-            normalizeUsageDay()
         }
     }
 
@@ -2407,48 +2608,143 @@ struct AccountsRootView: View {
             : Color(red: 1.00, green: 0.64, blue: 0.24)
     }
 
-    private var currentDayKey: String {
+    private func currentDayKey(at date: Date = Date()) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
+        return formatter.string(from: date)
     }
 
-    private func normalizeUsageDay() {
-        let today = currentDayKey
-        guard codexUsageDayKey != today else { return }
-        codexUsageDayKey = today
-        codexUsageSecondsToday = 0
-        codexUsageSessionStart = nil
+    private func maximumPlausibleUsage(at date: Date) -> TimeInterval {
+        let elapsedToday = max(date.timeIntervalSince(Calendar.current.startOfDay(for: date)), 0)
+        return min(elapsedToday + 120, 86_400)
+    }
+
+    private func validUsageSeconds(_ seconds: TimeInterval, at date: Date) -> Bool {
+        seconds.isFinite && seconds >= 0 && seconds <= maximumPlausibleUsage(at: date)
+    }
+
+    private func decodedUsageRecord(at date: Date, allowLegacyMigration: Bool = true) -> DailyUsageRecord {
+        let today = currentDayKey(at: date)
+        if let data = codexUsageRecordData.data(using: .utf8),
+           let record = try? JSONDecoder().decode(DailyUsageRecord.self, from: data),
+           record.dayKey == today,
+           validUsageSeconds(record.seconds, at: date) {
+            return record
+        }
+
+        if allowLegacyMigration,
+           codexUsageRecordData.isEmpty,
+           legacyCodexUsageDayKey == today,
+           validUsageSeconds(legacyCodexUsageSecondsToday, at: date) {
+            return DailyUsageRecord(dayKey: today, seconds: legacyCodexUsageSecondsToday)
+        }
+
+        return DailyUsageRecord(dayKey: today, seconds: 0)
+    }
+
+    private func persistUsageRecord(_ record: DailyUsageRecord) {
+        guard let data = try? JSONEncoder().encode(record),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        if codexUsageRecordData != text {
+            codexUsageRecordData = text
+        }
+    }
+
+    private func normalizeUsageRecord(at date: Date = Date()) {
+        let record = decodedUsageRecord(at: date)
+        persistUsageRecord(record)
+        legacyCodexUsageDayKey = currentDayKey(at: date)
+        legacyCodexUsageSecondsToday = 0
     }
 
     private func startUsageSession() {
-        normalizeUsageDay()
-        guard codexUsageSessionStart == nil else { return }
-        codexUsageSessionStart = Date()
-        usageTicker = Date()
+        let now = Date()
+        normalizeUsageRecord(at: now)
+        guard !codexUsageSessionActive else { return }
+        codexUsageSessionActive = true
+        codexUsageLastSample = now
+        usageTicker = now
     }
 
     private func finishUsageSession() {
-        normalizeUsageDay()
-        guard let start = codexUsageSessionStart else { return }
-        codexUsageSecondsToday += max(Date().timeIntervalSince(start), 0)
-        codexUsageSessionStart = nil
+        guard codexUsageSessionActive else { return }
+        sampleUsageSession()
+        codexUsageSessionActive = false
+        codexUsageLastSample = nil
         usageTicker = Date()
     }
 
+    private func sampleUsageSession(at date: Date = Date()) {
+        normalizeUsageRecord(at: date)
+        guard codexUsageSessionActive, let lastSample = codexUsageLastSample else { return }
+
+        guard currentDayKey(at: lastSample) == currentDayKey(at: date) else {
+            codexUsageLastSample = date
+            usageTicker = date
+            return
+        }
+
+        // The timer normally fires every 60 seconds. Capping one sample avoids
+        // counting sleep, a frozen process, or time spent powered off.
+        let sample = min(max(date.timeIntervalSince(lastSample), 0), 90)
+        var record = decodedUsageRecord(at: date, allowLegacyMigration: false)
+        record.seconds = min(record.seconds + sample, maximumPlausibleUsage(at: date))
+        persistUsageRecord(record)
+        codexUsageLastSample = date
+        usageTicker = date
+    }
+
+    private func reconcileUsageSession() {
+        guard !usageProcessCheckInFlight else { return }
+        usageProcessCheckInFlight = true
+
+        DispatchQueue.global(qos: .utility).async {
+            let result = runProcess(
+                executable: "/bin/ps",
+                arguments: ["axww", "-o", "command="],
+                timeout: 3
+            )
+            let isManagedCodexRunning = result.0 == 0 && result.1.split(separator: "\n").contains { line in
+                let command = String(line)
+                let isCodexExecutable = command.contains("/Applications/Codex.app/Contents/MacOS/ChatGPT")
+                    || command.contains("/Applications/Codex.app/Contents/MacOS/Codex")
+                // The primary Codex window has no --user-data-dir argument;
+                // account2 and named profiles do. The main executable is the
+                // reliable signal shared by all three launch paths.
+                return isCodexExecutable
+            }
+
+            DispatchQueue.main.async {
+                usageProcessCheckInFlight = false
+                if isManagedCodexRunning {
+                    startUsageSession()
+                } else {
+                    finishUsageSession()
+                }
+            }
+        }
+    }
+
     private func currentUsageSeconds() -> TimeInterval {
-        normalizeUsageDay()
-        let liveSeconds = codexUsageSessionStart.map { max(Date().timeIntervalSince($0), 0) } ?? 0
+        let now = Date()
+        let record = decodedUsageRecord(at: now)
+        let liveSeconds = codexUsageSessionActive
+            ? min(max(now.timeIntervalSince(codexUsageLastSample ?? now), 0), 90)
+            : 0
         _ = usageTicker
-        return codexUsageSecondsToday + liveSeconds
+        return min(max(record.seconds + liveSeconds, 0), 86_400)
     }
 
     private func usageDurationText(_ seconds: TimeInterval) -> String {
-        let totalMinutes = max(Int(seconds / 60), 0)
+        let totalMinutes = min(max(Int(seconds / 60), 0), 24 * 60)
         let hours = totalMinutes / 60
         let minutes = totalMinutes % 60
-        return "\(hours)H\(String(format: "%02d", minutes))M"
+        return tr(
+            "\(hours) 小時 \(String(format: "%02d", minutes)) 分",
+            "\(hours)h \(String(format: "%02d", minutes))m"
+        )
     }
 
     private func appFont(size: CGFloat, weight: Font.Weight = .regular, monospaced: Bool = false) -> Font {
@@ -2467,88 +2763,136 @@ struct AccountsRootView: View {
             AppThemeOption(
                 id: "graphite",
                 zhTitle: tr("石墨", "Graphite"),
-                primary: Color(red: 0.36, green: 0.80, blue: 0.92),
-                secondary: Color(red: 0.62, green: 0.85, blue: 0.48),
-                warm: Color(red: 0.98, green: 0.48, blue: 0.40)
+                primary: Color(red: 0.70, green: 0.78, blue: 0.84),
+                secondary: Color(red: 0.40, green: 0.48, blue: 0.54),
+                warm: Color(red: 0.94, green: 0.96, blue: 0.98),
+                background: [
+                    Color(red: 0.035, green: 0.040, blue: 0.048).opacity(0.94),
+                    Color(red: 0.12, green: 0.14, blue: 0.16).opacity(0.80),
+                    Color(red: 0.055, green: 0.065, blue: 0.075).opacity(0.90)
+                ],
+                mainTint: Color(red: 0.18, green: 0.21, blue: 0.23),
+                sidebarTint: Color(red: 0.10, green: 0.12, blue: 0.14),
+                rowTint: Color(red: 0.42, green: 0.48, blue: 0.52)
             ),
             AppThemeOption(
                 id: "aurora",
                 zhTitle: tr("極光", "Aurora"),
-                primary: Color(red: 0.22, green: 0.86, blue: 0.67),
-                secondary: Color(red: 0.42, green: 0.70, blue: 0.96),
-                warm: Color(red: 0.98, green: 0.70, blue: 0.28)
+                primary: Color(red: 0.08, green: 0.95, blue: 0.62),
+                secondary: Color(red: 0.10, green: 0.82, blue: 0.88),
+                warm: Color(red: 0.72, green: 1.00, blue: 0.30),
+                background: [
+                    Color(red: 0.015, green: 0.085, blue: 0.070).opacity(0.94),
+                    Color(red: 0.02, green: 0.25, blue: 0.18).opacity(0.76),
+                    Color(red: 0.025, green: 0.11, blue: 0.16).opacity(0.88)
+                ],
+                mainTint: Color(red: 0.04, green: 0.34, blue: 0.24),
+                sidebarTint: Color(red: 0.02, green: 0.23, blue: 0.17),
+                rowTint: Color(red: 0.10, green: 0.62, blue: 0.44)
             ),
             AppThemeOption(
                 id: "amber",
-                zhTitle: tr("琥珀", "Amber"),
-                primary: Color(red: 0.96, green: 0.68, blue: 0.28),
-                secondary: Color(red: 0.38, green: 0.72, blue: 0.92),
-                warm: Color(red: 0.88, green: 0.38, blue: 0.52)
+                zhTitle: tr("日落", "Sunset"),
+                primary: Color(red: 1.00, green: 0.64, blue: 0.12),
+                secondary: Color(red: 1.00, green: 0.25, blue: 0.28),
+                warm: Color(red: 1.00, green: 0.86, blue: 0.26),
+                background: [
+                    Color(red: 0.13, green: 0.035, blue: 0.035).opacity(0.94),
+                    Color(red: 0.34, green: 0.095, blue: 0.035).opacity(0.76),
+                    Color(red: 0.15, green: 0.07, blue: 0.13).opacity(0.88)
+                ],
+                mainTint: Color(red: 0.43, green: 0.16, blue: 0.07),
+                sidebarTint: Color(red: 0.29, green: 0.10, blue: 0.06),
+                rowTint: Color(red: 0.78, green: 0.34, blue: 0.12)
             ),
             AppThemeOption(
                 id: "violet",
-                zhTitle: tr("紫晶", "Violet"),
-                primary: Color(red: 0.72, green: 0.58, blue: 0.94),
-                secondary: Color(red: 0.31, green: 0.80, blue: 0.72),
-                warm: Color(red: 0.98, green: 0.55, blue: 0.34)
+                zhTitle: tr("霓虹", "Neon"),
+                primary: Color(red: 0.68, green: 0.38, blue: 1.00),
+                secondary: Color(red: 1.00, green: 0.20, blue: 0.72),
+                warm: Color(red: 0.30, green: 0.82, blue: 1.00),
+                background: [
+                    Color(red: 0.075, green: 0.025, blue: 0.14).opacity(0.95),
+                    Color(red: 0.23, green: 0.045, blue: 0.30).opacity(0.78),
+                    Color(red: 0.035, green: 0.10, blue: 0.18).opacity(0.88)
+                ],
+                mainTint: Color(red: 0.30, green: 0.10, blue: 0.42),
+                sidebarTint: Color(red: 0.19, green: 0.07, blue: 0.29),
+                rowTint: Color(red: 0.56, green: 0.22, blue: 0.68)
             ),
             AppThemeOption(
                 id: "ocean",
                 zhTitle: tr("深海", "Ocean"),
-                primary: Color(red: 0.28, green: 0.74, blue: 0.88),
-                secondary: Color(red: 0.30, green: 0.84, blue: 0.66),
-                warm: Color(red: 0.98, green: 0.62, blue: 0.30)
+                primary: Color(red: 0.14, green: 0.62, blue: 1.00),
+                secondary: Color(red: 0.06, green: 0.90, blue: 0.96),
+                warm: Color(red: 0.22, green: 0.46, blue: 1.00),
+                background: [
+                    Color(red: 0.015, green: 0.045, blue: 0.13).opacity(0.96),
+                    Color(red: 0.025, green: 0.16, blue: 0.34).opacity(0.78),
+                    Color(red: 0.015, green: 0.13, blue: 0.20).opacity(0.90)
+                ],
+                mainTint: Color(red: 0.04, green: 0.20, blue: 0.46),
+                sidebarTint: Color(red: 0.02, green: 0.13, blue: 0.31),
+                rowTint: Color(red: 0.08, green: 0.40, blue: 0.76)
             ),
             AppThemeOption(
-                id: "sage",
-                zhTitle: tr("苔原", "Sage"),
-                primary: Color(red: 0.48, green: 0.76, blue: 0.54),
-                secondary: Color(red: 0.46, green: 0.70, blue: 0.92),
-                warm: Color(red: 0.92, green: 0.68, blue: 0.30)
+                id: "sakura",
+                zhTitle: tr("櫻花", "Sakura"),
+                primary: Color(red: 1.00, green: 0.52, blue: 0.72),
+                secondary: Color(red: 0.78, green: 0.40, blue: 1.00),
+                warm: Color(red: 1.00, green: 0.84, blue: 0.90),
+                background: [
+                    Color(red: 0.14, green: 0.035, blue: 0.09).opacity(0.95),
+                    Color(red: 0.30, green: 0.08, blue: 0.20).opacity(0.78),
+                    Color(red: 0.16, green: 0.08, blue: 0.20).opacity(0.88)
+                ],
+                mainTint: Color(red: 0.42, green: 0.13, blue: 0.27),
+                sidebarTint: Color(red: 0.28, green: 0.08, blue: 0.18),
+                rowTint: Color(red: 0.72, green: 0.30, blue: 0.48)
             ),
             AppThemeOption(
-                id: "rose",
-                zhTitle: tr("玫瑰", "Rose"),
-                primary: Color(red: 0.94, green: 0.48, blue: 0.62),
-                secondary: Color(red: 0.38, green: 0.74, blue: 0.88),
-                warm: Color(red: 0.94, green: 0.70, blue: 0.30)
+                id: "forest",
+                zhTitle: tr("森林", "Forest"),
+                primary: Color(red: 0.62, green: 0.86, blue: 0.24),
+                secondary: Color(red: 0.18, green: 0.58, blue: 0.30),
+                warm: Color(red: 0.98, green: 0.72, blue: 0.18),
+                background: [
+                    Color(red: 0.045, green: 0.095, blue: 0.045).opacity(0.96),
+                    Color(red: 0.12, green: 0.23, blue: 0.08).opacity(0.78),
+                    Color(red: 0.16, green: 0.12, blue: 0.045).opacity(0.88)
+                ],
+                mainTint: Color(red: 0.18, green: 0.32, blue: 0.10),
+                sidebarTint: Color(red: 0.11, green: 0.22, blue: 0.07),
+                rowTint: Color(red: 0.40, green: 0.60, blue: 0.20)
             ),
             AppThemeOption(
-                id: "indigo",
-                zhTitle: tr("靛藍", "Indigo"),
-                primary: Color(red: 0.52, green: 0.58, blue: 0.94),
-                secondary: Color(red: 0.34, green: 0.82, blue: 0.68),
-                warm: Color(red: 0.98, green: 0.48, blue: 0.38)
-            ),
-            AppThemeOption(
-                id: "slate",
-                zhTitle: tr("鋼灰", "Slate"),
-                primary: Color(red: 0.60, green: 0.72, blue: 0.78),
-                secondary: Color(red: 0.42, green: 0.78, blue: 0.62),
-                warm: Color(red: 0.92, green: 0.64, blue: 0.32)
-            ),
-            AppThemeOption(
-                id: "copper",
-                zhTitle: tr("銅綠", "Copper"),
-                primary: Color(red: 0.88, green: 0.50, blue: 0.30),
-                secondary: Color(red: 0.28, green: 0.76, blue: 0.68),
-                warm: Color(red: 0.46, green: 0.68, blue: 0.92)
-            ),
-            AppThemeOption(
-                id: "glacier",
-                zhTitle: tr("冰川", "Glacier"),
-                primary: Color(red: 0.58, green: 0.80, blue: 0.92),
-                secondary: Color(red: 0.50, green: 0.88, blue: 0.76),
-                warm: Color(red: 0.90, green: 0.52, blue: 0.62)
-            ),
-            AppThemeOption(
-                id: "ember",
-                zhTitle: tr("星火", "Ember"),
-                primary: Color(red: 0.94, green: 0.40, blue: 0.30),
-                secondary: Color(red: 0.94, green: 0.72, blue: 0.32),
-                warm: Color(red: 0.36, green: 0.68, blue: 0.94)
+                id: "midnight",
+                zhTitle: tr("午夜", "Midnight"),
+                primary: Color(red: 1.00, green: 0.78, blue: 0.22),
+                secondary: Color(red: 0.56, green: 0.66, blue: 0.88),
+                warm: Color(red: 1.00, green: 0.92, blue: 0.58),
+                background: [
+                    Color(red: 0.015, green: 0.018, blue: 0.035).opacity(0.98),
+                    Color(red: 0.045, green: 0.055, blue: 0.11).opacity(0.84),
+                    Color(red: 0.13, green: 0.09, blue: 0.025).opacity(0.86)
+                ],
+                mainTint: Color(red: 0.16, green: 0.15, blue: 0.23),
+                sidebarTint: Color(red: 0.075, green: 0.075, blue: 0.13),
+                rowTint: Color(red: 0.55, green: 0.44, blue: 0.16)
             )
         ]
+    }
+
+    private func canonicalThemeID(_ rawValue: String) -> String {
+        switch rawValue {
+        case "sage": return "forest"
+        case "copper", "ember": return "amber"
+        case "rose": return "sakura"
+        case "indigo": return "violet"
+        case "glacier": return "ocean"
+        case "slate": return "graphite"
+        default: return themeOptions.contains(where: { $0.id == rawValue }) ? rawValue : "graphite"
+        }
     }
 
     private var selectedThemeOption: AppThemeOption {
@@ -2568,131 +2912,19 @@ struct AccountsRootView: View {
     }
 
     private var themeBackgroundColors: [Color] {
-        switch appTheme {
-        case "aurora":
-            return [
-                Color(red: 0.04, green: 0.10, blue: 0.10).opacity(0.78),
-                Color(red: 0.06, green: 0.18, blue: 0.15).opacity(0.62),
-                Color(red: 0.08, green: 0.11, blue: 0.15).opacity(0.70)
-            ]
-        case "amber":
-            return [
-                Color(red: 0.10, green: 0.08, blue: 0.06).opacity(0.80),
-                Color(red: 0.18, green: 0.12, blue: 0.06).opacity(0.64),
-                Color(red: 0.07, green: 0.09, blue: 0.12).opacity(0.72)
-            ]
-        case "violet":
-            return [
-                Color(red: 0.10, green: 0.08, blue: 0.12).opacity(0.80),
-                Color(red: 0.16, green: 0.10, blue: 0.18).opacity(0.64),
-                Color(red: 0.07, green: 0.12, blue: 0.13).opacity(0.72)
-            ]
-        case "ocean":
-            return [
-                Color(red: 0.04, green: 0.09, blue: 0.11).opacity(0.80),
-                Color(red: 0.06, green: 0.15, blue: 0.18).opacity(0.64),
-                Color(red: 0.11, green: 0.09, blue: 0.07).opacity(0.72)
-            ]
-        case "sage":
-            return [
-                Color(red: 0.06, green: 0.10, blue: 0.08).opacity(0.80),
-                Color(red: 0.10, green: 0.16, blue: 0.11).opacity(0.64),
-                Color(red: 0.12, green: 0.10, blue: 0.07).opacity(0.72)
-            ]
-        case "rose":
-            return [
-                Color(red: 0.11, green: 0.07, blue: 0.09).opacity(0.80),
-                Color(red: 0.18, green: 0.09, blue: 0.12).opacity(0.64),
-                Color(red: 0.07, green: 0.11, blue: 0.13).opacity(0.72)
-            ]
-        case "indigo":
-            return [
-                Color(red: 0.07, green: 0.08, blue: 0.12).opacity(0.80),
-                Color(red: 0.10, green: 0.12, blue: 0.20).opacity(0.64),
-                Color(red: 0.07, green: 0.13, blue: 0.12).opacity(0.72)
-            ]
-        case "slate":
-            return [
-                Color(red: 0.07, green: 0.08, blue: 0.09).opacity(0.82),
-                Color(red: 0.12, green: 0.14, blue: 0.15).opacity(0.66),
-                Color(red: 0.10, green: 0.09, blue: 0.07).opacity(0.72)
-            ]
-        case "copper":
-            return [
-                Color(red: 0.10, green: 0.08, blue: 0.06).opacity(0.80),
-                Color(red: 0.17, green: 0.10, blue: 0.07).opacity(0.64),
-                Color(red: 0.06, green: 0.13, blue: 0.13).opacity(0.72)
-            ]
-        case "glacier":
-            return [
-                Color(red: 0.06, green: 0.10, blue: 0.12).opacity(0.80),
-                Color(red: 0.08, green: 0.16, blue: 0.18).opacity(0.64),
-                Color(red: 0.12, green: 0.08, blue: 0.10).opacity(0.72)
-            ]
-        case "ember":
-            return [
-                Color(red: 0.11, green: 0.07, blue: 0.06).opacity(0.80),
-                Color(red: 0.18, green: 0.09, blue: 0.07).opacity(0.64),
-                Color(red: 0.06, green: 0.10, blue: 0.14).opacity(0.72)
-            ]
-        default:
-            return [
-                Color(red: 0.06, green: 0.07, blue: 0.08).opacity(0.82),
-                Color(red: 0.10, green: 0.13, blue: 0.15).opacity(0.66),
-                Color(red: 0.08, green: 0.09, blue: 0.11).opacity(0.74)
-            ]
-        }
+        selectedThemeOption.background
     }
 
     private var themeMainTint: Color {
-        switch appTheme {
-        case "aurora": return Color(red: 0.08, green: 0.31, blue: 0.26)
-        case "amber": return Color(red: 0.34, green: 0.23, blue: 0.10)
-        case "violet": return Color(red: 0.28, green: 0.20, blue: 0.34)
-        case "ocean": return Color(red: 0.10, green: 0.26, blue: 0.31)
-        case "sage": return Color(red: 0.18, green: 0.29, blue: 0.20)
-        case "rose": return Color(red: 0.34, green: 0.18, blue: 0.23)
-        case "indigo": return Color(red: 0.20, green: 0.23, blue: 0.39)
-        case "slate": return Color(red: 0.20, green: 0.25, blue: 0.27)
-        case "copper": return Color(red: 0.34, green: 0.21, blue: 0.14)
-        case "glacier": return Color(red: 0.18, green: 0.29, blue: 0.33)
-        case "ember": return Color(red: 0.36, green: 0.18, blue: 0.14)
-        default: return Color(red: 0.14, green: 0.21, blue: 0.24)
-        }
+        selectedThemeOption.mainTint
     }
 
     private var themeSidebarTint: Color {
-        switch appTheme {
-        case "aurora": return Color(red: 0.07, green: 0.24, blue: 0.21)
-        case "amber": return Color(red: 0.25, green: 0.16, blue: 0.08)
-        case "violet": return Color(red: 0.20, green: 0.15, blue: 0.26)
-        case "ocean": return Color(red: 0.08, green: 0.20, blue: 0.24)
-        case "sage": return Color(red: 0.14, green: 0.23, blue: 0.16)
-        case "rose": return Color(red: 0.25, green: 0.14, blue: 0.18)
-        case "indigo": return Color(red: 0.15, green: 0.17, blue: 0.29)
-        case "slate": return Color(red: 0.15, green: 0.19, blue: 0.21)
-        case "copper": return Color(red: 0.25, green: 0.16, blue: 0.11)
-        case "glacier": return Color(red: 0.14, green: 0.23, blue: 0.26)
-        case "ember": return Color(red: 0.27, green: 0.14, blue: 0.11)
-        default: return Color(red: 0.11, green: 0.16, blue: 0.18)
-        }
+        selectedThemeOption.sidebarTint
     }
 
     private var themeRowTint: Color {
-        switch appTheme {
-        case "aurora": return Color(red: 0.18, green: 0.55, blue: 0.44)
-        case "amber": return Color(red: 0.68, green: 0.46, blue: 0.18)
-        case "violet": return Color(red: 0.48, green: 0.38, blue: 0.64)
-        case "ocean": return Color(red: 0.18, green: 0.48, blue: 0.58)
-        case "sage": return Color(red: 0.36, green: 0.54, blue: 0.38)
-        case "rose": return Color(red: 0.64, green: 0.34, blue: 0.44)
-        case "indigo": return Color(red: 0.38, green: 0.42, blue: 0.66)
-        case "slate": return Color(red: 0.42, green: 0.50, blue: 0.53)
-        case "copper": return Color(red: 0.62, green: 0.38, blue: 0.24)
-        case "glacier": return Color(red: 0.40, green: 0.58, blue: 0.64)
-        case "ember": return Color(red: 0.66, green: 0.32, blue: 0.24)
-        default: return Color(red: 0.30, green: 0.46, blue: 0.52)
-        }
+        selectedThemeOption.rowTint
     }
 
     private var activeProfiles: [CodexProfile] {
@@ -2907,8 +3139,8 @@ struct AccountsRootView: View {
             showLoading: false,
             replayQuota: false,
             liveUsage: shouldUseLiveQuota,
-            liveParallelism: shouldUseLiveQuota ? 1 : 2,
-            statusTimeout: shouldUseLiveQuota ? 18 : 8
+            liveParallelism: shouldUseLiveQuota ? liveUsageParallelism : 2,
+            statusTimeout: shouldUseLiveQuota ? liveUsageStatusTimeout : 8
         )
     }
 
@@ -2931,8 +3163,8 @@ struct AccountsRootView: View {
                 showLoading: false,
                 replayQuota: false,
                 liveUsage: true,
-                liveParallelism: 1,
-                statusTimeout: 20
+                liveParallelism: liveUsageParallelism,
+                statusTimeout: liveUsageStatusTimeout
             )
         }
     }
@@ -3491,7 +3723,7 @@ struct AccountsRootView: View {
                 title: tr("系統工具", "System Tools"),
                 systemName: "switch.2",
                 subtitle: systemToolsSummary,
-                accent: keepAwake.isAwake || keyboardClean.isLocked ? Color(red: 0.00, green: 0.88, blue: 0.68) : Color.white.opacity(0.62),
+                accent: keepAwake.isAwake ? keepAwakeModeAccent : (keyboardClean.isLocked ? Color(red: 0.00, green: 0.88, blue: 0.68) : Color.white.opacity(0.62)),
                 expanded: $sidebarToolsExpanded
             ) {
                 keepAwakePanel
@@ -3546,7 +3778,12 @@ struct AccountsRootView: View {
     }
 
     private var systemToolsSummary: String {
-        let awake = keepAwake.isAwake ? tr("防睡眠開", "Awake on") : tr("防睡眠關", "Awake off")
+        let awake: String
+        switch keepAwake.mode {
+        case .off: awake = tr("防睡眠關", "Awake off")
+        case .display: awake = tr("開屏防睡眠", "Screen awake")
+        case .clamshell: awake = tr("合蓋防睡眠", "Lid awake")
+        }
         let clean = keyboardClean.isLocked ? tr("清潔開", "Clean on") : tr("清潔關", "Clean off")
         return "\(awake) · \(clean)"
     }
@@ -3683,81 +3920,90 @@ struct AccountsRootView: View {
 
     private var keepAwakeHelpText: String {
         tr(
-            "防止 Mac 自動睡眠。打開後合蓋會盡量保持任務運行，內置屏幕亮度會降到 0；開蓋或關閉功能會恢復亮度。",
-            "Prevents Mac sleep. When enabled, closing the lid keeps tasks running where macOS allows it and dims the built-in display to 0; opening the lid or turning this off restores brightness."
+            "三個級別：\n關閉：跟隨 macOS。\n開屏：螢幕打開時防止熄屏同睡眠。\n合蓋：合埋螢幕仍保持任務運行，需要 macOS 管理員確認。\n\nApp 唔會儲存管理員密碼；離開合蓋模式時亦會恢復系統設定。",
+            "Three levels:\nOff: follow macOS settings.\nScreen: prevent display and system sleep while the lid is open.\nLid: keep tasks running with the lid closed; macOS administrator approval is required.\n\nThe app never stores the administrator password and restores the system setting when leaving Lid mode."
         )
     }
 
-    private var keepAwakePanel: some View {
-        HStack(spacing: scaled(10)) {
-            VStack(alignment: .leading, spacing: scaled(3)) {
-                HStack(spacing: scaled(5)) {
-                    Text(tr("防睡眠", "Keep Awake"))
-                        .font(appFont(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.70))
-                        .lineLimit(1)
-                    keepAwakeInfoIcon
-                }
-                Text(keepAwake.isAwake ? tr("已開", "On") : tr("已關", "Off"))
-                    .font(appFont(size: 12, weight: .semibold))
-                    .foregroundStyle(keepAwake.isAwake ? Color(red: 0.00, green: 0.95, blue: 0.48) : Color.white.opacity(0.46))
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: scaled(8))
-
-            keepAwakeGlassButton
+    private var keepAwakeModeTitle: String {
+        switch keepAwake.mode {
+        case .off: return tr("已關閉", "Off")
+        case .display: return tr("開屏防睡眠", "Screen awake")
+        case .clamshell: return tr("合蓋繼續運行", "Lid closed")
         }
     }
 
-    private var keepAwakeGlassButton: some View {
-        let active = keepAwake.isAwake
-        let accent = active ? Color(red: 0.00, green: 0.95, blue: 0.48) : Color(red: 0.52, green: 0.58, blue: 0.66)
+    private var keepAwakeModeAccent: Color {
+        switch keepAwake.mode {
+        case .off: return Color(red: 0.58, green: 0.63, blue: 0.70)
+        case .display: return Color(red: 0.08, green: 0.84, blue: 0.74)
+        case .clamshell: return Color(red: 0.70, green: 0.40, blue: 1.00)
+        }
+    }
 
-        return Button {
-            keepAwake.toggle()
-        } label: {
+    private var keepAwakeModeDescription: String {
+        switch keepAwake.mode {
+        case .off:
+            return tr("跟隨 macOS 原本睡眠設定", "Uses the normal macOS sleep settings")
+        case .display:
+            return tr("開住螢幕時唔會熄屏或睡眠", "Prevents display and system sleep while open")
+        case .clamshell:
+            return tr("合埋螢幕都保持任務運行", "Keeps tasks running after the lid is closed")
+        }
+    }
+
+    private var keepAwakePanel: some View {
+        VStack(alignment: .leading, spacing: scaled(8)) {
             HStack(spacing: scaled(6)) {
+                Text(tr("防睡眠模式", "Keep Awake Mode"))
+                    .font(appFont(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+                keepAwakeInfoIcon
+                Spacer(minLength: scaled(6))
                 if keepAwake.isSwitching {
                     ProgressView()
                         .controlSize(.small)
-                        .frame(width: scaled(14), height: scaled(14))
                 } else {
-                    Image(systemName: active ? "sun.max.fill" : "moon.zzz.fill")
-                        .font(.system(size: scaled(12), weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                    Text(active ? "ON" : "OFF")
-                        .font(appFont(size: 10, weight: .heavy, monospaced: true))
-                        .monospacedDigit()
+                    Text(keepAwakeModeTitle)
+                        .font(appFont(size: 10, weight: .heavy))
+                        .foregroundStyle(keepAwakeModeAccent)
+                        .lineLimit(1)
                 }
             }
-            .foregroundStyle(active ? Color.white : Color.white.opacity(0.82))
-            .frame(width: scaled(68), height: scaled(30))
-            .background(.ultraThinMaterial)
-            .background(
-                LinearGradient(
-                    colors: [accent.opacity(active ? 0.34 : 0.16), Color.white.opacity(0.040)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+
+            KeepAwakeLevelSlider(
+                mode: Binding<KeepAwakeMode>(
+                    get: { keepAwake.mode },
+                    set: { keepAwake.setMode($0) }
+                ),
+                isEnabled: !keepAwake.isSwitching,
+                accessibilityLabelText: tr("防睡眠級別", "Keep Awake level"),
+                accessibilityValueText: keepAwakeModeTitle
             )
-            .overlay(
-                Capsule()
-                    .stroke(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.30), accent.opacity(active ? 0.58 : 0.38), Color.black.opacity(0.08)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .clipShape(Capsule())
-            .contentShape(Capsule())
+
+            HStack(spacing: 0) {
+                Text(tr("關閉", "Off"))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundStyle(keepAwake.mode == .off ? keepAwakeModeAccent : Color.white.opacity(0.40))
+                Text(tr("開屏", "Screen"))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .foregroundStyle(keepAwake.mode == .display ? keepAwakeModeAccent : Color.white.opacity(0.40))
+                Text(tr("合蓋", "Lid"))
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .foregroundStyle(keepAwake.mode == .clamshell ? keepAwakeModeAccent : Color.white.opacity(0.40))
+            }
+            .font(appFont(size: 9, weight: .semibold))
+
+            HStack(spacing: scaled(5)) {
+                Image(systemName: keepAwake.mode == .clamshell ? "lock.shield.fill" : (keepAwake.mode == .display ? "sun.max.fill" : "moon.zzz.fill"))
+                    .font(.system(size: scaled(9), weight: .semibold))
+                    .foregroundStyle(keepAwakeModeAccent)
+                Text(keepAwakeModeDescription)
+                    .font(appFont(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.46))
+                    .lineLimit(2)
+                }
         }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.90, hoverScale: 1.04, glow: accent, glowOpacity: 0.18))
-        .disabled(keepAwake.isSwitching)
-        .opacity(keepAwake.isSwitching ? 0.72 : 1)
         .help(keepAwakeHelpText)
     }
 
@@ -3849,15 +4095,15 @@ struct AccountsRootView: View {
         let percent = min(max(seconds / 86_400, 0), 1)
         let label = usageDurationText(seconds)
 
-        return VStack(alignment: .leading, spacing: scaled(6)) {
+        return VStack(alignment: .leading, spacing: scaled(7)) {
             HStack {
                 Text(tr("今日使用", "Today"))
                     .font(appFont(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.70))
                 Spacer()
                 Text(label)
-                    .font(appFont(size: 11, weight: .semibold, monospaced: true))
-                    .foregroundStyle(Color(red: 0.32, green: 0.86, blue: 1.00))
+                    .font(appFont(size: 10, weight: .semibold, monospaced: true))
+                    .foregroundStyle(themePrimary)
                     .monospacedDigit()
             }
 
@@ -3869,9 +4115,9 @@ struct AccountsRootView: View {
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color(red: 0.20, green: 0.78, blue: 1.00),
-                                    Color(red: 0.00, green: 0.90, blue: 0.72),
-                                    Color(red: 1.00, green: 0.72, blue: 0.20)
+                                    themePrimary,
+                                    themeSecondary,
+                                    themeWarm
                                 ],
                                 startPoint: .leading,
                                 endPoint: .trailing
@@ -3883,11 +4129,24 @@ struct AccountsRootView: View {
             .frame(height: scaled(8))
             .clipShape(Capsule())
             .animation(.spring(response: 0.34, dampingFraction: 0.82), value: usageTicker)
+
+            HStack(spacing: scaled(5)) {
+                Circle()
+                    .fill(codexUsageSessionActive ? Color(red: 0.10, green: 0.90, blue: 0.66) : Color.white.opacity(0.32))
+                    .frame(width: scaled(5), height: scaled(5))
+                Text(codexUsageSessionActive ? tr("Codex 使用中", "Codex active") : tr("暫停計時", "Timer paused"))
+                    .font(appFont(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.48))
+                Spacer(minLength: scaled(4))
+                Text(tr("睡眠／關機不計", "Sleep/offline excluded"))
+                    .font(appFont(size: 8, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.34))
+            }
         }
     }
 
     private var themeSelector: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: scaled(6)), count: 4)
+        let columns = Array(repeating: GridItem(.flexible(), spacing: scaled(11)), count: 2)
 
         return VStack(alignment: .leading, spacing: scaled(6)) {
             HStack(spacing: scaled(6)) {
@@ -3905,7 +4164,7 @@ struct AccountsRootView: View {
                     .minimumScaleFactor(0.78)
             }
 
-            LazyVGrid(columns: columns, spacing: scaled(6)) {
+            LazyVGrid(columns: columns, spacing: scaled(10)) {
                 ForEach(themeOptions) { option in
                     themeSwatchButton(option)
                 }
@@ -3935,8 +4194,8 @@ struct AccountsRootView: View {
         return Button {
             setTheme(option.id)
         } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: scaled(9), style: .continuous)
+            HStack(spacing: scaled(5)) {
+                Circle()
                     .fill(
                         LinearGradient(
                             colors: [option.primary, option.secondary, option.warm],
@@ -3944,26 +4203,42 @@ struct AccountsRootView: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                    .overlay(Color.black.opacity(selected ? 0.0 : 0.10))
+                    .frame(width: scaled(22), height: scaled(22))
+                    .overlay(Circle().stroke(Color.white.opacity(0.34), lineWidth: 1))
+                    .shadow(color: option.primary.opacity(0.38), radius: scaled(5))
 
-                if selected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: scaled(10), weight: .heavy))
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.35), radius: 5, x: 0, y: 2)
-                        .transition(.scale.combined(with: .opacity))
+                Text(option.zhTitle)
+                    .font(appFont(size: 10, weight: selected ? .heavy : .semibold))
+                    .foregroundStyle(.white.opacity(selected ? 0.96 : 0.72))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
+                    .allowsTightening(true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
+
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: scaled(10), weight: .bold))
+                    .foregroundStyle(selected ? option.primary : Color.white.opacity(0.18))
+                    .transition(.scale.combined(with: .opacity))
                 }
-            }
+            .padding(.horizontal, scaled(6))
             .frame(maxWidth: .infinity)
-            .frame(height: scaled(26))
+            .frame(height: scaled(40))
+            .background(
+                LinearGradient(
+                    colors: [option.primary.opacity(selected ? 0.26 : 0.10), option.secondary.opacity(0.06), Color.black.opacity(0.12)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: scaled(9), style: .continuous)
-                    .stroke(selected ? Color.white.opacity(0.74) : Color.white.opacity(0.14), lineWidth: selected ? 1.4 : 1)
+                    .stroke(selected ? option.primary.opacity(0.82) : Color.white.opacity(0.12), lineWidth: selected ? 1.4 : 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: scaled(9), style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: scaled(9), style: .continuous))
         }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.88, hoverScale: 1.08, glow: option.primary, glowOpacity: selected ? 0.28 : 0.18))
+        .buttonStyle(PressScaleButtonStyle(scale: 0.96, hoverScale: 1.012, glow: option.primary, glowOpacity: selected ? 0.28 : 0.18))
         .help(option.zhTitle)
     }
 
@@ -6025,16 +6300,16 @@ struct AccountsRootView: View {
 
         runBackground(loading) {
             var environment = ProcessInfo.processInfo.environment
-            let resolvedParallelism = max(1, liveParallelism ?? 2)
-            let resolvedTimeout = statusTimeout ?? (liveUsage ? (resolvedParallelism <= 1 ? 20 : 18) : 8)
+            let resolvedParallelism = max(1, liveParallelism ?? (liveUsage ? liveUsageParallelism : 2))
+            let resolvedTimeout = statusTimeout ?? (liveUsage ? liveUsageStatusTimeout : 8)
             environment["CODEX_USAGE_LIVE_LOOKUP"] = liveUsage ? "1" : "0"
             environment["STATUS_PARALLELISM"] = "\(resolvedParallelism)"
             if liveUsage {
-                environment["USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS"] = "1"
-                environment["USAGE_DIRECT_TIMEOUT_SECONDS"] = "2"
-                environment["TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS"] = "1"
-                environment["TOKEN_REFRESH_TIMEOUT_SECONDS"] = "3"
-                environment["APP_SERVER_USAGE_TIMEOUT_SECONDS"] = "3"
+                environment["USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS"] = "3"
+                environment["USAGE_DIRECT_TIMEOUT_SECONDS"] = "6"
+                environment["TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS"] = "2"
+                environment["TOKEN_REFRESH_TIMEOUT_SECONDS"] = "6"
+                environment["APP_SERVER_USAGE_TIMEOUT_SECONDS"] = "5"
             }
             let statusResult = runCodexScript(scriptPath, ["list-accounts-status"], wait: true, timeout: resolvedTimeout, environment: environment)
             let profiles = parsedCodexProfiles(
@@ -7243,6 +7518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var cachedAccounts: [Account] = []
     private var accountsCacheRefreshInFlight = false
+    private var terminationCleanupInFlight = false
 
     private var scriptPath: String {
         if let bundled = Bundle.main.path(forResource: "codex_multi_account", ofType: "zsh") {
@@ -7295,6 +7571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func keepAwakeChanged() {
+        buildMainMenu()
         rebuildMenu()
     }
 
@@ -7325,12 +7602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(NSMenuItem.separator())
-        let awakeTitle = KeepAwakeController.shared.isAwake
-            ? appTr("關閉防睡眠", "Turn Keep Awake Off")
-            : appTr("開啟防睡眠", "Turn Keep Awake On")
-        let awakeItem = menuItem(awakeTitle, action: #selector(toggleKeepAwake), key: "k")
-        awakeItem.state = KeepAwakeController.shared.isAwake ? .on : .off
-        menu.addItem(awakeItem)
+        menu.addItem(keepAwakeModeMenuItem())
         let cleanTitle = KeyboardCleanController.shared.isLocked
             ? appTr("關閉清潔模式", "Turn Clean Mode Off")
             : appTr("開啟清潔模式", "Turn Clean Mode On")
@@ -7372,7 +7644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(menuItem(appTr("關於 Codex 帳戶", "About Codex Accounts"), action: #selector(showAbout), key: ""))
         appMenu.addItem(menuItem(appTr("檢查更新...", "Check for Updates..."), action: #selector(checkForUpdates), key: "u"))
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(menuItem(appTr("切換防睡眠", "Toggle Keep Awake"), action: #selector(toggleKeepAwake), key: "k"))
+        appMenu.addItem(keepAwakeModeMenuItem())
         appMenu.addItem(menuItem(appTr("切換清潔模式", "Toggle Clean Mode"), action: #selector(toggleKeyboardClean), key: ""))
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(menuItem(appTr("結束 Codex 帳戶", "Quit Codex Accounts"), action: #selector(quit), key: "q"))
@@ -7424,7 +7696,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         accountMenu.addItem(menuItem(appTr("新增帳戶...", "New Account..."), action: #selector(newAccount), key: "n"))
         accountMenu.addItem(menuItem(appTr("同步對話同記憶一次", "Sync History and Memory Once"), action: #selector(syncOnce), key: "s"))
         accountMenu.addItem(menuItem(appTr("關閉全部 Codex 視窗", "Close All Codex Windows"), action: #selector(closeAllWindows), key: "w"))
-        accountMenu.addItem(menuItem(appTr("切換防睡眠", "Toggle Keep Awake"), action: #selector(toggleKeepAwake), key: "k"))
+        accountMenu.addItem(keepAwakeModeMenuItem())
         accountMenu.addItem(menuItem(appTr("切換清潔模式", "Toggle Clean Mode"), action: #selector(toggleKeyboardClean), key: ""))
         accountMenu.addItem(NSMenuItem.separator())
         accountMenu.addItem(menuItem(appTr("共享全部對話紀錄", "Share All History"), action: #selector(linkAllHistory), key: ""))
@@ -7454,6 +7726,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         return item
+    }
+
+    private func keepAwakeModeMenuItem() -> NSMenuItem {
+        let controller = KeepAwakeController.shared
+        let currentTitle: String
+        switch controller.mode {
+        case .off: currentTitle = appTr("關閉", "Off")
+        case .display: currentTitle = appTr("開屏", "Screen")
+        case .clamshell: currentTitle = appTr("合蓋", "Lid")
+        }
+
+        let root = NSMenuItem(
+            title: appTr("防睡眠模式：\(currentTitle)", "Keep Awake: \(currentTitle)"),
+            action: nil,
+            keyEquivalent: ""
+        )
+        let submenu = NSMenu(title: appTr("防睡眠模式", "Keep Awake Mode"))
+        for mode in KeepAwakeMode.allCases {
+            let title: String
+            switch mode {
+            case .off: title = appTr("關閉 — 跟隨 macOS", "Off — Follow macOS")
+            case .display: title = appTr("開屏 — 防止熄屏及睡眠", "Screen — Prevent display and system sleep")
+            case .clamshell: title = appTr("合蓋 — 繼續運行", "Lid — Keep running when closed")
+            }
+            let item = NSMenuItem(title: title, action: #selector(setKeepAwakeMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = controller.mode == mode ? .on : .off
+            item.isEnabled = !controller.isSwitching
+            submenu.addItem(item)
+        }
+        root.submenu = submenu
+        return root
     }
 
     private func makeEditMenuItem(_ title: String, action: Selector, key: String) -> NSMenuItem {
@@ -7739,8 +8044,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    @objc private func toggleKeepAwake() {
-        KeepAwakeController.shared.toggle()
+    @objc private func setKeepAwakeMode(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? Int,
+              let mode = KeepAwakeMode(rawValue: rawValue)
+        else { return }
+        KeepAwakeController.shared.setMode(mode)
     }
 
     @objc private func toggleKeyboardClean() {
@@ -7764,14 +8072,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         syncProcess?.terminate()
         KeyboardCleanController.shared.stop()
-        KeepAwakeController.shared.stop()
         NSApp.terminate(nil)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let controller = KeepAwakeController.shared
+        guard !terminationCleanupInFlight else { return .terminateLater }
+        guard controller.isSwitching || controller.ownsSystemSleepOverride else {
+            controller.stopCaffeinateForTermination()
+            return .terminateNow
+        }
+
+        terminationCleanupInFlight = true
+        finishKeepAwakeTerminationCleanup(sender)
+        return .terminateLater
+    }
+
+    private func finishKeepAwakeTerminationCleanup(_ sender: NSApplication) {
+        let controller = KeepAwakeController.shared
+        guard !controller.isSwitching else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.finishKeepAwakeTerminationCleanup(sender)
+            }
+            return
+        }
+
+        guard controller.ownsSystemSleepOverride else {
+            controller.stopCaffeinateForTermination()
+            terminationCleanupInFlight = false
+            sender.reply(toApplicationShouldTerminate: true)
+            return
+        }
+
+        // Only restore pmset when Codex Accounts owns the override. An external
+        // SleepDisabled setting must survive this app quitting.
+        controller.setMode(.off) { success in
+            if success {
+                controller.stopCaffeinateForTermination()
+            }
+            self.terminationCleanupInFlight = false
+            sender.reply(toApplicationShouldTerminate: success)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         syncProcess?.terminate()
         KeyboardCleanController.shared.stop()
-        KeepAwakeController.shared.stop()
+        KeepAwakeController.shared.stopCaffeinateForTermination()
     }
 }
 
