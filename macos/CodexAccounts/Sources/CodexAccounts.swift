@@ -8,6 +8,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .utility)
+private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)
 private let profileRefreshPayloadSeparator = "\u{1E}"
 
 private final class ProcessFinishState {
@@ -896,47 +897,15 @@ private struct StatusRingOverlay: View {
     let cornerRadius: CGFloat
     let lineWidth: CGFloat
 
-    @State private var pulse = false
-
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(
-                    color.opacity(active ? (pulse ? 1.0 : 0.26) : 0.98),
-                    lineWidth: lineWidth
-                )
-                .shadow(
-                    color: color.opacity(active ? (pulse ? 0.82 : 0.12) : 0.34),
-                    radius: active ? (pulse ? 18 : 8) : 8,
-                    x: 0,
-                    y: 0
-                )
-
-            if active {
-                RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
-                    .stroke(color.opacity(pulse ? 0.78 : 0.0), lineWidth: max(lineWidth * 0.34, 1))
-                    .scaleEffect(pulse ? 1.18 : 1.02)
-            }
-        }
-        .onAppear {
-            configurePulse()
-        }
-        .onChange(of: active) { _, _ in
-            configurePulse()
-        }
-    }
-
-    private func configurePulse() {
-        if active {
-            pulse = false
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.54).repeatForever(autoreverses: true)) {
-                    pulse = true
-                }
-            }
-        } else {
-            pulse = false
-        }
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(color.opacity(active ? 0.98 : 0.88), lineWidth: lineWidth)
+            .shadow(
+                color: color.opacity(active ? 0.34 : 0.24),
+                radius: active ? 9 : 7,
+                x: 0,
+                y: 0
+            )
     }
 }
 
@@ -2412,6 +2381,7 @@ struct AccountsRootView: View {
     @State private var showKeyboardCleanHelp = false
     @State private var showSyncHelp = false
     @State private var busyProfiles: Set<String> = []
+    @State private var isClosingAllAccounts = false
     @State private var expandedResetKeys: Set<String> = []
     @State private var expandedResetCreditProfileIDs: Set<String> = []
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
@@ -6018,6 +5988,7 @@ struct AccountsRootView: View {
         .shadow(color: accent.opacity(depleted ? 0.26 : 0.18), radius: 9, x: 0, y: 3)
         .clipShape(Capsule())
         .modifier(HoverLiftGlow(glow: accent, scale: 1.055, opacity: 0.50, radius: 18, y: 5))
+        .disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)
         .keyboardShortcut(profile.id == "account1" ? "1" : "2", modifiers: [.command])
     }
 
@@ -6031,6 +6002,7 @@ struct AccountsRootView: View {
             closeAccount(profile)
         }
         .frame(width: scaled(38), height: scaled(40))
+        .disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)
         .contentShape(Rectangle())
         .onHover { hovering in
             updateHoveredProfile(profile.id, hovering: hovering)
@@ -6209,6 +6181,7 @@ struct AccountsRootView: View {
 
     private func runBackground(
         _ message: String?,
+        queue: DispatchQueue = codexAccountsWorkQueue,
         work: @escaping () -> (Int32, String),
         completion: @escaping ((Int32, String)) -> Void
     ) {
@@ -6217,7 +6190,7 @@ struct AccountsRootView: View {
             loadingMessage = message
         }
 
-        codexAccountsWorkQueue.async {
+        queue.async {
             let result = work()
             DispatchQueue.main.async {
                 if message != nil {
@@ -6697,7 +6670,7 @@ struct AccountsRootView: View {
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = true) {
+    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = false) {
         let requestedName = displayName ?? name
         let route = quotaPoolRoute(for: name)
         let targetID = route?.target.id ?? name
@@ -6710,6 +6683,7 @@ struct AccountsRootView: View {
         let requestedID = sanitizedProfileId(name)
         let targetProfileID = sanitizedProfileId(targetID)
         let busyIDs = Set([requestedID, targetProfileID])
+        guard !isClosingAllAccounts, busyProfiles.isDisjoint(with: busyIDs) else { return }
         startUsageSession()
         busyIDs.forEach { setProfileBusy($0, true) }
         let loadingText: String
@@ -6718,7 +6692,7 @@ struct AccountsRootView: View {
         } else {
             loadingText = tr("正在打開 \(targetName)...", "Opening \(targetName)...")
         }
-        runBackground(loadingText) {
+        runBackground(loadingText, queue: codexAccountsLaunchQueue) {
             if route?.didSwitch == true {
                 _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 12)
             }
@@ -6755,12 +6729,18 @@ struct AccountsRootView: View {
                 failureText = tr("打開失敗", "Open failed")
             }
             statusText = result.0 == 0 ? tr("已打開 \(targetName)", "Opened \(targetName)") : failureText
+            if result.0 != 0 {
+                let detail = trimmedToolOutput(result.1, maxLength: 900)
+                let fallback = tr("Codex 未能確認啟動。請稍後再試。", "Codex could not be verified as running. Please try again.")
+                alertMessage(failureText, detail.isEmpty ? fallback : detail)
+            }
         }
     }
 
     private func closeAccount(_ profile: CodexProfile) {
+        guard !isClosingAllAccounts, !busyProfiles.contains(profile.id) else { return }
         setProfileBusy(profile.id, true)
-        runBackground(tr("關閉 \(profile.displayName)...", "Closing \(profile.displayName)...")) {
+        runBackground(tr("關閉 \(profile.displayName)...", "Closing \(profile.displayName)..."), queue: codexAccountsLaunchQueue) {
             runCodexScript(scriptPath, ["close-account", profile.id], wait: true, timeout: 25)
         } completion: { result in
             setProfileBusy(profile.id, false)
@@ -6771,13 +6751,19 @@ struct AccountsRootView: View {
             statusText = result.0 == 0
                 ? tr("已關閉 \(profile.displayName)", "Closed \(profile.displayName)")
                 : tr("關閉失敗", "Close failed")
+            if result.0 != 0 {
+                alertMessage(tr("關閉失敗", "Close failed"), trimmedToolOutput(result.1, maxLength: 900))
+            }
         }
     }
 
     private func closeAllAccounts() {
-        runBackground(tr("關閉全部 Codex 視窗...", "Closing all Codex windows...")) {
+        guard !isClosingAllAccounts else { return }
+        isClosingAllAccounts = true
+        runBackground(tr("關閉全部 Codex 視窗...", "Closing all Codex windows..."), queue: codexAccountsLaunchQueue) {
             runCodexScript(scriptPath, ["close-all-accounts"], wait: true, timeout: 35)
         } completion: { result in
+            isClosingAllAccounts = false
             if result.0 == 0 {
                 finishUsageSession()
                 activeQuotaPoolProfileID = nil
@@ -6786,6 +6772,9 @@ struct AccountsRootView: View {
             statusText = result.0 == 0
                 ? tr("已關閉全部 Codex 視窗", "Closed all Codex windows")
                 : tr("關閉全部失敗", "Close all failed")
+            if result.0 != 0 {
+                alertMessage(tr("關閉全部失敗", "Close all failed"), trimmedToolOutput(result.1, maxLength: 900))
+            }
         }
     }
 
@@ -7939,7 +7928,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openAccount(_ name: String, displayName: String? = nil) {
         let routed = quotaPoolRouteForMenu(requestedName: name)
-        var arguments = ["launch-account", routed.name]
+        var arguments = ["launch-account-nosync", routed.name]
         if !routed.displayName.isEmpty {
             arguments.append(routed.displayName)
         }

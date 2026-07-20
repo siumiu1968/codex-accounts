@@ -172,9 +172,57 @@ assert 'if proxy_injection_enabled; then' in launch_match.group(1)
 assert 'launch_args+=(--proxy-server="$CODEX_PROXY_URL")' in launch_match.group(1)
 assert '--args "${launch_args[@]}"' in launch_match.group(1)
 assert helper.count('$CODEX_APP/Contents/MacOS/ChatGPT') >= 2
+assert 'CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"' in helper
+assert 'CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"' in helper
+assert helper.count('CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \\\n    repair_compacted_image_payloads_for_home') >= 2
+assert 'prepare_profile_login_storage_for_launch "$home_dir"' in launch_match.group(1)
+assert launch_match.group(1).count('stop_codex_windows_for_app_data "$app_data"') == 1
+assert launch_match.group(1).count('stop_codex_servers_for_home "$home_dir"') == 1
+assert 'wait_for_codex_window_exit "$app_data"' in launch_match.group(1)
+assert 'wait_for_codex_window_start "$app_data"' in launch_match.group(1)
+assert 'open -na "$CODEX_APP"' in launch_match.group(1)
+assert launch_match.group(1).index('wait_for_codex_window_start "$app_data"') > launch_match.group(1).index('open -na "$CODEX_APP"')
+heavy_launch_match = re.search(
+    r'if \[\[ "\$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" \]\]; then(.*?)\n  fi',
+    launch_match.group(1),
+    flags=re.DOTALL,
+)
+assert heavy_launch_match
+for heavy_call in (
+    'refresh_shared_history_for_home "$home_dir"',
+    'repair_compacted_image_payloads_for_home "$home_dir"',
+    'cleanup_thread_index_for_home "$home_dir"',
+    'normalize_thread_sources_for_home "$home_dir"',
+    'restore_default_thread_model_providers_for_home "$home_dir"',
+    'restore_account1_visible_thread_model_providers_for_home "$home_dir"',
+):
+    assert heavy_call in heavy_launch_match.group(1)
+    assert launch_match.group(1).count(heavy_call) == 1
 
-assert "syncBeforeLaunch: Bool = true" in swift
+link_ready_match = re.search(r"shared_history_links_ready\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert link_ready_match
+for item in ("session_index.jsonl", "sessions", "shell_snapshots"):
+    assert item in link_ready_match.group(1)
+assert "seed_shared_history_from_home" not in link_ready_match.group(1)
+assert "recover_shared_history_backups_from_home" not in link_ready_match.group(1)
+assert "rsync" not in link_ready_match.group(1)
+launch_prepare_match = re.search(r"prepare_profile_login_storage_for_launch\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert launch_prepare_match
+assert 'shared_history_links_ready "$account_home" && return 0' in launch_prepare_match.group(1)
+assert 'prepare_profile_login_storage "$account_home"' in launch_prepare_match.group(1)
+
+assert "syncBeforeLaunch: Bool = false" in swift
 assert 'let launchCommand = syncBeforeLaunch ? "launch-account" : "launch-account-nosync"' in swift
+assert 'private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)' in swift
+assert 'queue: DispatchQueue = codexAccountsWorkQueue' in swift
+assert 'runBackground(loadingText, queue: codexAccountsLaunchQueue)' in swift
+assert 'runBackground(tr("關閉 \\(profile.displayName)...", "Closing \\(profile.displayName)..."), queue: codexAccountsLaunchQueue)' in swift
+assert 'busyProfiles.isDisjoint(with: busyIDs)' in swift
+assert '.disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)' in swift
+assert 'alertMessage(failureText, detail.isEmpty ? fallback : detail)' in swift
+assert 'var arguments = ["launch-account-nosync", routed.name]' in swift
+assert '.repeatForever(' not in swift
+assert 'environment["CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH"] = "1"' in swift
 assert "startSidebarPruneLoop()" not in swift
 assert "if silent {\n            lastAutoSyncAt = Date()" in swift
 assert "private let liveUsageParallelism = 10" in swift

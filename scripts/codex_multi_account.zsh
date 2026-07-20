@@ -53,7 +53,8 @@ CODEX_DEFAULT_OPENAI_REASONING_EFFORT="${CODEX_DEFAULT_OPENAI_REASONING_EFFORT:-
 CODEX_PRUNE_GLOBAL_STATE_ON_SYNC="${CODEX_PRUNE_GLOBAL_STATE_ON_SYNC:-0}"
 CODEX_PRUNE_LOCAL_THREAD_CATALOG="${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-1}"
 CODEX_CATALOG_ORPHAN_GRACE_SECONDS="${CODEX_CATALOG_ORPHAN_GRACE_SECONDS:-120}"
-CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-1}"
+CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"
+CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"
 CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES="${CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES:-67108864}"
 CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS="${CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS:-65536}"
 CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS="${CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS:-200000}"
@@ -3794,7 +3795,8 @@ repair_account1() {
   refresh_shared_history_for_home "$PRIMARY_CODEX_HOME"
   normalize_thread_sources_for_home "$PRIMARY_CODEX_HOME"
   restore_account1_visible_thread_model_providers_for_home "$PRIMARY_CODEX_HOME"
-  repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
+  CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \
+    repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
   prune_global_state_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
 }
 
@@ -3808,7 +3810,8 @@ repair_compactions_for_account() {
   ensure_dirs
   local account_home
   account_home="$(account_home_for "$name")"
-  repair_compacted_image_payloads_for_home "$account_home"
+  CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \
+    repair_compacted_image_payloads_for_home "$account_home"
 }
 
 sync_once() {
@@ -4071,6 +4074,52 @@ stop_codex_servers_for_home() {
   stop_pids "Closing stale Codex app-server(s) for this profile" "${pids[@]}"
 }
 
+matching_codex_window_pids_for_app_data() {
+  local app_data="$1"
+  local pid args
+
+  while read -r pid args; do
+    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
+    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
+      || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
+    if args_has_user_data_dir "$args" "$app_data"; then
+      printf '%s\n' "$pid"
+      continue
+    fi
+    if [[ "$app_data" == "$HOME/Library/Application Support/Codex" && "$args" != *"--user-data-dir="* ]]; then
+      printf '%s\n' "$pid"
+    fi
+  done < <(ps axww -o pid= -o args=)
+}
+
+wait_for_codex_window_exit() {
+  local app_data="$1"
+  local max_waits="${CODEX_LAUNCH_EXIT_MAX_WAITS:-20}"
+  local wait_seconds="${CODEX_LAUNCH_EXIT_WAIT_SECONDS:-0.1}"
+  local waited=0
+
+  while [[ -n "$(matching_codex_window_pids_for_app_data "$app_data")" ]]; do
+    (( waited >= max_waits )) && return 1
+    sleep "$wait_seconds"
+    waited=$(( waited + 1 ))
+  done
+  return 0
+}
+
+wait_for_codex_window_start() {
+  local app_data="$1"
+  local max_waits="${CODEX_LAUNCH_VERIFY_MAX_WAITS:-40}"
+  local wait_seconds="${CODEX_LAUNCH_VERIFY_WAIT_SECONDS:-0.2}"
+  local waited=0
+
+  while (( waited < max_waits )); do
+    [[ -n "$(matching_codex_window_pids_for_app_data "$app_data")" ]] && return 0
+    sleep "$wait_seconds"
+    waited=$(( waited + 1 ))
+  done
+  return 1
+}
+
 process_args_match_app_data_snapshot() {
   local args="$1"
   local app_data="$2"
@@ -4197,30 +4246,30 @@ launch_account() {
   if [[ "$CODEX_CLONE_PRIMARY_ON_LAUNCH" == "1" && "$home_dir" != "$PRIMARY_CODEX_HOME" && ! -e "$home_dir/config.toml" ]]; then
     copy_initial_profile_to "$home_dir"
   fi
-  stop_codex_windows_for_app_data "$app_data" >/dev/null 2>&1 || true
-  stop_codex_servers_for_home "$home_dir" >/dev/null 2>&1 || true
   if [[ "$CODEX_PRELAUNCH_SYNC" == "1" ]]; then
     if ! sync_account_for_launch "$name" >/dev/null; then
       echo "Prelaunch sync did not finish; not launching Codex profile to avoid SQLite startup conflicts." >&2
       exit 1
     fi
   fi
-  prepare_profile_login_storage "$home_dir"
+  prepare_profile_login_storage_for_launch "$home_dir"
   if is_primary_codex_home "$home_dir"; then
     configure_account1_aliyun_proxy_for_home "$home_dir"
     ensure_aliyun_coding_plan_bridge_running
   else
     restore_non_account1_openai_config_for_home "$home_dir"
   fi
-  refresh_shared_history_for_home "$home_dir"
-  repair_compacted_image_payloads_for_home "$home_dir" >/dev/null 2>&1 || true
-  if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
-    cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
-  fi
   normalize_top_level_model_provider_for_home "$home_dir"
-  normalize_thread_sources_for_home "$home_dir"
-  restore_default_thread_model_providers_for_home "$home_dir"
-  restore_account1_visible_thread_model_providers_for_home "$home_dir"
+  if [[ "$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" ]]; then
+    refresh_shared_history_for_home "$home_dir"
+    repair_compacted_image_payloads_for_home "$home_dir" >/dev/null 2>&1 || true
+    if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
+      cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
+    fi
+    normalize_thread_sources_for_home "$home_dir"
+    restore_default_thread_model_providers_for_home "$home_dir"
+    restore_account1_visible_thread_model_providers_for_home "$home_dir"
+  fi
 
   echo "Launching Codex profile..."
   echo "  account=$(sanitize_account_name "$name")"
@@ -4233,6 +4282,10 @@ launch_account() {
 
   stop_codex_windows_for_app_data "$app_data"
   stop_codex_servers_for_home "$home_dir"
+  if ! wait_for_codex_window_exit "$app_data"; then
+    echo "Existing Codex window for this profile did not exit in time." >&2
+    return 1
+  fi
   ensure_owl_auth_features_enabled "$app_data"
 
   # Keep the account env scoped to this launch. `launchctl setenv` is global
@@ -4270,6 +4323,11 @@ launch_account() {
   open -na "$CODEX_APP" \
     "${launch_env[@]}" \
     --args "${launch_args[@]}"
+
+  if ! wait_for_codex_window_start "$app_data"; then
+    echo "Codex did not start a matching profile process within 8 seconds." >&2
+    return 1
+  fi
 
   echo "Started Codex profile."
 }
@@ -4551,6 +4609,29 @@ ensure_shared_history_links() {
   portable_history_items | while read -r item; do
     replace_with_symlink "$account_home" "$item"
   done
+}
+
+# Constant-size readiness probe for the three portable shared-history links.
+# A normal launch can skip backup recovery and rsync seeding when these links
+# already point at the shared store.
+shared_history_links_ready() {
+  local account_home="$1"
+  local item target source
+
+  [[ "$CODEX_SHARED_SESSIONS" == "1" ]] || return 1
+  for item in session_index.jsonl sessions shell_snapshots; do
+    target="$account_home/$item"
+    source="$(shared_history_source_for_item "$item")"
+    [[ -L "$target" ]] || return 1
+    same_resolved_path "$target" "$source" || return 1
+  done
+  return 0
+}
+
+prepare_profile_login_storage_for_launch() {
+  local account_home="$1"
+  shared_history_links_ready "$account_home" && return 0
+  prepare_profile_login_storage "$account_home"
 }
 
 ensure_shared_sessions_link() {
