@@ -4,11 +4,19 @@
 
 Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / OpenAI profile。每个 profile 都有独立的 `CODEX_HOME` 和应用数据目录，因此可以保持不同的登录状态，不必反复退出和重新登录。
 
-![Codex Accounts 2.5.5 演示界面](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
+![为 V2.5.5 制作的匿名 Codex Accounts 界面截图](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
 
-![Codex Accounts 2.5.5 主题与设置](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
+![为 V2.5.5 制作的匿名 Codex Accounts 主题截图](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
 
 > 两张图片都只使用虚构 profile 名称、`/tmp/demo-profiles/...` 演示路径和模拟用量，不包含真实账号、姓名、电脑用户名、token 或对话内容。
+
+## 2.6.0 更新
+
+- 重新整理 quota 与登录状态：凭证明确失效时显示“登录过期”或“需要登录”，已登录但暂时无法取得官方用量时显示“暂时无法取得”。
+- Reload 期间不再闪出虚假的 `0%` 或 `00/00`。
+- 只有官方 OAuth 明确返回无效 token 时才会判定登录过期；网络故障或 5xx 会保留上一份可用 quota。
+- 备用 quota 查询会停用 MCP 与 plugins，减少后台进程和系统负载。
+- 登录过期仍需要用户重新登录；应用不会自动修复、复制或传送登录凭证。
 
 ## 2.5.5 更新
 
@@ -33,6 +41,8 @@ Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / Open
 - 应用内检查并安装新的 GitHub Release。
 
 ## 安装
+
+系统要求：macOS 14 或更高版本。
 
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下载 `Codex-Accounts-macOS.zip`。
 2. 解压后把 `Codex Accounts.app` 移到 `/Applications`。

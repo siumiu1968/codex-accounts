@@ -1221,9 +1221,17 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTok
         return profile
     }
     if cachedUsage.quota == "__auth_invalid__" {
-        // A cached marker can be left behind by a temporary quota endpoint failure.
-        // Only the current account-status probe may confirm an invalid login.
-        return externalProfile
+        return CodexProfile(
+            id: externalProfile.id,
+            displayName: externalProfile.displayName,
+            home: externalProfile.home,
+            authStatus: "auth_invalid",
+            authMode: externalProfile.authMode,
+            lastRefresh: externalProfile.lastRefresh,
+            quota: "unknown",
+            reset: "unknown",
+            resetCredits: "unknown"
+        )
     }
 
     let reset = profile.reset.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4405,7 +4413,7 @@ struct AccountsRootView: View {
             }
 
             glassIconButton(systemName: "arrow.clockwise", label: tr("重新整理", "Refresh"), compact: compact, accent: Color(red: 0.24, green: 0.95, blue: 0.78), isBusy: isRefreshing) {
-                refreshProfiles(showLoading: true, replayQuota: true, liveUsage: true)
+                refreshProfiles(showLoading: true, replayQuota: false, liveUsage: true)
             }
 
             glassIconButton(systemName: "folder", label: tr("Profile 資料夾", "Profiles Folder"), compact: compact, accent: Color(red: 1.00, green: 0.74, blue: 0.26)) {
@@ -4836,7 +4844,7 @@ struct AccountsRootView: View {
             ? (compact ? tr("外部", "External") : tr("阿里模型", "Aliyun"))
             : (signedIn
             ? tr("已登入", "Signed in")
-            : (expired ? tr("登入過期", "Expired") : (compact ? tr("要登入", "Login") : tr("要登入", "Login needed"))))
+            : (expired ? tr("登入過期", "Expired") : tr("需要登入", "Login needed")))
         let color = external
             ? Color(red: 0.10, green: 0.86, blue: 0.74)
             : (signedIn ? Color(red: 0.32, green: 0.96, blue: 0.46) : (expired ? Color(red: 1.00, green: 0.22, blue: 0.20) : Color.orange))
@@ -4864,16 +4872,22 @@ struct AccountsRootView: View {
         let resetCreditsExpanded = expandedResetCreditProfileIDs.contains(profile.id)
 
         VStack(spacing: scaled(compact ? 5 : 7)) {
-            ForEach(rows) { window in
-                let blockedByWeekly = weeklyZero && window.id == "5h"
-                quotaMeterLine(
-                    window,
-                    profile: profile,
-                    accent: blockedByWeekly ? Color(red: 1.00, green: 0.20, blue: 0.36) : quotaAccent(for: window.percent),
-                    compact: compact,
-                    blockedByWeeklyZero: blockedByWeekly,
-                    forcedReset: blockedByWeekly ? weeklyReset : nil
-                )
+            if isLoginNeeded(profile) {
+                quotaAuthenticationStatus(profile, compact: compact)
+            } else if rows.count == 1, rows[0].id == "unknown" {
+                quotaUnavailableStatus(compact: compact)
+            } else {
+                ForEach(rows) { window in
+                    let blockedByWeekly = weeklyZero && window.id == "5h"
+                    quotaMeterLine(
+                        window,
+                        profile: profile,
+                        accent: blockedByWeekly ? Color(red: 1.00, green: 0.20, blue: 0.36) : quotaAccent(for: window.percent),
+                        compact: compact,
+                        blockedByWeeklyZero: blockedByWeekly,
+                        forcedReset: blockedByWeekly ? weeklyReset : nil
+                    )
+                }
             }
             if let resetCredits, resetCredits.count > 0 {
                 resetCreditsLine(resetCredits, profileID: profile.id, compact: compact, expanded: resetCreditsExpanded)
@@ -4885,6 +4899,67 @@ struct AccountsRootView: View {
         }
         .padding(.vertical, scaled(compact ? 1 : 5))
         .frame(maxWidth: .infinity, minHeight: scaled(resetCredits == nil ? 44 : (resetCreditsExpanded ? 138 : 84)), alignment: .center)
+    }
+
+    private func quotaAuthenticationStatus(_ profile: CodexProfile, compact: Bool) -> some View {
+        let expired = profile.authStatus == "auth_invalid"
+        let accent = expired ? Color(red: 1.00, green: 0.22, blue: 0.20) : Color.orange
+        let action = expired
+            ? tr("打開重新登入", "Open to sign in again")
+            : tr("打開完成登入", "Open to finish sign-in")
+
+        return HStack(spacing: scaled(compact ? 7 : 9)) {
+            authBadge(profile, compact: compact)
+                .frame(width: scaled(compact ? 82 : 96))
+
+            Image(systemName: expired ? "person.crop.circle.badge.exclamationmark" : "person.crop.circle.badge.questionmark")
+                .font(.system(size: scaled(compact ? 12 : 13), weight: .semibold))
+                .foregroundStyle(accent.opacity(0.88))
+
+            Text(action)
+                .font(appFont(size: compact ? 11 : 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.72))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .minimumScaleFactor(0.78)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, scaled(compact ? 8 : 10))
+        .padding(.vertical, scaled(compact ? 6 : 7))
+        .frame(maxWidth: .infinity, minHeight: scaled(38), alignment: .leading)
+        .background(accent.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(12), style: .continuous)
+                .stroke(accent.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(12), style: .continuous))
+    }
+
+    private func quotaUnavailableStatus(compact: Bool) -> some View {
+        let accent = Color(red: 0.58, green: 0.64, blue: 0.74)
+
+        return HStack(spacing: scaled(compact ? 7 : 9)) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.system(size: scaled(compact ? 12 : 13), weight: .semibold))
+                .foregroundStyle(accent.opacity(0.88))
+
+            Text(tr("暫時未能取得用量", "Usage is temporarily unavailable"))
+                .font(appFont(size: compact ? 11 : 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .minimumScaleFactor(0.78)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, scaled(compact ? 9 : 11))
+        .padding(.vertical, scaled(compact ? 7 : 8))
+        .frame(maxWidth: .infinity, minHeight: scaled(38), alignment: .leading)
+        .background(accent.opacity(0.06))
+        .overlay(
+            RoundedRectangle(cornerRadius: scaled(12), style: .continuous)
+                .stroke(accent.opacity(0.14), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: scaled(12), style: .continuous))
     }
 
     private func externalProviderStatus(_ profile: CodexProfile, compact: Bool) -> some View {
