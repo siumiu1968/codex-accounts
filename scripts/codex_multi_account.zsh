@@ -1446,6 +1446,13 @@ read_cached_usage_if_still_current() {
 
   if [[ -f "$cache_file" ]]; then
     raw_cached="$(cat "$cache_file" 2>/dev/null || true)"
+    if [[ "$raw_cached" == '__auth_invalid__'$'\t'* ]]; then
+      # A live 401 plus a rejected OAuth refresh is durable evidence that the
+      # profile must sign in again. Keep that verdict until a later live probe
+      # or successful token refresh replaces it.
+      printf '%s\n' "$raw_cached"
+      return 0
+    fi
     if [[ -n "$raw_cached" ]] && cached_usage_has_elapsed_reset "$cache_file" "$raw_cached"; then
       # Remove the whole snapshot when any advertised window has expired.
       # Otherwise Swift's local fallback can resurrect the stale sub-window.
@@ -1494,102 +1501,186 @@ cleanup_app_server_process() {
   wait "$server_pid" 2>/dev/null || true
 }
 
+secure_auth_file_permissions() {
+  local auth_file="$1"
+  [[ -f "$auth_file" ]] || return 1
+  # Never follow, read, or replace a user-supplied symlink. Regular auth files
+  # are private credentials and must not remain group/world-readable.
+  [[ ! -L "$auth_file" ]] || return 1
+  chmod 600 "$auth_file" 2>/dev/null
+}
+
+make_private_curl_headers_for_auth() {
+  local auth_file="$1"
+  local include_content_type="${2:-0}"
+  local token account_id header_file
+
+  secure_auth_file_permissions "$auth_file" || return 1
+  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
+  [[ -n "$token" && "$token" != *$'\n'* && "$token" != *$'\r'* ]] || return 1
+  account_id="$(jq -r '.tokens.account_id // empty' "$auth_file" 2>/dev/null || true)"
+  [[ "$account_id" != *$'\n'* && "$account_id" != *$'\r'* ]] || return 1
+
+  header_file="$(mktemp)" || return 1
+  chmod 600 "$header_file" 2>/dev/null || {
+    rm -f "$header_file"
+    return 1
+  }
+  {
+    printf 'Authorization: Bearer %s\n' "$token"
+    printf 'Accept: application/json\n'
+    if [[ "$include_content_type" == "1" ]]; then
+      printf 'Content-Type: application/json\n'
+    else
+      printf 'originator: Codex Desktop\n'
+      printf 'OAI-Product-Sku: CODEX\n'
+    fi
+    if [[ -n "$account_id" && "$account_id" != "null" ]]; then
+      printf 'ChatGPT-Account-Id: %s\n' "$account_id"
+    fi
+  } > "$header_file"
+  chmod 600 "$header_file" 2>/dev/null || {
+    rm -f "$header_file"
+    return 1
+  }
+  printf '%s\n' "$header_file"
+}
+
 refresh_chatgpt_tokens_for() {
   local auth_file="$1"
-  local refresh_token refresh_body tmp_file tmp_auth http_status now
+  local refresh_token current_refresh_token refresh_body tmp_file tmp_auth http_status refresh_error now
+  local attempt=1
+  local max_attempts=2
 
-  [[ -f "$auth_file" ]] || return 1
+  secure_auth_file_permissions "$auth_file" || return 1
   command -v curl >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
   refresh_token="$(jq -r '.tokens.refresh_token // empty' "$auth_file" 2>/dev/null || true)"
   [[ -n "$refresh_token" ]] || return 1
 
-  refresh_body="$(jq -nc --arg client_id "$CHATGPT_CLIENT_ID" --arg refresh_token "$refresh_token" \
-    '{client_id: $client_id, grant_type: "refresh_token", refresh_token: $refresh_token}' 2>/dev/null || true)"
-  [[ -n "$refresh_body" ]] || return 1
+  while (( attempt <= max_attempts )); do
+    # Build the JSON from stdin so neither credential is exposed in jq argv.
+    refresh_body="$(printf '%s\0%s' "$CHATGPT_CLIENT_ID" "$refresh_token" | jq -Rsc '
+      split("\u0000") as $values
+      | {client_id: $values[0], grant_type: "refresh_token", refresh_token: $values[1]}
+    ' 2>/dev/null || true)"
+    [[ -n "$refresh_body" ]] || return 1
 
-  tmp_file="$(mktemp)"
-  http_status="$(curl -sS --connect-timeout "$TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS" --max-time "$TOKEN_REFRESH_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
-    -H 'Content-Type: application/json' \
-    --data "$refresh_body" \
-    "$TOKEN_REFRESH_URL" 2>/dev/null || true)"
+    tmp_file="$(mktemp)"
+    chmod 600 "$tmp_file" 2>/dev/null || {
+      rm -f "$tmp_file"
+      return 1
+    }
+    # Keep the refresh token out of argv/process listings. The JSON request is
+    # passed through stdin and the response is kept in a mode-0600 temp file.
+    http_status="$(printf '%s' "$refresh_body" | curl -sS --connect-timeout "$TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS" --max-time "$TOKEN_REFRESH_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+      -H 'Content-Type: application/json' \
+      --data-binary @- \
+      "$TOKEN_REFRESH_URL" 2>/dev/null || true)"
 
-  if [[ "$http_status" != "200" ]]; then
-    rm -f "$tmp_file"
+    if [[ "$http_status" != "200" ]]; then
+      refresh_error="$(jq -r '
+        if (.error? | type) == "string" then .error
+        elif (.error? | type) == "object" then (.error.code // empty)
+        else empty
+        end
+      ' "$tmp_file" 2>/dev/null || true)"
+      rm -f "$tmp_file"
+      # Only an explicit OAuth invalidation is a durable login verdict. Before
+      # returning it, re-read auth.json: another process may already have
+      # rotated the refresh token. Retry that newer token once, and if it moves
+      # again at the bound, preserve the signed-in/cache state instead.
+      if [[ ( "$http_status" == "400" || "$http_status" == "401" ) \
+            && ( "$refresh_error" == "invalid_grant" \
+              || "$refresh_error" == "invalid_token" \
+              || "$refresh_error" == "invalid_refresh_token" \
+              || "$refresh_error" == "refresh_token_reused" ) ]]; then
+        current_refresh_token="$(jq -r '.tokens.refresh_token // empty' "$auth_file" 2>/dev/null || true)"
+        if [[ -n "$current_refresh_token" && "$current_refresh_token" != "$refresh_token" ]]; then
+          if (( attempt < max_attempts )); then
+            refresh_token="$current_refresh_token"
+            attempt=$(( attempt + 1 ))
+            continue
+          fi
+          return 3
+        fi
+        return 2
+      fi
+      return 1
+    fi
+
+    if ! jq -e '.access_token? and (.access_token | type == "string")' "$tmp_file" >/dev/null 2>&1; then
+      rm -f "$tmp_file"
+      return 1
+    fi
+
+    # Do not overwrite a newer auth.json produced concurrently while this
+    # request was in flight. Its credentials will be probed by the caller.
+    current_refresh_token="$(jq -r '.tokens.refresh_token // empty' "$auth_file" 2>/dev/null || true)"
+    if [[ -n "$current_refresh_token" && "$current_refresh_token" != "$refresh_token" ]]; then
+      chmod 600 "$auth_file" 2>/dev/null || true
+      rm -f "$tmp_file"
+      return 0
+    fi
+
+    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    tmp_auth="$(mktemp "${auth_file}.tmp.XXXXXX")" || {
+      rm -f "$tmp_file"
+      return 1
+    }
+    chmod 600 "$tmp_auth" 2>/dev/null || {
+      rm -f "$tmp_file" "$tmp_auth"
+      return 1
+    }
+    if jq --slurpfile refreshed "$tmp_file" --arg now "$now" '
+      .tokens.access_token = $refreshed[0].access_token
+      | .tokens.refresh_token = ($refreshed[0].refresh_token // .tokens.refresh_token)
+      | .tokens.id_token = ($refreshed[0].id_token // .tokens.id_token)
+      | .tokens.account_id = ($refreshed[0].account_id // .tokens.account_id)
+      | .last_refresh = $now
+    ' "$auth_file" > "$tmp_auth" 2>/dev/null; then
+      chmod 600 "$tmp_auth" 2>/dev/null || {
+        rm -f "$tmp_file" "$tmp_auth"
+        return 1
+      }
+      mv "$tmp_auth" "$auth_file"
+      chmod 600 "$auth_file" 2>/dev/null || return 1
+      rm -f "$tmp_file"
+      return 0
+    fi
+
+    rm -f "$tmp_file" "$tmp_auth"
     return 1
-  fi
+  done
 
-  if ! jq -e '.access_token? and (.access_token | type == "string")' "$tmp_file" >/dev/null 2>&1; then
-    rm -f "$tmp_file"
-    return 1
-  fi
-
-  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  tmp_auth="${auth_file}.$$"
-  if jq --slurpfile refreshed "$tmp_file" --arg now "$now" '
-    .tokens.access_token = $refreshed[0].access_token
-    | .tokens.refresh_token = ($refreshed[0].refresh_token // .tokens.refresh_token)
-    | .tokens.id_token = ($refreshed[0].id_token // .tokens.id_token)
-    | .tokens.account_id = ($refreshed[0].account_id // .tokens.account_id)
-    | .last_refresh = $now
-  ' "$auth_file" > "$tmp_auth" 2>/dev/null; then
-    mv "$tmp_auth" "$auth_file"
-    rm -f "$tmp_file"
-    return 0
-  fi
-
-  rm -f "$tmp_file" "$tmp_auth"
   return 1
 }
 
 fetch_usage_http_status() {
   local auth_file="$1"
   local tmp_file="$2"
-  local token account_id
-  local -a usage_headers
+  local header_file http_status
 
-  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
-  [[ -n "$token" ]] || return 1
-  account_id="$(jq -r '.tokens.account_id // empty' "$auth_file" 2>/dev/null || true)"
-
-  usage_headers=(
-    -H "Authorization: Bearer $token"
-    -H 'Accept: application/json'
-    -H 'Content-Type: application/json'
-  )
-  if [[ -n "$account_id" && "$account_id" != "null" ]]; then
-    usage_headers+=(-H "ChatGPT-Account-Id: $account_id")
-  fi
-
-  curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
-    "${usage_headers[@]}" \
-    "$USAGE_API_URL" 2>/dev/null || true
+  header_file="$(make_private_curl_headers_for_auth "$auth_file" 1)" || return 1
+  http_status="$(curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+    --header "@$header_file" \
+    "$USAGE_API_URL" 2>/dev/null || true)"
+  rm -f "$header_file"
+  printf '%s\n' "$http_status"
 }
 
 fetch_reset_credits_http_status() {
   local auth_file="$1"
   local tmp_file="$2"
-  local token account_id
-  local -a request_headers
+  local header_file http_status
 
-  token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null || true)"
-  [[ -n "$token" ]] || return 1
-  account_id="$(jq -r '.tokens.account_id // empty' "$auth_file" 2>/dev/null || true)"
-
-  request_headers=(
-    -H "Authorization: Bearer $token"
-    -H 'Accept: application/json'
-    -H 'originator: Codex Desktop'
-    -H 'OAI-Product-Sku: CODEX'
-  )
-  if [[ -n "$account_id" && "$account_id" != "null" ]]; then
-    request_headers+=(-H "ChatGPT-Account-Id: $account_id")
-  fi
-
-  curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
-    "${request_headers[@]}" \
-    "$RESET_CREDITS_API_URL" 2>/dev/null || true
+  header_file="$(make_private_curl_headers_for_auth "$auth_file" 0)" || return 1
+  http_status="$(curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+    --header "@$header_file" \
+    "$RESET_CREDITS_API_URL" 2>/dev/null || true)"
+  rm -f "$header_file"
+  printf '%s\n' "$http_status"
 }
 
 parse_reset_credits_detail_file() {
@@ -1746,7 +1837,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.5.5"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.6.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -1764,7 +1855,7 @@ fetch_usage_summary_via_app_server() {
     )
   fi
 
-  coproc env "${app_server_env[@]}" "$codex_bin" app-server --listen stdio:// 2>/dev/null
+  coproc env "${app_server_env[@]}" "$codex_bin" -c 'mcp_servers={}' -c 'plugins={}' app-server --listen stdio:// 2>/dev/null
   server_pid=$!
 
   print -p -- "$init_request" 2>/dev/null || true
@@ -1865,12 +1956,6 @@ fetch_usage_summary_for() {
   local cache_file
   cache_file="$(usage_cache_file_for "$name")"
 
-  # Never reuse an invalid-login marker as a new verdict. A live request can
-  # recreate it immediately when Codex explicitly rejects the current token.
-  if [[ -f "$cache_file" ]] && head -n 1 "$cache_file" 2>/dev/null | grep -q '^__auth_invalid__'; then
-    invalidate_cached_usage "$cache_file"
-  fi
-
   if [[ "$CODEX_USAGE_LIVE_LOOKUP" != "1" ]]; then
     if read_cached_usage_if_still_current "$cache_file" "$USAGE_CACHE_SECONDS"; then
       return 0
@@ -1883,7 +1968,7 @@ fetch_usage_summary_for() {
   command -v jq >/dev/null 2>&1 || return 1
   [[ -f "$auth_file" ]] || return 1
 
-  local tmp_file http_status raw_summary quota reset_epochs primary_epoch secondary_epoch
+  local tmp_file http_status refresh_status raw_summary quota reset_epochs primary_epoch secondary_epoch
 
   tmp_file="$(mktemp)"
   http_status="$(fetch_usage_http_status "$auth_file" "$tmp_file")"
@@ -1891,9 +1976,18 @@ fetch_usage_summary_for() {
   if [[ "$http_status" == "401" ]]; then
     rm -f "$tmp_file"
     if refresh_chatgpt_tokens_for "$auth_file"; then
+      if [[ -f "$cache_file" ]] && head -n 1 "$cache_file" 2>/dev/null | grep -q '^__auth_invalid__'; then
+        invalidate_cached_usage "$cache_file"
+      fi
       tmp_file="$(mktemp)"
       http_status="$(fetch_usage_http_status "$auth_file" "$tmp_file")"
     else
+      refresh_status=$?
+      if [[ "$refresh_status" == "2" ]]; then
+        write_auth_invalid_usage_marker "$cache_file"
+        printf '%s\t%s\n' "__auth_invalid__" "unknown"
+        return 0
+      fi
       fetch_usage_summary_via_app_server "$home_dir" "$cache_file" 2>/dev/null && return 0
       # Refresh can fail because the network or identity endpoint is unavailable.
       # Preserve the signed-in state unless a live endpoint explicitly rejects it.
@@ -2029,7 +2123,7 @@ account_status_for() {
     return 0
   fi
 
-  if [[ -f "$auth_file" ]]; then
+  if [[ -f "$auth_file" ]] && secure_auth_file_permissions "$auth_file"; then
     auth_mode="$(jq -r '.auth_mode // "unknown"' "$auth_file" 2>/dev/null || echo "unknown")"
     last_refresh="$(jq -r '.last_refresh // "unknown"' "$auth_file" 2>/dev/null || echo "unknown")"
     if jq -e '.tokens.access_token? and .tokens.refresh_token?' "$auth_file" >/dev/null 2>&1; then

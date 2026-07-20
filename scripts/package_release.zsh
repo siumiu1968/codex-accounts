@@ -11,8 +11,9 @@ mkdir -p "$DIST_DIR"
 
 APP_PATH="$APP_PATH" "$ROOT_DIR/scripts/build_codex_accounts_app.zsh"
 
-ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+# Keep the downloadable archive free of Finder resource-fork sidecars such as
+# __MACOSX/._*. The app's real CodeResources signature remains inside the bundle.
+COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 
 echo "Release package:"
 echo "  $ZIP_PATH"
-

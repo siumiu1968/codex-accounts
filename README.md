@@ -2,9 +2,9 @@
 
 **Languages:** [繁體中文](#繁體中文) | [简体中文](#简体中文) | [English](#english)
 
-![Codex Accounts 2.5.5 overview with fictional profiles and quota data](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
+![Anonymized Codex Accounts UI overview captured for V2.5.5](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
 
-![Codex Accounts 2.5.5 eight-theme selector](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
+![Anonymized Codex Accounts theme selector captured for V2.5.5](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
 
 > 私隱說明 / Privacy: 圖中所有 profile 名稱、`/tmp/demo-profiles` 路徑及 quota 數值均為虛構示範資料。All profile names, `/tmp/demo-profiles` paths, and quota values shown above are fictional demo data.
 
@@ -15,6 +15,10 @@
 ## 繁體中文
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
+
+### V2.6.0 更新介紹
+
+V2.6.0 重新整理 quota 同登入狀態顯示：憑證確定失效時會清楚顯示「登入過期」或「需要登入」，已登入但暫時攞唔到官方用量時則顯示「暫時未能取得」，Reload 期間唔再閃出假嘅 `0%` 或 `00/00`。只有官方 OAuth 明確回覆 token 無效先會判定登入過期；一般網絡錯誤或 5xx 會保留上一個可用 quota。後備 quota 查詢亦會停用 MCP 同 plugins，減少背景程序同系統負荷。登入過期仍然需要使用者重新登入，App 唔會代替使用者修復或複製登入憑證。
 
 ### V2.5.5 更新介紹
 
@@ -110,13 +114,15 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 ### 安裝
 
+系統需求：macOS 14 或以上。
+
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下載 `Codex-Accounts-macOS.zip`。
 2. 解壓後把 `Codex Accounts.app` 移到 `/Applications`。
 3. 從 Finder 開啟 app。
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.5.5 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.6.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -169,6 +175,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.6.0 更新介绍
+
+V2.6.0 重新整理 quota 和登录状态显示：凭证确定失效时会清楚显示“登录过期”或“需要登录”，已登录但暂时无法取得官方用量时则显示“暂时无法取得”，Reload 期间不再闪出虚假的 `0%` 或 `00/00`。只有官方 OAuth 明确返回 token 无效时才会判定登录过期；一般网络错误或 5xx 会保留上一份可用 quota。备用 quota 查询也会停用 MCP 和 plugins，减少后台进程与系统负载。登录过期仍然需要用户重新登录，应用不会代替用户修复或复制登录凭证。
 
 ### V2.5.5 更新介绍
 
@@ -264,13 +274,15 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 ### 安装
 
+系统要求：macOS 14 或更高版本。
+
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下载 `Codex-Accounts-macOS.zip`。
 2. 解压后把 `Codex Accounts.app` 移到 `/Applications`。
 3. 从 Finder 打开 app。
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.5.5 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.6.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -323,6 +335,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.6.0 Update
+
+V2.6.0 makes quota and sign-in states explicit. A profile with confirmed invalid credentials now shows **Sign-in expired** or **Sign-in required**, while a signed-in profile whose official usage data is temporarily unavailable shows **Usage temporarily unavailable**. Reload no longer flashes fabricated `0%` or `00/00` values. Only a definitive invalid-token response from the official OAuth service marks a sign-in as expired; network failures and 5xx responses keep the last usable quota. The fallback usage query also starts Codex app-server with MCP servers and plugins disabled, reducing background process and system load. Expired credentials still require the user to sign in again—the app does not repair or copy credentials automatically.
 
 ### V2.5.5 Update
 
@@ -418,13 +434,15 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 ### Install
 
+System requirement: macOS 14 or later.
+
 1. Download `Codex-Accounts-macOS.zip` from [Releases](https://github.com/siumiu1968/codex-accounts/releases).
 2. Unzip it and move `Codex Accounts.app` to `/Applications`.
 3. Open the app from Finder.
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.5.5, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.6.0, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 
