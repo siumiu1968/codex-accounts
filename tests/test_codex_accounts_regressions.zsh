@@ -653,7 +653,7 @@ assert 'private func quotaAuthenticationStatus(_ profile: CodexProfile, compact:
 assert 'tr("打開重新登入", "Open to sign in again")' in swift
 assert 'private func quotaUnavailableStatus(compact: Bool) -> some View' in swift
 assert 'tr("暫時未能取得用量", "Usage is temporarily unavailable")' in swift
-assert '"version":"2.6.0"' in helper
+assert '"version":"2.6.1"' in helper
 
 theme_match = re.search(
     r'private var themeOptions: \[AppThemeOption\] \{(.*?)\n    \}\n\n    private func canonicalThemeID',
@@ -949,8 +949,8 @@ while IFS= read -r private_header_file; do
   [[ ! -e "$private_header_file" ]]
 done < "$HEADER_PATH_LOG"
 
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.0" ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "60" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.1" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "61" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "14.0" ]]
 
 echo "✅ Codex Accounts regression checks passed"
