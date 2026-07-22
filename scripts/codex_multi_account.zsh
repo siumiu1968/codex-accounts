@@ -178,12 +178,15 @@ OPENCODEX_CURL_BIN="${OPENCODEX_CURL_BIN:-/usr/bin/curl}"
 OPENCODEX_OPEN_BIN="${OPENCODEX_OPEN_BIN:-/usr/bin/open}"
 OPENCODEX_START_MAX_WAITS="${OPENCODEX_START_MAX_WAITS:-100}"
 OPENCODEX_START_WAIT_SECONDS="${OPENCODEX_START_WAIT_SECONDS:-0.1}"
-OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-100}"
+OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-200}"
 OPENCODEX_SYNC_WAIT_SECONDS="${OPENCODEX_SYNC_WAIT_SECONDS:-0.1}"
 OPENCODEX_FORCE_SYNC="${OPENCODEX_FORCE_SYNC:-0}"
 OPENCODEX_OWNERSHIP_MARKER=".codex-accounts-opencodex-lab"
 OPENCODEX_OWNERSHIP_VALUE="managed-by-codex-accounts-opencodex-lab-v1"
 OPENCODEX_SHARED_CATALOG="$OPENCODEX_LAB_CODEX_HOME/opencodex-catalog.json"
+OPENCODEX_CATALOG_FINGERPRINT="$OPENCODEX_STATE_DIR/catalog-verification.json"
+OPENCODEX_CATALOG_FINGERPRINT_OWNER="managed-by-codex-accounts-opencodex-catalog-v1"
+OPENCODEX_CATALOG_FINGERPRINT_MAX_AGE_SECONDS="${OPENCODEX_CATALOG_FINGERPRINT_MAX_AGE_SECONDS:-86400}"
 OPENCODEX_PROFILE_ROUTE_MARKER=".codex-accounts-opencodex-route.json"
 OPENCODEX_PROFILE_ROUTE_OWNER="managed-by-codex-accounts-opencodex-route-v1"
 OPENCODEX_CLI_WRAPPER_DIR="$OPENCODEX_ROOT/bin"
@@ -964,7 +967,7 @@ raise SystemExit(0 if ok else 1)
   printf 'http://127.0.0.1:%s/\n' "$port"
 }
 
-opencodex_verify_shared_catalog() {
+opencodex_verify_shared_catalog_structure() {
   local url="$1"
   local log_file="$OPENCODEX_LOG_DIR/opencodex.log"
   local expected_base_url="${url%/}/v1"
@@ -1050,6 +1053,163 @@ if missing_namespaces:
 PY
 }
 
+opencodex_catalog_fingerprint() {
+  local mode="$1"
+  local freshness="${2:-fresh}"
+
+  OPENCODEX_FINGERPRINT_MODE="$mode" \
+  OPENCODEX_FINGERPRINT_FRESHNESS="$freshness" \
+  OPENCODEX_FINGERPRINT_PATH="$OPENCODEX_CATALOG_FINGERPRINT" \
+  OPENCODEX_FINGERPRINT_STATE_DIR="$OPENCODEX_STATE_DIR" \
+  OPENCODEX_FINGERPRINT_STATE_CONFIG="$OPENCODEX_STATE_DIR/config.json" \
+  OPENCODEX_FINGERPRINT_CATALOG="$OPENCODEX_SHARED_CATALOG" \
+  OPENCODEX_FINGERPRINT_OWNER="$OPENCODEX_CATALOG_FINGERPRINT_OWNER" \
+  OPENCODEX_FINGERPRINT_VERSION="$OPENCODEX_VERSION" \
+  OPENCODEX_FINGERPRINT_MAX_AGE="$OPENCODEX_CATALOG_FINGERPRINT_MAX_AGE_SECONDS" \
+  python3 - <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import re
+import stat
+import tempfile
+import time
+from pathlib import Path
+
+mode = os.environ["OPENCODEX_FINGERPRINT_MODE"]
+freshness = os.environ["OPENCODEX_FINGERPRINT_FRESHNESS"]
+fingerprint_path = Path(os.environ["OPENCODEX_FINGERPRINT_PATH"])
+state_dir = Path(os.environ["OPENCODEX_FINGERPRINT_STATE_DIR"])
+state_config_path = Path(os.environ["OPENCODEX_FINGERPRINT_STATE_CONFIG"])
+catalog_path = Path(os.environ["OPENCODEX_FINGERPRINT_CATALOG"])
+owner = os.environ["OPENCODEX_FINGERPRINT_OWNER"]
+version = os.environ["OPENCODEX_FINGERPRINT_VERSION"]
+max_age = int(os.environ["OPENCODEX_FINGERPRINT_MAX_AGE"])
+
+if mode not in {"write", "verify"} or freshness not in {"fresh", "allow-stale"}:
+    raise SystemExit("Invalid OpenCodex catalog fingerprint operation")
+if state_dir.is_symlink() or not state_dir.is_dir():
+    raise SystemExit(f"Refusing invalid OpenCodex state directory: {state_dir}")
+if fingerprint_path.parent != state_dir or fingerprint_path.name != "catalog-verification.json":
+    raise SystemExit("Refusing unexpected OpenCodex catalog fingerprint path")
+for path, label in ((state_config_path, "state config"), (catalog_path, "catalog")):
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"Refusing invalid OpenCodex {label}: {path}")
+if fingerprint_path.is_symlink():
+    raise SystemExit(f"Refusing OpenCodex catalog fingerprint symlink: {fingerprint_path}")
+if fingerprint_path.exists() and not fingerprint_path.is_file():
+    raise SystemExit(f"Refusing invalid OpenCodex catalog fingerprint: {fingerprint_path}")
+
+state = json.loads(state_config_path.read_text(encoding="utf-8-sig"))
+if not isinstance(state, dict):
+    raise SystemExit("OpenCodex state config must be an object")
+
+secret_names = {
+    "apikey", "accesskey", "accesstoken", "refreshtoken", "idtoken",
+    "authtoken", "oauthtoken", "sessiontoken", "bearer", "secret",
+    "clientsecret", "password", "cookie", "cookies", "credential",
+    "credentials", "authorization", "header", "headers", "customheaders",
+}
+
+def is_secret_key(key):
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return normalized in secret_names or normalized.endswith("apikey")
+
+def sanitize(value, key=""):
+    if is_secret_key(key):
+        return {"secret_present": bool(value), "secret_type": type(value).__name__}
+    if isinstance(value, dict):
+        return {str(k): sanitize(v, str(k)) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list):
+        return [sanitize(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise SystemExit(f"Unsupported OpenCodex state value type for {key}")
+
+# Exclude runtime/UI-only fields. All other current and future state keys are
+# fingerprinted so model definitions, provider URLs, selections, capabilities,
+# and enabled/disabled flags cannot silently reuse an older catalog.
+runtime_only = {"hostname", "port", "codexAutoStart", "syncResumeHistory"}
+catalog_inputs = {
+    key: sanitize(value, key)
+    for key, value in sorted(state.items())
+    if key not in runtime_only
+}
+inputs_bytes = json.dumps(
+    {"opencodex_version": version, "state": catalog_inputs},
+    ensure_ascii=True,
+    sort_keys=True,
+    separators=(",", ":"),
+    allow_nan=False,
+).encode("utf-8")
+expected_inputs_hash = hashlib.sha256(inputs_bytes).hexdigest()
+expected_catalog_hash = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+
+if mode == "verify":
+    if not fingerprint_path.is_file():
+        raise SystemExit("OpenCodex catalog fingerprint is missing")
+    if stat.S_IMODE(fingerprint_path.stat().st_mode) != 0o600:
+        raise SystemExit("OpenCodex catalog fingerprint permissions are invalid")
+    fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(fingerprint, dict):
+        raise SystemExit("OpenCodex catalog fingerprint must be an object")
+    if fingerprint.get("schema") != 1 or fingerprint.get("owner") != owner:
+        raise SystemExit("OpenCodex catalog fingerprint owner/schema mismatch")
+    if fingerprint.get("opencodex_version") != version:
+        raise SystemExit("OpenCodex catalog fingerprint version mismatch")
+    if not hmac.compare_digest(str(fingerprint.get("catalog_inputs_sha256", "")), expected_inputs_hash):
+        raise SystemExit("OpenCodex provider/model settings changed after catalog verification")
+    if not hmac.compare_digest(str(fingerprint.get("catalog_sha256", "")), expected_catalog_hash):
+        raise SystemExit("OpenCodex shared catalog changed after verification")
+    written_at = fingerprint.get("written_at")
+    if isinstance(written_at, bool) or not isinstance(written_at, (int, float)):
+        raise SystemExit("OpenCodex catalog fingerprint timestamp is invalid")
+    now = time.time()
+    if written_at > now + 300:
+        raise SystemExit("OpenCodex catalog fingerprint timestamp is in the future")
+    if freshness == "fresh" and max_age >= 0 and now - written_at > max_age:
+        raise SystemExit("OpenCodex catalog fingerprint is stale")
+    raise SystemExit(0)
+
+payload = {
+    "schema": 1,
+    "owner": owner,
+    "opencodex_version": version,
+    "catalog_inputs_sha256": expected_inputs_hash,
+    "catalog_sha256": expected_catalog_hash,
+    "written_at": int(time.time()),
+}
+fd, tmp_name = tempfile.mkstemp(prefix=".catalog-verification.", suffix=".tmp", dir=state_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, 0o600)
+    os.replace(tmp_name, fingerprint_path)
+    dir_fd = os.open(state_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+opencodex_verify_shared_catalog() {
+  local url="$1"
+  local freshness="${2:-fresh}"
+  local log_file="$OPENCODEX_LOG_DIR/opencodex.log"
+  opencodex_verify_shared_catalog_structure "$url" || return 1
+  opencodex_catalog_fingerprint verify "$freshness" 2>>"$log_file"
+}
+
 opencodex_sync_and_verify_lab() {
   local url="$1"
   local log_file="$OPENCODEX_LOG_DIR/opencodex.log"
@@ -1060,10 +1220,10 @@ opencodex_sync_and_verify_lab() {
     return 1
   }
 
-  # A complete catalog already proves that every enabled local provider is
-  # routed through the current loopback port. Do not make every Profile launch
-  # wait on provider discovery again unless a caller explicitly requests it.
-  if [[ "$OPENCODEX_FORCE_SYNC" != "1" ]] && opencodex_verify_shared_catalog "$url"; then
+  # A fresh fingerprint binds the provider/model settings and exact catalog
+  # bytes to the current loopback route. Do not make every Profile launch wait
+  # on provider discovery again unless a caller explicitly requests it.
+  if [[ "$OPENCODEX_FORCE_SYNC" != "1" ]] && opencodex_verify_shared_catalog "$url" fresh; then
     return 0
   fi
 
@@ -1073,7 +1233,7 @@ opencodex_sync_and_verify_lab() {
       run_opencodex_lab "$OPENCODEX_BIN" sync >>"$log_file" 2>&1 || sync_status=$?
 
     if (( sync_status == 124 )); then
-      if opencodex_verify_shared_catalog "$url"; then
+      if opencodex_verify_shared_catalog "$url" allow-stale; then
         echo "OpenCodex model synchronization timed out; using the existing verified shared model catalog." >&2
         return 0
       fi
@@ -1085,8 +1245,13 @@ opencodex_sync_and_verify_lab() {
       return 1
     fi
 
-    if opencodex_verify_shared_catalog "$url"; then
-      return 0
+    if opencodex_verify_shared_catalog_structure "$url"; then
+      if opencodex_catalog_fingerprint write fresh 2>>"$log_file" \
+        && opencodex_verify_shared_catalog "$url" fresh; then
+        return 0
+      fi
+      echo "OpenCodex catalog verification fingerprint could not be recorded safely; see $log_file" >&2
+      return 1
     fi
     attempt=$(( attempt + 1 ))
     (( attempt <= max_attempts )) && sleep 0.1
@@ -1821,6 +1986,73 @@ if len(relative.parts) != 1 or relative.name.startswith(".") or relative.name ==
 PY
 }
 
+profile_has_user_owned_model_routing() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  local marker_file="$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER"
+
+  OPENCODEX_ROUTE_CONFIG="$config_file" \
+  OPENCODEX_ROUTE_MARKER="$marker_file" \
+  OPENCODEX_ROUTE_OWNER="$OPENCODEX_PROFILE_ROUTE_OWNER" \
+  python3 - <<'PY' >/dev/null 2>&1
+import ast
+import json
+import os
+import re
+from pathlib import Path
+
+config_path = Path(os.environ["OPENCODEX_ROUTE_CONFIG"])
+marker_path = Path(os.environ["OPENCODEX_ROUTE_MARKER"])
+owner = os.environ["OPENCODEX_ROUTE_OWNER"]
+
+# Fail preserve: an invalid or linked file must never be treated as safe for an
+# automatic model/provider rewrite.
+if config_path.is_symlink() or marker_path.is_symlink():
+    raise SystemExit(0)
+
+lines = config_path.read_text(encoding="utf-8-sig", errors="strict").splitlines() if config_path.exists() else []
+assignments = {"openai_base_url": [], "model_catalog_json": [], "model_provider": []}
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith("["):
+        break
+    match = re.match(r"^(openai_base_url|model_catalog_json|model_provider)\s*=\s*(.+?)\s*$", stripped)
+    if not match:
+        continue
+    try:
+        value = ast.literal_eval(match.group(2))
+    except (SyntaxError, ValueError):
+        raise SystemExit(0)
+    assignments[match.group(1)].append(value)
+
+provider_values = assignments["model_provider"]
+custom_provider = bool(provider_values) and (len(provider_values) != 1 or provider_values[0] != "openai")
+
+if not marker_path.exists():
+    user_owned = bool(assignments["openai_base_url"] or assignments["model_catalog_json"] or custom_provider)
+    raise SystemExit(0 if user_owned else 1)
+if not marker_path.is_file():
+    raise SystemExit(0)
+try:
+    marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if (
+    not isinstance(marker, dict)
+    or marker.get("owner") != owner
+    or not isinstance(marker.get("openai_base_url"), str)
+    or not isinstance(marker.get("model_catalog_json"), str)
+):
+    raise SystemExit(0)
+
+managed_route_matches = all(
+    len(assignments[key]) == 1 and assignments[key][0] == marker[key]
+    for key in ("openai_base_url", "model_catalog_json")
+)
+raise SystemExit(1 if managed_route_matches and not custom_provider else 0)
+PY
+}
+
 configure_opencodex_routing_for_home() {
   local home_dir="$1"
   local url base_url
@@ -1877,12 +2109,16 @@ def parse_value(raw: str, key: str) -> str:
     return value
 
 lines = config_path.read_text(encoding="utf-8-sig", errors="strict").splitlines() if config_path.exists() else []
-assignments: dict[str, list[tuple[int, str]]] = {"openai_base_url": [], "model_catalog_json": []}
+assignments: dict[str, list[tuple[int, str]]] = {
+    "openai_base_url": [],
+    "model_catalog_json": [],
+    "model_provider": [],
+}
 for index, line in enumerate(lines):
     stripped = line.strip()
     if stripped.startswith("["):
         break
-    match = re.match(r"^(openai_base_url|model_catalog_json)\s*=\s*(.+?)\s*$", stripped)
+    match = re.match(r"^(openai_base_url|model_catalog_json|model_provider)\s*=\s*(.+?)\s*$", stripped)
     if match:
         assignments[match.group(1)].append((index, parse_value(match.group(2), match.group(1))))
 
@@ -1901,8 +2137,13 @@ if marker_path.exists():
         raise SystemExit("Unrecognized OpenCodex route marker; refusing to overwrite profile config")
     old_route = candidate
 
+provider_values = assignments["model_provider"]
+custom_provider = bool(provider_values) and (
+    len(provider_values) != 1 or provider_values[0][1] != "openai"
+)
+
 if old_route is None:
-    if assignments["openai_base_url"] or assignments["model_catalog_json"]:
+    if assignments["openai_base_url"] or assignments["model_catalog_json"] or custom_provider:
         print(f"Keeping user-owned OpenCodex routing in {home}", file=os.sys.stderr)
         raise SystemExit(0)
 else:
@@ -1910,9 +2151,9 @@ else:
         "openai_base_url": old_route["openai_base_url"],
         "model_catalog_json": old_route["model_catalog_json"],
     }
-    if any(
+    if custom_provider or any(
         len(assignments[key]) != 1 or assignments[key][0][1] != expected_old[key]
-        for key in assignments
+        for key in ("openai_base_url", "model_catalog_json")
     ):
         print(f"Keeping user-modified OpenCodex routing in {home}", file=os.sys.stderr)
         raise SystemExit(0)
@@ -2257,7 +2498,10 @@ opencodex_enable_all_profiles() {
     [[ -n "$name" && -d "$home_dir" ]] || continue
     profile_uses_opencodex_routing "$home_dir" || continue
     if configure_opencodex_routing_for_home "$home_dir"; then
-      [[ -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]] && configured=$(( configured + 1 ))
+      if [[ -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]] \
+        && ! profile_has_user_owned_model_routing "$home_dir"; then
+        configured=$(( configured + 1 ))
+      fi
     else
       failed=$(( failed + 1 ))
     fi
@@ -5836,7 +6080,7 @@ launch_account() {
     exit 1
   fi
 
-  local home_dir app_data history_mode opencodex_cli_wrapper=""
+  local home_dir app_data history_mode opencodex_cli_wrapper="" preserve_user_model_route=0
   local -a launch_env launch_args
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
@@ -5886,8 +6130,9 @@ launch_account() {
       return 1
     }
   else
-    restore_non_account1_openai_config_for_home "$home_dir"
-    if profile_uses_opencodex_routing "$home_dir"; then
+    if profile_has_user_owned_model_routing "$home_dir"; then
+      preserve_user_model_route=1
+    elif profile_uses_opencodex_routing "$home_dir"; then
       if ! ensure_opencodex_available_for_profiles; then
         remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
         echo "OpenCodex could not be prepared; refusing to launch with a dead loopback route." >&2
@@ -5898,7 +6143,13 @@ launch_account() {
         echo "OpenCodex routing could not be configured safely; profile was not launched." >&2
         return 1
       fi
-      if [[ -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]]; then
+      if profile_has_user_owned_model_routing "$home_dir" \
+        || [[ ! -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]]; then
+        # The config may have changed between the first read and the atomic
+        # route update. Preserve it instead of forcing defaults or a CLI shim.
+        preserve_user_model_route=1
+      else
+        restore_non_account1_openai_config_for_home "$home_dir"
         opencodex_cli_wrapper="$(prepare_opencodex_cli_wrapper)" || {
           remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
           echo "OpenCodex CLI routing could not be prepared safely; profile was not launched." >&2
@@ -5907,7 +6158,7 @@ launch_account() {
       fi
     fi
   fi
-  if ! home_uses_opencodex_proxy "$home_dir"; then
+  if ! home_uses_opencodex_proxy "$home_dir" && (( preserve_user_model_route == 0 )); then
     normalize_top_level_model_provider_for_home "$home_dir"
   fi
   if [[ "$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" ]] && ! home_uses_opencodex_proxy "$home_dir"; then
@@ -5917,7 +6168,9 @@ launch_account() {
       cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
     fi
     normalize_thread_sources_for_home "$home_dir"
-    restore_default_thread_model_providers_for_home "$home_dir"
+    if (( preserve_user_model_route == 0 )); then
+      restore_default_thread_model_providers_for_home "$home_dir"
+    fi
     restore_account1_visible_thread_model_providers_for_home "$home_dir"
   fi
 

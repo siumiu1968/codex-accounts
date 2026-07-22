@@ -18,7 +18,7 @@ Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳
 
 ### V2.7.0 更新介紹
 
-V2.7.0 將 OpenCodex 2.7.33 arm64 runtime 同香港繁體介面直接放入安裝包，更新後唔需要再由 npm 下載。打開受管理 Profile 時，App 會先啟動本機 loopback 代理並驗證共用模型目錄；已驗證目錄會即時沿用，供應商設定有變先重新同步。網絡同步設有 10 秒上限，逾時只會沿用通過完整驗證嘅舊目錄，避免開 Profile 無限轉圈。同一套已登入嘅第三方模型可以喺未有自訂模型路由嘅不同 Profile 選用；OpenAI 請求仍然使用各 Profile 自己嘅登入，對話分享／私人模式亦保持不變。安裝包唔會包含任何使用者 token、OAuth credential 或對話資料。
+V2.7.0 將 OpenCodex 2.7.33 arm64 runtime 同香港繁體介面直接放入安裝包，更新後唔需要再由 npm 下載。打開受管理 Profile 時，App 會先啟動本機 loopback 代理並驗證共用模型目錄；已驗證目錄會即時沿用，供應商／模型設定有變或驗證超過 24 小時先重新同步。網絡同步設有 20 秒上限，逾時只有設定指紋同目錄 SHA-256 完全吻合先會沿用舊目錄，避免開 Profile 無限轉圈。同一套已登入嘅第三方模型可以喺未有自訂模型路由嘅不同 Profile 選用；自訂模型路由／provider 會原樣保留，OpenAI 請求仍然使用各 Profile 自己嘅登入，對話分享／私人模式亦保持不變。安裝包唔會包含任何使用者 token、OAuth credential 或對話資料。
 
 ### V2.6.2 更新介紹
 
@@ -191,7 +191,7 @@ Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账
 
 ### V2.7.0 更新介绍
 
-V2.7.0 把 OpenCodex 2.7.33 arm64 runtime 与香港繁体界面直接放入安装包，更新后不再需要通过 npm 下载。打开受管理 Profile 时，应用会先启动本地 loopback 代理并验证共享模型目录；已验证目录会立即沿用，仅在提供商设置改变时重新同步。网络同步设有 10 秒上限，超时只会沿用通过完整验证的旧目录，避免打开 Profile 时无限转圈。同一套已登录的第三方模型可在未设置自定义模型路由的不同 Profile 中选择；OpenAI 请求仍使用各 Profile 自己的登录，对话共享／私人模式保持不变。安装包不包含任何用户 token、OAuth credential 或对话数据。
+V2.7.0 把 OpenCodex 2.7.33 arm64 runtime 与香港繁体界面直接放入安装包，更新后不再需要通过 npm 下载。打开受管理 Profile 时，应用会先启动本地 loopback 代理并验证共享模型目录；已验证目录会立即沿用，仅在提供商／模型设置改变或验证超过 24 小时时重新同步。网络同步设有 20 秒上限，超时只有设置指纹与目录 SHA-256 完全一致才会沿用旧目录，避免打开 Profile 时无限转圈。同一套已登录的第三方模型可在未设置自定义模型路由的不同 Profile 中选择；自定义模型路由／provider 会原样保留，OpenAI 请求仍使用各 Profile 自己的登录，对话共享／私人模式保持不变。安装包不包含任何用户 token、OAuth credential 或对话数据。
 
 ### V2.6.2 更新介绍
 
@@ -364,7 +364,7 @@ Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accoun
 
 ### V2.7.0 Update
 
-V2.7.0 bundles the arm64 OpenCodex 2.7.33 runtime and the Traditional Chinese (Hong Kong) dashboard, so an update no longer needs npm to download OpenCodex. Before opening a managed profile, Codex Accounts starts the loopback proxy and verifies the shared model catalog. A verified catalog is reused immediately and refreshed when provider settings change; network synchronization is capped at 10 seconds and can fall back only to a fully verified catalog, preventing an endless launch spinner. Signed-in third-party models can then be selected across managed profiles that do not already define a custom model route, while OpenAI requests continue to use each profile's own sign-in and existing shared/private chat settings remain unchanged. No user token, OAuth credential, or chat data is included in the release bundle.
+V2.7.0 bundles the arm64 OpenCodex 2.7.33 runtime and the Traditional Chinese (Hong Kong) dashboard, so an update no longer needs npm to download OpenCodex. Before opening a managed profile, Codex Accounts starts the loopback proxy and verifies the shared model catalog. A verified catalog is reused immediately and refreshed when provider/model settings change or verification is older than 24 hours. Network synchronization is capped at 20 seconds and may fall back only when both the settings fingerprint and catalog SHA-256 still match, preventing an endless launch spinner. Signed-in third-party models can then be selected across managed profiles that do not already define a custom model route; custom routes/providers are preserved, while OpenAI requests continue to use each profile's own sign-in and existing shared/private chat settings remain unchanged. No user token, OAuth credential, or chat data is included in the release bundle.
 
 ### V2.6.2 Update
 

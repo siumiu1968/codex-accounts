@@ -7130,7 +7130,7 @@ struct AccountsRootView: View {
                 scriptPath,
                 launchArguments,
                 wait: true,
-                timeout: syncBeforeLaunch ? 60 : 28,
+                timeout: 60,
                 environment: launchEnvironment
             )
         } completion: { result in

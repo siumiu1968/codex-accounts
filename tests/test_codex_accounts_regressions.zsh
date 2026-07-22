@@ -108,6 +108,7 @@ OPENCODEX_TEST_STATE="$OPENCODEX_TEST_ROOT/state"
 OPENCODEX_TEST_PREFIX="$OPENCODEX_TEST_ROOT/runtime"
 OPENCODEX_TEST_HOME="$OPENCODEX_TEST_ROOT/home"
 OPENCODEX_TEST_LOGS="$OPENCODEX_TEST_ROOT/logs"
+OPENCODEX_TEST_FINGERPRINT="$OPENCODEX_TEST_STATE/catalog-verification.json"
 OPENCODEX_TEST_CODEX_HOME="$TMP_ROOT/accounts/opencodex-lab"
 OPENCODEX_TEST_BIN="$OPENCODEX_TEST_PREFIX/node_modules/.bin/ocx"
 OPENCODEX_TEST_PACKAGE_JSON="$OPENCODEX_TEST_PREFIX/node_modules/@bitkyc08/opencodex/package.json"
@@ -399,16 +400,33 @@ PY
 [[ "$(sed -n '1,3p' "$OPENCODEX_TEST_STATE/order.log")" == $'start\nhealth\nsync' ]]
 [[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "2" ]]
 grep -q '"slug":"mock-provider/gpt-test"' "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
+[[ -f "$OPENCODEX_TEST_FINGERPRINT" && ! -L "$OPENCODEX_TEST_FINGERPRINT" ]]
+[[ "$(stat -f '%Lp' "$OPENCODEX_TEST_FINGERPRINT")" == "600" ]]
+python3 - "$OPENCODEX_TEST_FINGERPRINT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert value["schema"] == 1
+assert value["owner"] == "managed-by-codex-accounts-opencodex-catalog-v1"
+assert value["opencodex_version"] == "2.7.33"
+assert len(value["catalog_inputs_sha256"]) == 64
+assert len(value["catalog_sha256"]) == 64
+assert "mock-opencodex-secret" not in json.dumps(value)
+PY
 
 # Every ordinary managed profile may consume the one verified shared catalog,
 # without copying auth/history or overwriting an existing user-owned route.
 ROUTE_CLEAN_NAME="route-clean"
 ROUTE_CHANGED_NAME="route-changed"
 ROUTE_USER_NAME="route-user"
+ROUTE_PROVIDER_NAME="route-provider"
 ROUTE_CLEAN_HOME="$TMP_ROOT/accounts/$ROUTE_CLEAN_NAME"
 ROUTE_CHANGED_HOME="$TMP_ROOT/accounts/$ROUTE_CHANGED_NAME"
 ROUTE_USER_HOME="$TMP_ROOT/accounts/$ROUTE_USER_NAME"
-for route_name in "$ROUTE_CLEAN_NAME" "$ROUTE_CHANGED_NAME" "$ROUTE_USER_NAME"; do
+ROUTE_PROVIDER_HOME="$TMP_ROOT/accounts/$ROUTE_PROVIDER_NAME"
+for route_name in "$ROUTE_CLEAN_NAME" "$ROUTE_CHANGED_NAME" "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
   opencodex_helper init-account "$route_name" >/dev/null
 done
 cat > "$ROUTE_CLEAN_HOME/config.toml" <<'TOML'
@@ -417,6 +435,15 @@ model_provider = "openai"
 
 [features]
 memories = true
+TOML
+cat > "$ROUTE_PROVIDER_HOME/config.toml" <<'TOML'
+model = "custom-model"
+model_provider = "user_proxy"
+
+[model_providers.user_proxy]
+name = "User Proxy"
+base_url = "http://127.0.0.1:45680/v1"
+wire_api = "responses"
 TOML
 cp "$ROUTE_CLEAN_HOME/config.toml" "$ROUTE_CHANGED_HOME/config.toml"
 cat > "$ROUTE_USER_HOME/config.toml" <<'TOML'
@@ -433,6 +460,7 @@ ROUTE_AUTH_HASH="$(shasum -a 256 "$ROUTE_CLEAN_HOME/auth.json" | awk '{print $1}
 ROUTE_HISTORY_MODE="$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")"
 ROUTE_HISTORY_MARKER_HASH="$(shasum -a 256 "$ROUTE_CLEAN_HOME/.codex-accounts-history-mode" | awk '{print $1}')"
 ROUTE_USER_CONFIG_HASH="$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')"
+ROUTE_PROVIDER_CONFIG_HASH="$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')"
 
 # The shared CLI wrapper must stay inside the owned OpenCodex root. A linked
 # bin directory must fail before any profile route is changed or an external
@@ -483,10 +511,33 @@ done
 [[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/.codex-accounts-history-mode" | awk '{print $1}')" == "$ROUTE_HISTORY_MARKER_HASH" ]]
 [[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
 [[ ! -e "$ROUTE_USER_HOME/.codex-accounts-opencodex-route.json" ]]
+[[ "$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_PROVIDER_CONFIG_HASH" ]]
+[[ ! -e "$ROUTE_PROVIDER_HOME/.codex-accounts-opencodex-route.json" ]]
+
+# A real launch reaches the fake-window verification failure only after model
+# routing decisions. User-owned URL/catalog and custom-provider profiles must
+# remain byte-for-byte unchanged through that path.
+for custom_route_name in "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
+  custom_route_launch_rc=0
+  PATH="$OPENCODEX_MOCK_BIN:$PATH" \
+  CODEX_PRELAUNCH_SYNC=0 \
+  CODEX_LAUNCH_VERIFY_MAX_WAITS=0 \
+  opencodex_helper launch-account-nosync "$custom_route_name" >/dev/null 2>&1 || custom_route_launch_rc=$?
+  [[ "$custom_route_launch_rc" != "0" ]]
+done
+[[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
+[[ "$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_PROVIDER_CONFIG_HASH" ]]
+[[ ! -e "$ROUTE_USER_HOME/.codex-accounts-opencodex-route.json" ]]
+[[ ! -e "$ROUTE_PROVIDER_HOME/.codex-accounts-opencodex-route.json" ]]
 
 # An idempotent start reuses the already verified shared catalog without making
 # Profile opening wait on provider discovery again. A forced refresh that hangs
 # must be bounded and may reuse only that same verified catalog.
+OPENCODEX_SYNC_COUNT_WITHOUT_FINGERPRINT="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
+mv "$OPENCODEX_TEST_FINGERPRINT" "$TMP_ROOT/removed-catalog-verification.json"
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+[[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "$(( OPENCODEX_SYNC_COUNT_WITHOUT_FINGERPRINT + 1 ))" ]]
+[[ -f "$OPENCODEX_TEST_FINGERPRINT" ]]
 OPENCODEX_SYNC_COUNT_BEFORE="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
 [[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
 [[ -e "$OPENCODEX_TEST_STATE/sync-called" ]]
@@ -529,11 +580,35 @@ grep -Fq 'openai_base_url = "http://127.0.0.1:45679/v1"' "$ROUTE_CHANGED_HOME/co
 [[ "$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")" == "$ROUTE_HISTORY_MODE" ]]
 [[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
 
-# A timed-out forced refresh must still fail closed when the previous catalog is
-# missing a configured provider namespace. The unhealthy launch is stopped and
-# managed routes remain removed.
+# Keeping the same provider namespace is not enough: a provider/model setting
+# change invalidates the verification fingerprint, so a timed-out refresh must
+# fail closed instead of silently serving the old catalog.
+cp "$OPENCODEX_TEST_STATE/config.json" "$TMP_ROOT/verified-opencodex-state-config.json"
+python3 - "$OPENCODEX_TEST_STATE/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["providers"]["mock-provider"]["modelContextWindows"] = {"gpt-test": 654321}
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+opencodex_timeout_changed_settings_rc=0
+OPENCODEX_FORCE_SYNC=1 \
+OPENCODEX_SYNC_MAX_WAITS=4 \
+OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
+MOCK_SYNC_MODE=hang \
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_timeout_changed_settings_rc=$?
+[[ "$opencodex_timeout_changed_settings_rc" != "0" ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+cp "$TMP_ROOT/verified-opencodex-state-config.json" "$OPENCODEX_TEST_STATE/config.json"
+chmod 600 "$OPENCODEX_TEST_STATE/config.json"
+
+# Catalog bytes are also bound to the fingerprint. A same-namespace tamper must
+# fail closed, stop the unhealthy launch, and leave managed routes removed.
 cp "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json" "$TMP_ROOT/verified-opencodex-catalog.json"
-printf '%s\n' '{"models":[{"slug":"gpt-test","display_name":"Incomplete","visibility":"list"}]}' > "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
+printf '%s\n' '{"models":[{"slug":"mock-provider/gpt-test","display_name":"Tampered","visibility":"list"}]}' > "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
 opencodex_timeout_invalid_rc=0
 OPENCODEX_FORCE_SYNC=1 \
 OPENCODEX_SYNC_MAX_WAITS=4 \
@@ -544,6 +619,21 @@ opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_timeout_invalid_rc
 [[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
 [[ ! -e "$OPENCODEX_TEST_STATE/sync-hang.pid" ]]
 cp "$TMP_ROOT/verified-opencodex-catalog.json" "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
+
+# Never follow or replace a verification sidecar symlink outside the managed
+# state directory, even after a successful catalog sync.
+mv "$OPENCODEX_TEST_FINGERPRINT" "$TMP_ROOT/verified-catalog-fingerprint.json"
+OPENCODEX_FINGERPRINT_ESCAPE="$TMP_ROOT/opencodex-fingerprint-escape.json"
+printf '%s\n' 'outside-fingerprint-sentinel' > "$OPENCODEX_FINGERPRINT_ESCAPE"
+OPENCODEX_FINGERPRINT_ESCAPE_HASH="$(shasum -a 256 "$OPENCODEX_FINGERPRINT_ESCAPE" | awk '{print $1}')"
+ln -s "$OPENCODEX_FINGERPRINT_ESCAPE" "$OPENCODEX_TEST_FINGERPRINT"
+opencodex_fingerprint_symlink_rc=0
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_fingerprint_symlink_rc=$?
+[[ "$opencodex_fingerprint_symlink_rc" != "0" ]]
+[[ -L "$OPENCODEX_TEST_FINGERPRINT" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_FINGERPRINT_ESCAPE" | awk '{print $1}')" == "$OPENCODEX_FINGERPRINT_ESCAPE_HASH" ]]
+unlink "$OPENCODEX_TEST_FINGERPRINT"
+mv "$TMP_ROOT/verified-catalog-fingerprint.json" "$OPENCODEX_TEST_FINGERPRINT"
 
 printf 'tampered\n' > "$OPENCODEX_TEST_GUI/index.html"
 opencodex_helper opencodex-install >/dev/null
@@ -1303,10 +1393,12 @@ assert 'OPENCODEX_LAB_LAUNCH_VERIFIED=1' in helper
 assert '[[ "${OPENCODEX_LAB_LAUNCH_VERIFIED:-0}" != "1" ]]' in launch_match.group(1)
 assert 'set_history_mode_for_home "$home_dir" private' in launch_match.group(1)
 assert 'elif home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
-assert 'if ! home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
+assert 'if ! home_uses_opencodex_proxy "$home_dir" && (( preserve_user_model_route == 0 )); then' in launch_match.group(1)
 assert '&& ! home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
-assert launch_match.group(1).index('restore_non_account1_openai_config_for_home "$home_dir"') < launch_match.group(1).index('ensure_opencodex_available_for_profiles')
+assert 'profile_has_user_owned_model_routing() {' in helper
+assert launch_match.group(1).index('profile_has_user_owned_model_routing "$home_dir"') < launch_match.group(1).index('ensure_opencodex_available_for_profiles')
 assert launch_match.group(1).index('ensure_opencodex_available_for_profiles') < launch_match.group(1).index('configure_opencodex_routing_for_home "$home_dir"')
+assert launch_match.group(1).index('configure_opencodex_routing_for_home "$home_dir"') < launch_match.group(1).index('restore_non_account1_openai_config_for_home "$home_dir"')
 assert '--env "CODEX_CLI_PATH=$opencodex_cli_wrapper"' in launch_match.group(1)
 assert '--env "CODEX_APP_SERVER_FORCE_CLI=1"' in launch_match.group(1)
 assert 'model_provider", "openai"' in helper
@@ -1322,9 +1414,13 @@ assert '"$OPENCODEX_BIN" start' in opencodex_start_match.group(1)
 assert 'opencodex_sync_and_verify_lab "$url"' in opencodex_start_match.group(1)
 assert opencodex_start_match.group(1).index('url="$(opencodex_running_url') < opencodex_start_match.group(1).index('opencodex_sync_and_verify_lab "$url"')
 assert 'local attempt=1 max_attempts=3' in helper
-assert 'OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-100}"' in helper
+assert 'OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-200}"' in helper
 assert 'OPENCODEX_SYNC_WAIT_SECONDS="${OPENCODEX_SYNC_WAIT_SECONDS:-0.1}"' in helper
 assert 'opencodex_verify_shared_catalog() {' in helper
+assert 'OPENCODEX_CATALOG_FINGERPRINT_OWNER="managed-by-codex-accounts-opencodex-catalog-v1"' in helper
+assert 'catalog_inputs_sha256' in helper
+assert 'catalog_sha256' in helper
+assert 'opencodex_catalog_fingerprint verify "$freshness"' in helper
 assert 'run_with_waits "$OPENCODEX_SYNC_MAX_WAITS" "$OPENCODEX_SYNC_WAIT_SECONDS"' in helper
 assert 'if (( sync_status == 124 )); then' in helper
 assert 'using the existing verified shared model catalog' in helper
@@ -1432,6 +1528,7 @@ assert 'launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = syncBeforeLaunch && sha
 assert 'private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)' in swift
 assert 'queue: DispatchQueue = codexAccountsWorkQueue' in swift
 assert 'runBackground(loadingText, queue: codexAccountsLaunchQueue)' in swift
+assert 'timeout: 60,\n                environment: launchEnvironment' in swift
 assert 'runBackground(tr("關閉 \\(profile.displayName)...", "Closing \\(profile.displayName)..."), queue: codexAccountsLaunchQueue)' in swift
 assert 'busyProfiles.isDisjoint(with: busyIDs)' in swift
 assert '.disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)' in swift
