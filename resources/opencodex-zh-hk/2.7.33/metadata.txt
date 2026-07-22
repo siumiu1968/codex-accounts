@@ -1,0 +1,5 @@
+OpenCodex-Version: 2.7.33
+Upstream-Commit: 6d6bef8b98d762ff9679916546cb44e8e3effebc
+Locale: zh-HK
+Locale-Name: 繁體中文（香港）
+Build-Command: bun run build

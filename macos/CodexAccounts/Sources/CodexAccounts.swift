@@ -276,6 +276,20 @@ private struct LocalExternalProviderDetails {
     let providerLabel: String
 }
 
+private struct OpenCodexLabStatus: Equatable {
+    let installed: Bool
+    let running: Bool
+    let version: String
+    let dashboardURL: String
+
+    static let unavailable = OpenCodexLabStatus(
+        installed: false,
+        running: false,
+        version: "unknown",
+        dashboardURL: ""
+    )
+}
+
 private struct AppThemeOption: Identifiable {
     let id: String
     let zhTitle: String
@@ -1387,14 +1401,23 @@ private func profileWithLocalExternalProviderFallback(_ profile: CodexProfile) -
 }
 
 private func localExternalProviderDetails(in home: String) -> LocalExternalProviderDetails? {
-    guard isPrimaryCodexHome(home) else { return nil }
-
     let configURL = URL(fileURLWithPath: home).appendingPathComponent("config.toml")
     guard let config = try? String(contentsOf: configURL, encoding: .utf8) else {
         return nil
     }
 
     let topLevel = topLevelTomlText(config)
+    let normalizedHome = URL(fileURLWithPath: home).standardizedFileURL
+    let ownershipMarker = URL(fileURLWithPath: home)
+        .appendingPathComponent(".codex-accounts-opencodex-lab")
+    let isManagedOpenCodexLab = normalizedHome.lastPathComponent == "opencodex-lab"
+        && (try? String(contentsOf: ownershipMarker, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)) == "managed-by-codex-accounts-opencodex-lab-v1"
+    if isManagedOpenCodexLab {
+        return LocalExternalProviderDetails(model: "2.7.33", providerLabel: "opencodex")
+    }
+
+    guard isPrimaryCodexHome(home) else { return nil }
     guard tomlStringValue("model_provider", in: topLevel) == "ai_proxy" else {
         return nil
     }
@@ -2457,8 +2480,14 @@ struct AccountsRootView: View {
     @State private var localAuthTokenProfileIDs: Set<String> = []
     @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
+    @AppStorage("sidebarOpenCodexExpanded") private var sidebarOpenCodexExpanded = false
     @AppStorage("sidebarAppearanceExpanded") private var sidebarAppearanceExpanded = false
     @AppStorage("sidebarUpdatesExpanded") private var sidebarUpdatesExpanded = false
+    @State private var openCodexStatus = OpenCodexLabStatus.unavailable
+    @State private var openCodexOperationInFlight = false
+    @State private var openCodexStatusRefreshInFlight = false
+    @State private var openCodexStatusRefreshPending = false
+    @State private var openCodexBootstrapStarted = false
     @AppStorage("codexUsageRecordV2") private var codexUsageRecordData = ""
     @AppStorage("codexUsageDayKey") private var legacyCodexUsageDayKey = ""
     @AppStorage("codexUsageSecondsToday") private var legacyCodexUsageSecondsToday = 0.0
@@ -2543,6 +2572,10 @@ struct AccountsRootView: View {
             reconcileUsageSession()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 refreshProfiles(showLoading: false)
+                refreshOpenCodexStatus()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                prepareBundledOpenCodexIfNeeded()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
                 keepAwake.refreshState(force: true)
@@ -2574,6 +2607,9 @@ struct AccountsRootView: View {
             reconcileUsageSession()
             runPeriodicMaintenance()
             keepAwake.refreshState()
+            if sidebarOpenCodexExpanded || openCodexStatus.running {
+                refreshOpenCodexStatus()
+            }
             usageTicker = Date()
         }
     }
@@ -3767,6 +3803,16 @@ struct AccountsRootView: View {
             }
 
             sidebarDisclosureSection(
+                title: tr("OpenCodex 模型", "OpenCodex Models"),
+                systemName: "server.rack",
+                subtitle: openCodexSummaryText,
+                accent: openCodexAccent,
+                expanded: $sidebarOpenCodexExpanded
+            ) {
+                openCodexPanel
+            }
+
+            sidebarDisclosureSection(
                 title: tr("外觀", "Appearance"),
                 systemName: "paintpalette.fill",
                 subtitle: themeTitle,
@@ -3812,6 +3858,285 @@ struct AccountsRootView: View {
         }
         let clean = keyboardClean.isLocked ? tr("清潔開", "Clean on") : tr("清潔關", "Clean off")
         return "\(awake) · \(clean)"
+    }
+
+    private var openCodexAccent: Color {
+        if openCodexStatus.installed && !openCodexVersionReady {
+            return Color(red: 1.00, green: 0.66, blue: 0.18)
+        }
+        if openCodexStatus.running {
+            return Color(red: 0.08, green: 0.90, blue: 0.72)
+        }
+        if openCodexStatus.installed {
+            return Color(red: 0.30, green: 0.68, blue: 1.00)
+        }
+        return Color(red: 0.62, green: 0.66, blue: 0.74)
+    }
+
+    private var openCodexSummaryText: String {
+        if openCodexOperationInFlight {
+            return tr("處理中", "Working")
+        }
+        if openCodexStatus.installed && !openCodexVersionReady {
+            return tr("需要修復版本", "Version repair needed")
+        }
+        if openCodexStatus.running {
+            return tr("全部 Profile 可用", "Available to all profiles")
+        }
+        if openCodexStatus.installed {
+            return tr("已內置 · 開 Profile 自動啟動", "Bundled · starts with profiles")
+        }
+        return tr("準備內置功能", "Preparing bundled feature")
+    }
+
+    private var openCodexVersionReady: Bool {
+        openCodexStatus.installed && openCodexStatus.version == "2.7.33"
+    }
+
+    private var openCodexPanel: some View {
+        VStack(alignment: .leading, spacing: scaled(8)) {
+            HStack(spacing: scaled(7)) {
+                Circle()
+                    .fill(openCodexAccent)
+                    .frame(width: scaled(7), height: scaled(7))
+                    .shadow(color: openCodexStatus.running ? openCodexAccent.opacity(0.72) : .clear, radius: scaled(5))
+
+                VStack(alignment: .leading, spacing: scaled(1)) {
+                    Text(openCodexStatus.running
+                        ? tr("模型已可供受管 Profile 選用", "Models are ready for managed profiles")
+                        : tr("打開 Profile 時會自動啟動本機代理", "The local proxy starts when a profile opens"))
+                        .font(appFont(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.68))
+                        .lineLimit(2)
+
+                    if openCodexStatus.installed {
+                        Text("OpenCodex \(openCodexStatus.version)")
+                            .font(appFont(size: 9, weight: .medium, monospaced: true))
+                            .foregroundStyle(.white.opacity(0.38))
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: scaled(4))
+
+                if openCodexOperationInFlight || openCodexStatusRefreshInFlight {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.78)
+                        .tint(openCodexAccent)
+                }
+            }
+
+            if openCodexVersionReady {
+                HStack(spacing: scaled(8)) {
+                    miniButton(openCodexStatus.running ? tr("停止", "Stop") : tr("啟動", "Start")) {
+                        if openCodexStatus.running {
+                            stopOpenCodexLab()
+                        } else {
+                            startOpenCodexLab()
+                        }
+                    }
+                    .disabled(openCodexOperationInFlight)
+
+                    miniButton(tr("Dashboard", "Dashboard")) {
+                        openOpenCodexDashboard()
+                    }
+                    .disabled(openCodexOperationInFlight || !openCodexStatus.running)
+                    .opacity(openCodexStatus.running ? 1 : 0.52)
+                }
+
+                miniButton(tr("用 OpenCodex 打開 Codex", "Open Codex with OpenCodex")) {
+                    launchOpenCodexLab()
+                }
+                .disabled(openCodexOperationInFlight || !openCodexStatus.running)
+                .opacity(openCodexStatus.running ? 1 : 0.52)
+            } else if openCodexStatus.installed {
+                miniButton(tr("修復內置版本 2.7.33", "Repair bundled 2.7.33")) {
+                    installOpenCodexLab()
+                }
+                .disabled(openCodexOperationInFlight)
+            } else {
+                miniButton(tr("準備內置 OpenCodex", "Prepare bundled OpenCodex")) {
+                    installOpenCodexLab()
+                }
+                .disabled(openCodexOperationInFlight)
+            }
+
+            Button {
+                NSWorkspace.shared.open(URL(string: "https://github.com/lidge-jun/opencodex")!)
+            } label: {
+                Label(tr("查看開源項目", "View open-source project"), systemImage: "arrow.up.right.square")
+                    .font(appFont(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.44))
+            }
+            .buttonStyle(.plain)
+        }
+        .help(tr(
+            "OpenCodex runtime 內置喺安裝包，並只會解壓到 Codex Accounts 專用資料夾。未有自訂模型路由嘅受管 Profile 都可選用模型；OpenAI 仍使用各 Profile 自己嘅登入，第三方模型登入由本機 OpenCodex 共用。唔會合併或複製對話紀錄同登入 token。",
+            "The OpenCodex runtime is bundled and extracted only into Codex Accounts data. Managed profiles without a custom model route can use its models; OpenAI keeps each profile's own sign-in, while third-party model sign-ins are shared locally by OpenCodex. Chats and login tokens are not merged or copied."
+        ))
+    }
+
+    private func prepareBundledOpenCodexIfNeeded() {
+        guard !openCodexBootstrapStarted else { return }
+        openCodexBootstrapStarted = true
+
+        #if arch(arm64)
+        let runtimeArchitecture = "arm64"
+        #elseif arch(x86_64)
+        let runtimeArchitecture = "x86_64"
+        #else
+        let runtimeArchitecture = "unsupported"
+        #endif
+
+        guard let resources = Bundle.main.resourceURL else { return }
+        let seedManifest = resources
+            .appendingPathComponent("opencodex-runtime", isDirectory: true)
+            .appendingPathComponent("2.7.33", isDirectory: true)
+            .appendingPathComponent(runtimeArchitecture, isDirectory: true)
+            .appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: seedManifest.path) else { return }
+
+        openCodexOperationInFlight = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = runCodexScript(scriptPath, ["opencodex-install"], wait: true, timeout: 180)
+            DispatchQueue.main.async {
+                openCodexOperationInFlight = false
+                if result.0 == 0 {
+                    statusText = tr("內置 OpenCodex 2.7.33 已準備好", "Bundled OpenCodex 2.7.33 is ready")
+                } else {
+                    let detail = trimmedToolOutput(result.1, maxLength: 500)
+                    statusText = detail.isEmpty
+                        ? tr("OpenCodex 暫時未能準備", "OpenCodex could not be prepared")
+                        : detail
+                }
+                refreshOpenCodexStatus()
+            }
+        }
+    }
+
+    private func refreshOpenCodexStatus() {
+        guard !openCodexStatusRefreshInFlight else {
+            openCodexStatusRefreshPending = true
+            return
+        }
+        openCodexStatusRefreshInFlight = true
+
+        DispatchQueue.global(qos: .utility).async {
+            let result = runCodexScript(scriptPath, ["opencodex-status"], wait: true, timeout: 8)
+            let statusLine = result.1
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map(String.init)
+                .last { $0.components(separatedBy: "\t").count >= 4 }
+            let fields = statusLine?.components(separatedBy: "\t") ?? []
+            let status: OpenCodexLabStatus
+
+            if result.0 == 0, fields.count >= 4 {
+                status = OpenCodexLabStatus(
+                    installed: fields[0] == "1",
+                    running: fields[1] == "1",
+                    version: fields[2].isEmpty ? "unknown" : fields[2],
+                    dashboardURL: fields[3]
+                )
+            } else {
+                status = .unavailable
+            }
+
+            DispatchQueue.main.async {
+                let shouldRefreshAgain = openCodexStatusRefreshPending
+                openCodexStatusRefreshPending = false
+                openCodexStatusRefreshInFlight = false
+                if !shouldRefreshAgain {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
+                        openCodexStatus = status
+                    }
+                } else {
+                    refreshOpenCodexStatus()
+                }
+            }
+        }
+    }
+
+    private func runOpenCodexAction(
+        command: String,
+        loading: String,
+        success: String,
+        timeout: TimeInterval,
+        refreshProfilesAfterward: Bool = false
+    ) {
+        guard !openCodexOperationInFlight else { return }
+        openCodexOperationInFlight = true
+
+        runBackground(loading) {
+            runCodexScript(scriptPath, [command], wait: true, timeout: timeout)
+        } completion: { result in
+            openCodexOperationInFlight = false
+            if result.0 == 0 {
+                statusText = success
+                if refreshProfilesAfterward {
+                    refreshProfiles(showLoading: false)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    refreshOpenCodexStatus()
+                }
+                return
+            }
+
+            let detail = trimmedToolOutput(result.1, maxLength: 1_100)
+            alertMessage(
+                tr("OpenCodex 操作失敗", "OpenCodex action failed"),
+                detail.isEmpty ? tr("請稍後再試。", "Please try again.") : detail
+            )
+            refreshOpenCodexStatus()
+        }
+    }
+
+    private func installOpenCodexLab() {
+        runOpenCodexAction(
+            command: "opencodex-install",
+            loading: tr("準備內置 OpenCodex...", "Preparing bundled OpenCodex..."),
+            success: tr("內置 OpenCodex 2.7.33 已準備好", "Bundled OpenCodex 2.7.33 is ready"),
+            timeout: 300
+        )
+    }
+
+    private func startOpenCodexLab() {
+        runOpenCodexAction(
+            command: "opencodex-start",
+            loading: tr("啟動 OpenCodex 實驗代理...", "Starting OpenCodex Lab proxy..."),
+            success: tr("OpenCodex 實驗代理已啟動", "OpenCodex Lab proxy started"),
+            timeout: 60,
+            refreshProfilesAfterward: true
+        )
+    }
+
+    private func stopOpenCodexLab() {
+        runOpenCodexAction(
+            command: "opencodex-stop",
+            loading: tr("停止並還原 OpenCodex Lab...", "Stopping and restoring OpenCodex Lab..."),
+            success: tr("OpenCodex Lab 已停止並還原", "OpenCodex Lab stopped and restored"),
+            timeout: 60,
+            refreshProfilesAfterward: true
+        )
+    }
+
+    private func openOpenCodexDashboard() {
+        runOpenCodexAction(
+            command: "opencodex-dashboard",
+            loading: tr("打開 OpenCodex Dashboard...", "Opening OpenCodex Dashboard..."),
+            success: tr("已打開 OpenCodex Dashboard", "OpenCodex Dashboard opened"),
+            timeout: 15
+        )
+    }
+
+    private func launchOpenCodexLab() {
+        runOpenCodexAction(
+            command: "opencodex-launch",
+            loading: tr("用 OpenCodex 打開獨立 Codex...", "Opening isolated Codex with OpenCodex..."),
+            success: tr("已打開 OpenCodex Lab Profile", "OpenCodex Lab profile opened"),
+            timeout: 75,
+            refreshProfilesAfterward: true
+        )
     }
 
     private func sidebarDisclosureSection<Content: View>(
@@ -4981,14 +5306,30 @@ struct AccountsRootView: View {
     }
 
     private func externalProviderStatus(_ profile: CodexProfile, compact: Bool) -> some View {
-        let accent = Color(red: 0.10, green: 0.86, blue: 0.74)
-        let model = profile.reset.hasPrefix("aliyun:")
-            ? String(profile.reset.dropFirst("aliyun:".count))
-            : "qwen3.7-plus"
+        let isOpenCodex = profile.reset.hasPrefix("opencodex:")
+        let accent = isOpenCodex
+            ? Color(red: 0.32, green: 0.68, blue: 1.00)
+            : Color(red: 0.10, green: 0.86, blue: 0.74)
+        let model: String
+        if isOpenCodex {
+            model = String(profile.reset.dropFirst("opencodex:".count))
+        } else if profile.reset.hasPrefix("aliyun:") {
+            model = String(profile.reset.dropFirst("aliyun:".count))
+        } else {
+            model = "qwen3.7-plus"
+        }
 
         return HStack(alignment: .center, spacing: scaled(compact ? 8 : 10)) {
-            apiStatusPill(title: tr("外部 API", "External API"), accent: accent, compact: compact)
-            apiStatusPill(title: "Coding Plan", accent: accent.opacity(0.82), compact: compact)
+            apiStatusPill(
+                title: isOpenCodex ? tr("本機代理", "Local proxy") : tr("外部 API", "External API"),
+                accent: accent,
+                compact: compact
+            )
+            apiStatusPill(
+                title: isOpenCodex ? "OpenCodex" : "Coding Plan",
+                accent: accent.opacity(0.82),
+                compact: compact
+            )
             Text(model)
                 .font(appFont(size: compact ? 12 : 13, weight: .semibold, monospaced: true))
                 .foregroundStyle(.white.opacity(0.72))
@@ -5006,7 +5347,9 @@ struct AccountsRootView: View {
                 .stroke(accent.opacity(0.18), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: scaled(12), style: .continuous))
-        .help(tr("外部 API profile 不使用 OpenAI quota。", "External API profiles do not use OpenAI quota."))
+        .help(isOpenCodex
+            ? tr("OpenCodex Lab 使用本機 loopback 代理，同現有帳戶及對話隔離。", "OpenCodex Lab uses an isolated local loopback proxy.")
+            : tr("外部 API profile 不使用 OpenAI quota。", "External API profiles do not use OpenAI quota."))
     }
 
     private func apiStatusPill(title: String, accent: Color, compact: Bool) -> some View {
@@ -6082,6 +6425,7 @@ struct AccountsRootView: View {
     private func showProfilePopupMenu(for profile: CodexProfile) {
         NSApp.activate(ignoringOtherApps: true)
 
+        let isOpenCodexLab = profile.id == "opencodex-lab"
         let menu = NSMenu()
         menu.addItem(CallbackMenuItem(title: tr("關閉視窗", "Close Window")) {
             closeAccount(profile)
@@ -6107,7 +6451,7 @@ struct AccountsRootView: View {
         let historyMode = profileHistoryMode(for: profile)
         let privateHistoryItem = CallbackMenuItem(
             title: tr("🔒 私人本機對話（只限此 Profile）", "🔒 Private local chats (this profile only)"),
-            enabled: !isHistoryAnchor(profile) && historyMode != .privateOnly
+            enabled: !isOpenCodexLab && !isHistoryAnchor(profile) && historyMode != .privateOnly
         ) {
             separateHistory(profile)
         }
@@ -6116,18 +6460,24 @@ struct AccountsRootView: View {
 
         let sharedHistoryItem = CallbackMenuItem(
             title: tr("共享本機對話（其他 Profile 可見）", "Share local chats (visible to other profiles)"),
-            enabled: historyMode != .shared
+            enabled: !isOpenCodexLab && historyMode != .shared
         ) {
             shareHistory(profile)
         }
         sharedHistoryItem.state = historyMode == .shared ? .on : .off
         menu.addItem(sharedHistoryItem)
+        if isOpenCodexLab {
+            menu.addItem(CallbackMenuItem(
+                title: tr("OpenCodex Lab 永久使用獨立本機對話", "OpenCodex Lab always keeps isolated local chats"),
+                enabled: false
+            ) {})
+        }
         menu.addItem(CallbackMenuItem(
             title: tr("只隔離本機紀錄；唔會關閉 OpenAI 雲端處理", "Isolates local records only; OpenAI cloud processing stays on"),
             enabled: false
         ) {})
         menu.addItem(.separator())
-        menu.addItem(CallbackMenuItem(title: tr("刪除 Profile...", "Delete Profile..."), enabled: profile.id != "account1") {
+        menu.addItem(CallbackMenuItem(title: tr("刪除 Profile...", "Delete Profile..."), enabled: profile.id != "account1" && !isOpenCodexLab) {
             deleteProfile(profile)
         })
 
@@ -6922,12 +7272,19 @@ struct AccountsRootView: View {
         runBackground(tr("清理大型對話...", "Cleaning large chats...")) {
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH"] = "1"
-            return runCodexScript(scriptPath, ["repair-account1"], wait: true, timeout: 120, environment: environment)
+            return runCodexScript(scriptPath, ["repair-account1"], wait: true, timeout: 1800, environment: environment)
         } completion: { result in
             isRepairingHistoryPayloads = false
-            statusText = result.0 == 0
-                ? tr("已清理大型對話", "Large chats cleaned")
-                : tr("清理大型對話失敗", "Large chat cleanup failed")
+            switch result.0 {
+            case 0:
+                statusText = tr("已清理大型對話", "Large chats cleaned")
+            case 28:
+                statusText = tr("空間不足，已安全停止清理", "Low disk space; cleanup stopped safely")
+            case 75:
+                statusText = tr("請先關閉 Codex，或已有清理程序運行中", "Close Codex first, or wait for the current cleanup")
+            default:
+                statusText = tr("清理大型對話失敗", "Large chat cleanup failed")
+            }
         }
     }
 

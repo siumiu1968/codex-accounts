@@ -16,6 +16,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.7.0 更新介紹
+
+V2.7.0 將 OpenCodex 2.7.33 arm64 runtime 同香港繁體介面直接放入安裝包，更新後唔需要再由 npm 下載。打開受管理 Profile 時，App 會先啟動本機 loopback 代理並驗證共用模型目錄；已驗證目錄會即時沿用，供應商設定有變先重新同步。網絡同步設有 10 秒上限，逾時只會沿用通過完整驗證嘅舊目錄，避免開 Profile 無限轉圈。同一套已登入嘅第三方模型可以喺未有自訂模型路由嘅不同 Profile 選用；OpenAI 請求仍然使用各 Profile 自己嘅登入，對話分享／私人模式亦保持不變。安裝包唔會包含任何使用者 token、OAuth credential 或對話資料。
+
 ### V2.6.2 更新介紹
 
 V2.6.2 兼容官方統一 ChatGPT／Codex App 嘅兩種外層路徑：`/Applications/Codex.app` 同 `/Applications/ChatGPT.app`，亦支援使用者 `~/Applications`。偵測會核對 bundle identity 或內置 Codex executable，唔會將 `com.openai.chat` 嘅 ChatGPT Classic 當成 Codex；打開、關閉、啟動驗證同「今日使用」統計亦會跟隨實際偵測到嘅 App。舊安裝升級後可以保留 `Codex.app` 外層名稱，即使 App 內部顯示名稱同 executable 已經叫 ChatGPT。
@@ -100,6 +104,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
 - 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
+- 內置 OpenCodex：受管理 Profile 可共用本機第三方模型供應商；OpenAI 仍保持逐 Profile 登入身份。
 - 輕量啟動與獨立同步：打開 profile 唔會被重型同步阻塞；本機記憶、rules、AGENTS 同外掛設定可用自動或手動同步。
 - 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間；「今日使用」只計 Codex 實際運行時間，睡眠同關機時間唔會計算。
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
@@ -130,7 +135,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.6.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.7.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -183,6 +188,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.7.0 更新介绍
+
+V2.7.0 把 OpenCodex 2.7.33 arm64 runtime 与香港繁体界面直接放入安装包，更新后不再需要通过 npm 下载。打开受管理 Profile 时，应用会先启动本地 loopback 代理并验证共享模型目录；已验证目录会立即沿用，仅在提供商设置改变时重新同步。网络同步设有 10 秒上限，超时只会沿用通过完整验证的旧目录，避免打开 Profile 时无限转圈。同一套已登录的第三方模型可在未设置自定义模型路由的不同 Profile 中选择；OpenAI 请求仍使用各 Profile 自己的登录，对话共享／私人模式保持不变。安装包不包含任何用户 token、OAuth credential 或对话数据。
 
 ### V2.6.2 更新介绍
 
@@ -268,6 +277,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
 - 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
+- 内置 OpenCodex：受管理 Profile 可共用本地第三方模型提供商；OpenAI 仍保持逐 Profile 登录身份。
 - 轻量启动与独立同步：打开 profile 不会被重型同步阻塞；本地记忆、rules、AGENTS 和插件设置可自动或手动同步。
 - 用量显示：显示 5H / 1W 额度、百分比和恢复时间；“今日使用”只计算 Codex 实际运行时间，睡眠和关机时间不会计入。
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
@@ -298,7 +308,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.6.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.7.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -351,6 +361,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.7.0 Update
+
+V2.7.0 bundles the arm64 OpenCodex 2.7.33 runtime and the Traditional Chinese (Hong Kong) dashboard, so an update no longer needs npm to download OpenCodex. Before opening a managed profile, Codex Accounts starts the loopback proxy and verifies the shared model catalog. A verified catalog is reused immediately and refreshed when provider settings change; network synchronization is capped at 10 seconds and can fall back only to a fully verified catalog, preventing an endless launch spinner. Signed-in third-party models can then be selected across managed profiles that do not already define a custom model route, while OpenAI requests continue to use each profile's own sign-in and existing shared/private chat settings remain unchanged. No user token, OAuth credential, or chat data is included in the release bundle.
 
 ### V2.6.2 Update
 
@@ -436,6 +450,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
 - Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
+- Bundled OpenCodex: managed profiles can share locally configured third-party model providers while retaining per-profile OpenAI identity.
 - Lightweight launch with independent sync: opening a profile is not blocked by heavy sync; local memory, rules, AGENTS, and plugin settings can sync automatically or on demand.
 - Usage meters: show 5H / 1W quota, percentage, and reset time; Today counts only actual Codex runtime and excludes sleep and offline time.
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
@@ -466,7 +481,7 @@ System requirement: macOS 14 or later.
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.6.2, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.7.0, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 
