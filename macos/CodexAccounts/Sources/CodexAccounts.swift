@@ -11,6 +11,49 @@ private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.
 private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)
 private let profileRefreshPayloadSeparator = "\u{1E}"
 
+private func supportedCodexGUIExecutablePaths() -> [String] {
+    let fileManager = FileManager.default
+    let configuredValue = ProcessInfo.processInfo.environment["CODEX_APP"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let configuredPath = configuredValue?.isEmpty == false ? configuredValue : nil
+    let applicationPaths = [
+        "/Applications/Codex.app",
+        "/Applications/ChatGPT.app",
+        NSHomeDirectory() + "/Applications/Codex.app",
+        NSHomeDirectory() + "/Applications/ChatGPT.app"
+    ]
+    let candidates = configuredPath.map { [$0] } ?? applicationPaths
+    var executablePaths: [String] = []
+    var seenPaths = Set<String>()
+
+    for rawPath in candidates {
+        let appPath = URL(fileURLWithPath: rawPath)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        let bundle = Bundle(path: appPath)
+        let isConfiguredPath = configuredPath != nil
+        let hasBundledCodex = fileManager.isExecutableFile(
+            atPath: appPath + "/Contents/Resources/codex"
+        )
+        guard bundle?.bundleIdentifier != "com.openai.chat" else {
+            continue
+        }
+        guard isConfiguredPath || bundle?.bundleIdentifier == "com.openai.codex" || hasBundledCodex else {
+            continue
+        }
+
+        let conventionalPaths = ["ChatGPT", "Codex"].map {
+            appPath + "/Contents/MacOS/" + $0
+        }
+        for executablePath in ([bundle?.executablePath].compactMap { $0 } + conventionalPaths)
+            where fileManager.isExecutableFile(atPath: executablePath) && seenPaths.insert(executablePath).inserted {
+            executablePaths.append(executablePath)
+        }
+    }
+
+    return executablePaths
+}
+
 private final class ProcessFinishState {
     private let lock = NSLock()
     private var finished = false
@@ -2689,10 +2732,10 @@ struct AccountsRootView: View {
                 arguments: ["axww", "-o", "command="],
                 timeout: 3
             )
+            let codexExecutablePaths = supportedCodexGUIExecutablePaths()
             let isManagedCodexRunning = result.0 == 0 && result.1.split(separator: "\n").contains { line in
                 let command = String(line)
-                let isCodexExecutable = command.contains("/Applications/Codex.app/Contents/MacOS/ChatGPT")
-                    || command.contains("/Applications/Codex.app/Contents/MacOS/Codex")
+                let isCodexExecutable = codexExecutablePaths.contains { command.contains($0) }
                 // The primary Codex window has no --user-data-dir argument;
                 // account2 and named profiles do. The main executable is the
                 // reliable signal shared by all three launch paths.

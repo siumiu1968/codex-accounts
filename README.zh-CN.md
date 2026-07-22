@@ -10,6 +10,13 @@ Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / Open
 
 > 两张图片都只使用虚构 profile 名称、`/tmp/demo-profiles/...` 演示路径和模拟用量，不包含真实账号、姓名、电脑用户名、token 或对话内容。
 
+## 2.6.2 更新
+
+- 自动检测 `/Applications/Codex.app`、`/Applications/ChatGPT.app` 及用户 `~/Applications` 下的统一 ChatGPT／Codex 应用。
+- 通过 bundle identity 或内置 Codex executable 判断兼容性，不会误用 `com.openai.chat` 的 ChatGPT Classic。
+- 打开、关闭、启动验证和“今日使用”统计会使用同一份检测结果。
+- 旧安装升级后可能继续保留 `Codex.app` 外层名称；这不代表内部应用没有更新。
+
 ## 2.6.1 更新
 
 - 修复部分 Mac 点击“打开”后长时间转圈或没有反应：Profile 启动改用独立高优先级队列。

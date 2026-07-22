@@ -5,7 +5,90 @@ setopt typesetsilent
 # Launch a second Codex profile and sync local memory files between profiles.
 # This intentionally does not copy auth.json, cookies, or SQLite logs.
 
-CODEX_APP="${CODEX_APP:-/Applications/Codex.app}"
+CODEX_SYSTEM_APPLICATIONS_DIR="${CODEX_SYSTEM_APPLICATIONS_DIR:-/Applications}"
+CODEX_USER_APPLICATIONS_DIR="${CODEX_USER_APPLICATIONS_DIR:-$HOME/Applications}"
+CODEX_APP_CANDIDATES=(
+  "$CODEX_SYSTEM_APPLICATIONS_DIR/Codex.app"
+  "$CODEX_SYSTEM_APPLICATIONS_DIR/ChatGPT.app"
+  "$CODEX_USER_APPLICATIONS_DIR/Codex.app"
+  "$CODEX_USER_APPLICATIONS_DIR/ChatGPT.app"
+)
+
+codex_app_has_gui_executable() {
+  local app_path="$1"
+  [[ -x "$app_path/Contents/MacOS/ChatGPT" || -x "$app_path/Contents/MacOS/Codex" ]]
+}
+
+codex_app_bundle_identifier() {
+  local app_path="$1"
+  local info_plist="$app_path/Contents/Info.plist"
+  [[ -r "$info_plist" ]] || return 1
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist" 2>/dev/null
+}
+
+# ChatGPT Classic uses com.openai.chat and cannot host isolated Codex profiles.
+# The unified ChatGPT/Codex app keeps com.openai.codex even when its outer
+# bundle is named ChatGPT.app. A bundled codex executable is a secondary
+# capability signal for compatible preview builds.
+codex_app_is_capable() {
+  local app_path="$1"
+  local bundle_identifier
+  codex_app_has_gui_executable "$app_path" || return 1
+  bundle_identifier="$(codex_app_bundle_identifier "$app_path" || true)"
+  [[ "$bundle_identifier" != "com.openai.chat" ]] || return 1
+  [[ "$bundle_identifier" == "com.openai.codex" || -x "$app_path/Contents/Resources/codex" ]]
+}
+
+CODEX_APP_EXPLICIT=0
+if [[ -n "${CODEX_APP:-}" ]]; then
+  CODEX_APP_EXPLICIT=1
+else
+  CODEX_APP=""
+  for candidate in "${CODEX_APP_CANDIDATES[@]}"; do
+    if codex_app_is_capable "$candidate"; then
+      CODEX_APP="$candidate"
+      break
+    fi
+  done
+  CODEX_APP="${CODEX_APP:-$CODEX_SYSTEM_APPLICATIONS_DIR/Codex.app}"
+fi
+
+selected_codex_app_is_usable() {
+  local bundle_identifier
+  codex_app_has_gui_executable "$CODEX_APP" || return 1
+  bundle_identifier="$(codex_app_bundle_identifier "$CODEX_APP" || true)"
+  [[ "$bundle_identifier" != "com.openai.chat" ]] || return 1
+  [[ "$CODEX_APP_EXPLICIT" == "1" ]] || codex_app_is_capable "$CODEX_APP"
+}
+
+CODEX_GUI_APP_PATHS=()
+typeset -A CODEX_GUI_APP_PATH_SEEN
+for candidate in "$CODEX_APP" "${CODEX_APP_CANDIDATES[@]}"; do
+  [[ -n "$candidate" && -z "${CODEX_GUI_APP_PATH_SEEN[$candidate]:-}" ]] || continue
+  if [[ "$candidate" == "$CODEX_APP" ]]; then
+    selected_codex_app_is_usable || continue
+  else
+    codex_app_is_capable "$candidate" || continue
+  fi
+  CODEX_GUI_APP_PATH_SEEN[$candidate]=1
+  CODEX_GUI_APP_PATHS+=("$candidate")
+done
+unset CODEX_GUI_APP_PATH_SEEN
+
+report_missing_codex_app() {
+  echo "Compatible Codex/ChatGPT app not found." >&2
+  echo "Install the current ChatGPT app with Codex in Applications." >&2
+  echo "Checked:" >&2
+  printf '  %s\n' "${CODEX_APP_CANDIDATES[@]}" >&2
+  for candidate in "$CODEX_APP" "${CODEX_APP_CANDIDATES[@]}"; do
+    if [[ -d "$candidate" ]] \
+      && [[ "$(codex_app_bundle_identifier "$candidate" || true)" == "com.openai.chat" ]]; then
+      echo "ChatGPT Classic is installed, but it cannot open isolated Codex profiles." >&2
+      break
+    fi
+  done
+}
+
 PRIMARY_CODEX_HOME="${PRIMARY_CODEX_HOME:-$HOME/.codex}"
 SECOND_CODEX_HOME="${SECOND_CODEX_HOME:-$HOME/.codex-account2}"
 SECOND_APP_DATA="${SECOND_APP_DATA:-$HOME/Library/Application Support/Codex Account 2}"
@@ -110,6 +193,7 @@ Usage:
   scripts/codex_multi_account.zsh init-shared-account <account-name>
   scripts/codex_multi_account.zsh launch-account <account-name> [display-name]
   scripts/codex_multi_account.zsh launch-account-nosync <account-name> [display-name]
+  scripts/codex_multi_account.zsh codex-app-path
   scripts/codex_multi_account.zsh close-account <account-name>
   scripts/codex_multi_account.zsh close-all-accounts
   scripts/codex_multi_account.zsh list-accounts
@@ -132,7 +216,7 @@ Usage:
   scripts/codex_multi_account.zsh unlink-account2-history
 
 Environment overrides:
-  CODEX_APP=/Applications/Codex.app
+  CODEX_APP=/custom/path/App.app  # optional; default auto-detects Codex.app or ChatGPT.app
   PRIMARY_CODEX_HOME=$HOME/.codex
   SECOND_CODEX_HOME=$HOME/.codex-account2
   SECOND_APP_DATA="$HOME/Library/Application Support/Codex Account 2"
@@ -1940,7 +2024,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.6.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.6.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -4131,6 +4215,19 @@ process_has_active_agent_descendant() {
   return 1
 }
 
+is_codex_gui_process_args() {
+  local args="$1"
+  local app_path
+
+  for app_path in "${CODEX_GUI_APP_PATHS[@]}"; do
+    if [[ "$args" == "$app_path/Contents/MacOS/ChatGPT"* \
+      || "$args" == "$app_path/Contents/MacOS/Codex"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 stop_codex_windows_for_app_data() {
   local app_data="$1"
   local pids=()
@@ -4138,8 +4235,7 @@ stop_codex_windows_for_app_data() {
 
   while read -r pid args; do
     [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
-    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
-      || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
+    is_codex_gui_process_args "$args" || continue
     if args_has_user_data_dir "$args" "$app_data"; then
       pids+=("$pid")
       continue
@@ -4208,8 +4304,7 @@ matching_codex_window_pids_for_app_data() {
 
   while read -r pid args; do
     [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
-    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
-      || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
+    is_codex_gui_process_args "$args" || continue
     if args_has_user_data_dir "$args" "$app_data"; then
       printf '%s\n' "$pid"
       continue
@@ -4303,8 +4398,7 @@ close_all_accounts_fast() {
 
     for pid in "${(@k)args_by_pid}"; do
       args="${args_by_pid[$pid]}"
-      [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
-        || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
+      is_codex_gui_process_args "$args" || continue
       process_args_match_app_data_snapshot "$args" "$app_data" || continue
       if [[ -n "${active_ancestor[$pid]:-}" ]]; then
         kept_window_pids+=("$pid")
@@ -4360,8 +4454,8 @@ launch_account() {
 
   ensure_dirs
 
-  if [[ ! -d "$CODEX_APP" ]]; then
-    echo "Codex app not found at: $CODEX_APP" >&2
+  if ! selected_codex_app_is_usable; then
+    report_missing_codex_app
     exit 1
   fi
 
@@ -4470,6 +4564,14 @@ launch_account() {
   fi
 
   echo "Started Codex profile."
+}
+
+print_codex_app_path() {
+  if ! selected_codex_app_is_usable; then
+    report_missing_codex_app
+    return 1
+  fi
+  printf '%s\n' "$CODEX_APP"
 }
 
 close_account() {
@@ -6540,6 +6642,7 @@ main() {
     init-shared-account) init_shared_account "${2:-}" ;;
     launch-account) launch_account "${2:-}" "${3:-}" ;;
     launch-account-nosync) CODEX_PRELAUNCH_SYNC=0 launch_account "${2:-}" "${3:-}" ;;
+    codex-app-path) print_codex_app_path ;;
     close-account) close_account "${2:-}" ;;
     close-all-accounts) close_all_accounts ;;
     list-accounts) list_accounts ;;
