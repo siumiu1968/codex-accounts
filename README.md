@@ -16,6 +16,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.6.2 更新介紹
+
+V2.6.2 兼容官方統一 ChatGPT／Codex App 嘅兩種外層路徑：`/Applications/Codex.app` 同 `/Applications/ChatGPT.app`，亦支援使用者 `~/Applications`。偵測會核對 bundle identity 或內置 Codex executable，唔會將 `com.openai.chat` 嘅 ChatGPT Classic 當成 Codex；打開、關閉、啟動驗證同「今日使用」統計亦會跟隨實際偵測到嘅 App。舊安裝升級後可以保留 `Codex.app` 外層名稱，即使 App 內部顯示名稱同 executable 已經叫 ChatGPT。
+
 ### V2.6.1 更新介紹
 
 V2.6.1 修正部分 Mac 撳「打開」後長時間轉圈或冇反應：Profile 啟動改用獨立高優先序佇列，預設略過啟動前嘅重型資料修復，並會確認對應 Codex 程序真正啟動；失敗時會顯示原因，唔再無限等待。今版亦新增每個 Profile 獨立嘅「私人本機對話」模式，私人 Profile 會略過本機對話、記憶同批量匯入共享。呢個設定只隔離本機紀錄；使用 OpenAI 模型時，內容仍會傳送到 OpenAI 處理。
@@ -126,7 +130,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.6.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.6.2 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -179,6 +183,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.6.2 更新介绍
+
+V2.6.2 兼容官方统一 ChatGPT／Codex 应用的两种外层路径：`/Applications/Codex.app` 和 `/Applications/ChatGPT.app`，也支持用户的 `~/Applications`。检测会核对 bundle identity 或内置 Codex executable，不会把 `com.openai.chat` 的 ChatGPT Classic 当成 Codex；打开、关闭、启动验证和“今日使用”统计也会跟随实际检测到的应用。旧安装升级后可以保留 `Codex.app` 外层名称，即使应用内部显示名称和 executable 已经改为 ChatGPT。
 
 ### V2.6.1 更新介绍
 
@@ -290,7 +298,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.6.1 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.6.2 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -343,6 +351,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.6.2 Update
+
+V2.6.2 supports both outer paths used by the unified ChatGPT/Codex app: `/Applications/Codex.app` and `/Applications/ChatGPT.app`, plus user-local `~/Applications`. Detection checks the bundle identity or bundled Codex executable and will not mistake `com.openai.chat` ChatGPT Classic for Codex. Open, close, launch verification, and Today Usage all follow the detected app. An upgraded installation may keep the outer `Codex.app` name even when its internal display name and executable are already ChatGPT.
 
 ### V2.6.1 Update
 
@@ -454,7 +466,7 @@ System requirement: macOS 14 or later.
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.6.1, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.6.2, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

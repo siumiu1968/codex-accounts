@@ -1,4 +1,4 @@
-# Codex Accounts 2.6.1 Promotion Kit
+# Codex Accounts 2.6.2 Promotion Kit
 
 This file gives you ready-to-post copy for GitHub, forums, Reddit, X, V2EX, and Hacker News. Edit the repo URL before publishing.
 
@@ -27,13 +27,14 @@ Codex Accounts: a small macOS helper for switching between multiple Codex/OpenAI
 Body:
 
 ```text
-I built Codex Accounts 2.6.1, a small macOS helper app for people who use multiple Codex/OpenAI accounts.
+I built Codex Accounts 2.6.2, a small macOS helper app for people who use multiple Codex/OpenAI accounts.
 
 It creates separate local Codex profiles, then opens the official Codex desktop app with a separate CODEX_HOME and user-data-dir for each profile. That means each profile can stay logged into a different account.
 
 Main features:
 - Create unlimited local profiles
 - Open, close, rename, reveal, archive, and delete profiles
+- Auto-detect the unified app as either Codex.app or ChatGPT.app without mistaking ChatGPT Classic for Codex
 - Reliable profile launch with process verification and actionable errors
 - Separate login state per profile
 - Automatic or on-demand local memory, rules, and plugin-setting sync without blocking profile launch
@@ -63,13 +64,14 @@ Codex Accounts：macOS 上管理多個 Codex/OpenAI 帳戶嘅小工具
 內文：
 
 ```text
-我整咗 Codex Accounts 2.6.1，主要解決成日切換 Codex/OpenAI 帳戶要登入登出嘅問題。
+我整咗 Codex Accounts 2.6.2，主要解決成日切換 Codex/OpenAI 帳戶要登入登出嘅問題。
 
 Codex Accounts 會為每個 profile 建立獨立嘅 CODEX_HOME 同 Electron user-data-dir，然後用官方 Codex desktop app 開新視窗。所以每個 profile 可以登入唔同帳戶。
 
 功能：
 - 新增多個 profile
 - 打開、關閉、改名、顯示資料夾、封存、刪除 profile
+- 自動識別 Codex.app／ChatGPT.app，同時避免將 ChatGPT Classic 當成 Codex
 - 打開 Profile 會驗證 Codex 真正啟動，失敗時顯示原因
 - 每個 profile 保留獨立登入狀態
 - 自動或手動同步本機記憶、rules 同外掛設定，唔會阻塞 Profile 啟動
@@ -91,11 +93,11 @@ https://github.com/siumiu1968/codex-accounts
 ## X / Twitter Post
 
 ```text
-Built Codex Accounts 2.6.1 for macOS.
+Built Codex Accounts 2.6.2 for macOS.
 
 It lets you keep separate Codex desktop profiles for different OpenAI accounts, so you can switch accounts without constantly logging out.
 
-Separate CODEX_HOME, separate app data, reliable verified launches, per-profile private local chats, explicit quota/auth states, accurate Today Usage, a three-level Keep Awake control, and 8 themes.
+Separate CODEX_HOME, separate app data, Codex.app/ChatGPT.app auto-detection, reliable verified launches, per-profile private local chats, accurate Today Usage, a three-level Keep Awake control, and 8 themes.
 
 GitHub: https://github.com/siumiu1968/codex-accounts
 ```

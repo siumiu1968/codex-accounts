@@ -14,6 +14,90 @@ touch "$TMP_ROOT/accounts/.deleted-account2"
 export SHARED_HISTORY_ROOT="$TMP_ROOT/shared-history"
 export SHARED_MEMORY_DIR="$TMP_ROOT/shared-memory"
 
+make_fake_desktop_app() {
+  local app_path="$1"
+  local bundle_identifier="$2"
+  mkdir -p "$app_path/Contents/MacOS"
+  cat > "$app_path/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>$bundle_identifier</string>
+  <key>CFBundleExecutable</key>
+  <string>ChatGPT</string>
+</dict>
+</plist>
+PLIST
+  printf '%s\n' '#!/bin/zsh' 'exit 0' > "$app_path/Contents/MacOS/ChatGPT"
+  chmod +x "$app_path/Contents/MacOS/ChatGPT"
+}
+
+DETECTION_CLASSIC_APPS="$TMP_ROOT/detection-classic-apps"
+DETECTION_SYSTEM_APPS="$TMP_ROOT/detection-system-apps"
+DETECTION_USER_APPS="$TMP_ROOT/detection-user-apps"
+DETECTION_EMPTY_APPS="$TMP_ROOT/detection-empty-apps"
+mkdir -p "$DETECTION_CLASSIC_APPS" "$DETECTION_SYSTEM_APPS" "$DETECTION_USER_APPS" "$DETECTION_EMPTY_APPS"
+
+# ChatGPT Classic is a different bundle and must never be mistaken for the
+# unified ChatGPT/Codex app merely because its outer bundle is ChatGPT.app.
+make_fake_desktop_app "$DETECTION_CLASSIC_APPS/ChatGPT.app" "com.openai.chat"
+mkdir -p "$DETECTION_CLASSIC_APPS/ChatGPT.app/Contents/Resources"
+printf '%s\n' '#!/bin/zsh' 'exit 0' > "$DETECTION_CLASSIC_APPS/ChatGPT.app/Contents/Resources/codex"
+chmod +x "$DETECTION_CLASSIC_APPS/ChatGPT.app/Contents/Resources/codex"
+classic_detection_output="$(
+  CODEX_APP='' \
+  CODEX_SYSTEM_APPLICATIONS_DIR="$DETECTION_CLASSIC_APPS" \
+  CODEX_USER_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
+  "$HELPER" codex-app-path 2>&1 || true
+)"
+[[ "$classic_detection_output" == *"Compatible Codex/ChatGPT app not found."* ]]
+[[ "$classic_detection_output" == *"ChatGPT Classic is installed"* ]]
+classic_override_output="$(
+  CODEX_APP="$DETECTION_CLASSIC_APPS/ChatGPT.app" \
+  CODEX_SYSTEM_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
+  CODEX_USER_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
+  "$HELPER" codex-app-path 2>&1 || true
+)"
+[[ "$classic_override_output" == *"Compatible Codex/ChatGPT app not found."* ]]
+[[ "$classic_override_output" == *"ChatGPT Classic is installed"* ]]
+
+# A clean install can use ChatGPT.app while keeping the Codex bundle identity.
+make_fake_desktop_app "$DETECTION_SYSTEM_APPS/ChatGPT.app" "com.openai.codex"
+[[ "$(
+  CODEX_APP='' \
+  CODEX_SYSTEM_APPLICATIONS_DIR="$DETECTION_SYSTEM_APPS" \
+  CODEX_USER_APPLICATIONS_DIR="$DETECTION_USER_APPS" \
+  "$HELPER" codex-app-path
+)" == "$DETECTION_SYSTEM_APPS/ChatGPT.app" ]]
+
+# Preserve the existing Codex.app path when both compatible outer names exist.
+make_fake_desktop_app "$DETECTION_SYSTEM_APPS/Codex.app" "com.openai.codex"
+[[ "$(
+  CODEX_APP='' \
+  CODEX_SYSTEM_APPLICATIONS_DIR="$DETECTION_SYSTEM_APPS" \
+  CODEX_USER_APPLICATIONS_DIR="$DETECTION_USER_APPS" \
+  "$HELPER" codex-app-path
+)" == "$DETECTION_SYSTEM_APPS/Codex.app" ]]
+
+# User-local Applications is a supported fallback, while an explicit override
+# remains authoritative for development and non-standard installations.
+make_fake_desktop_app "$DETECTION_USER_APPS/ChatGPT.app" "com.openai.codex"
+[[ "$(
+  CODEX_APP='' \
+  CODEX_SYSTEM_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
+  CODEX_USER_APPLICATIONS_DIR="$DETECTION_USER_APPS" \
+  "$HELPER" codex-app-path
+)" == "$DETECTION_USER_APPS/ChatGPT.app" ]]
+make_fake_desktop_app "$TMP_ROOT/CustomDesktop.app" "example.custom.desktop"
+[[ "$(
+  CODEX_APP="$TMP_ROOT/CustomDesktop.app" \
+  CODEX_SYSTEM_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
+  CODEX_USER_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
+  "$HELPER" codex-app-path
+)" == "$TMP_ROOT/CustomDesktop.app" ]]
+
 python3 - "$PROFILE_HOME" <<'PY'
 import json
 import sqlite3
@@ -534,7 +618,19 @@ assert 'proxy_injection_enabled() {' in helper
 assert 'if proxy_injection_enabled; then' in launch_match.group(1)
 assert 'launch_args+=(--proxy-server="$CODEX_PROXY_URL")' in launch_match.group(1)
 assert '--args "${launch_args[@]}"' in launch_match.group(1)
-assert helper.count('$CODEX_APP/Contents/MacOS/ChatGPT') >= 2
+assert 'CODEX_APP_CANDIDATES=(' in helper
+assert '"$CODEX_SYSTEM_APPLICATIONS_DIR/Codex.app"' in helper
+assert '"$CODEX_SYSTEM_APPLICATIONS_DIR/ChatGPT.app"' in helper
+assert '"$CODEX_USER_APPLICATIONS_DIR/Codex.app"' in helper
+assert '"$CODEX_USER_APPLICATIONS_DIR/ChatGPT.app"' in helper
+assert '[[ "$bundle_identifier" == "com.openai.codex" || -x "$app_path/Contents/Resources/codex" ]]' in helper
+assert '[[ "$bundle_identifier" != "com.openai.chat" ]] || return 1' in helper
+assert 'ChatGPT Classic is installed, but it cannot open isolated Codex profiles.' in helper
+assert helper.count('is_codex_gui_process_args "$args" || continue') == 3
+codex_process_match = re.search(r"is_codex_gui_process_args\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert codex_process_match
+assert '"$app_path/Contents/MacOS/ChatGPT"' in codex_process_match.group(1)
+assert '"$app_path/Contents/MacOS/Codex"' in codex_process_match.group(1)
 assert 'CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"' in helper
 assert 'CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"' in helper
 assert helper.count('CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \\\n    repair_compacted_image_payloads_for_home') >= 2
@@ -630,8 +726,14 @@ usage_reconcile_match = re.search(
     flags=re.DOTALL,
 )
 assert usage_reconcile_match
-assert 'command.contains("/Applications/Codex.app/Contents/MacOS/ChatGPT")' in usage_reconcile_match.group(1)
-assert 'command.contains("/Applications/Codex.app/Contents/MacOS/Codex")' in usage_reconcile_match.group(1)
+assert 'private func supportedCodexGUIExecutablePaths() -> [String]' in swift
+assert '"/Applications/Codex.app"' in swift
+assert '"/Applications/ChatGPT.app"' in swift
+assert 'bundle?.bundleIdentifier == "com.openai.codex"' in swift
+assert 'guard bundle?.bundleIdentifier != "com.openai.chat" else {' in swift
+assert 'let codexExecutablePaths = supportedCodexGUIExecutablePaths()' in usage_reconcile_match.group(1)
+assert 'codexExecutablePaths.contains { command.contains($0) }' in usage_reconcile_match.group(1)
+assert 'command.contains("/Applications/Codex.app/Contents/MacOS/ChatGPT")' not in swift
 assert '--user-data-dir=' not in usage_reconcile_match.group(1)
 assert 'enum KeepAwakeMode: Int, CaseIterable, Identifiable' in swift
 assert 'case clamshell = 2' in swift
@@ -653,7 +755,7 @@ assert 'private func quotaAuthenticationStatus(_ profile: CodexProfile, compact:
 assert 'tr("打開重新登入", "Open to sign in again")' in swift
 assert 'private func quotaUnavailableStatus(compact: Bool) -> some View' in swift
 assert 'tr("暫時未能取得用量", "Usage is temporarily unavailable")' in swift
-assert '"version":"2.6.1"' in helper
+assert '"version":"2.6.2"' in helper
 
 theme_match = re.search(
     r'private var themeOptions: \[AppThemeOption\] \{(.*?)\n    \}\n\n    private func canonicalThemeID',
@@ -949,8 +1051,8 @@ while IFS= read -r private_header_file; do
   [[ ! -e "$private_header_file" ]]
 done < "$HEADER_PATH_LOG"
 
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.1" ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "61" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.2" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "62" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "14.0" ]]
 
 echo "✅ Codex Accounts regression checks passed"
