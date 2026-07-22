@@ -161,7 +161,47 @@ ALIYUN_CODING_PLAN_BRIDGE_VERSION="${ALIYUN_CODING_PLAN_BRIDGE_VERSION:-0.1.2}"
 ALIYUN_CODING_PLAN_BASE_URL="${ALIYUN_CODING_PLAN_BASE_URL:-https://coding.dashscope.aliyuncs.com/v1}"
 CODEX_BUNDLED_NODE_BIN="${CODEX_BUNDLED_NODE_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
 CODEX_BUNDLED_NPM_BIN="${CODEX_BUNDLED_NPM_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/npm}"
+OPENCODEX_PACKAGE="@bitkyc08/opencodex"
+OPENCODEX_VERSION="2.7.33"
+OPENCODEX_LAB_ACCOUNT="opencodex-lab"
+OPENCODEX_LAB_CODEX_HOME="${OPENCODEX_LAB_CODEX_HOME:-$ACCOUNTS_ROOT/$OPENCODEX_LAB_ACCOUNT}"
+OPENCODEX_LAB_APP_DATA="${OPENCODEX_LAB_APP_DATA:-$APP_DATA_ROOT/$OPENCODEX_LAB_ACCOUNT}"
+OPENCODEX_ROOT="${OPENCODEX_ROOT:-$APP_DATA_ROOT/OpenCodex}"
+OPENCODEX_STATE_DIR="${OPENCODEX_STATE_DIR:-$OPENCODEX_ROOT/state}"
+OPENCODEX_NPM_PREFIX="${OPENCODEX_NPM_PREFIX:-$OPENCODEX_ROOT/runtime}"
+OPENCODEX_FAKE_HOME="${OPENCODEX_FAKE_HOME:-$OPENCODEX_ROOT/home}"
+OPENCODEX_LOG_DIR="${OPENCODEX_LOG_DIR:-$OPENCODEX_ROOT/logs}"
+OPENCODEX_BIN="${OPENCODEX_BIN:-$OPENCODEX_NPM_PREFIX/node_modules/.bin/ocx}"
+OPENCODEX_PACKAGE_JSON="${OPENCODEX_PACKAGE_JSON:-$OPENCODEX_NPM_PREFIX/node_modules/@bitkyc08/opencodex/package.json}"
+OPENCODEX_PACKAGE_ROOT="${OPENCODEX_PACKAGE_ROOT:-${OPENCODEX_PACKAGE_JSON:h}}"
+OPENCODEX_CURL_BIN="${OPENCODEX_CURL_BIN:-/usr/bin/curl}"
+OPENCODEX_OPEN_BIN="${OPENCODEX_OPEN_BIN:-/usr/bin/open}"
+OPENCODEX_START_MAX_WAITS="${OPENCODEX_START_MAX_WAITS:-100}"
+OPENCODEX_START_WAIT_SECONDS="${OPENCODEX_START_WAIT_SECONDS:-0.1}"
+OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-200}"
+OPENCODEX_SYNC_WAIT_SECONDS="${OPENCODEX_SYNC_WAIT_SECONDS:-0.1}"
+OPENCODEX_FORCE_SYNC="${OPENCODEX_FORCE_SYNC:-0}"
+OPENCODEX_OWNERSHIP_MARKER=".codex-accounts-opencodex-lab"
+OPENCODEX_OWNERSHIP_VALUE="managed-by-codex-accounts-opencodex-lab-v1"
+OPENCODEX_SHARED_CATALOG="$OPENCODEX_LAB_CODEX_HOME/opencodex-catalog.json"
+OPENCODEX_CATALOG_FINGERPRINT="$OPENCODEX_STATE_DIR/catalog-verification.json"
+OPENCODEX_CATALOG_FINGERPRINT_OWNER="managed-by-codex-accounts-opencodex-catalog-v1"
+OPENCODEX_CATALOG_FINGERPRINT_MAX_AGE_SECONDS="${OPENCODEX_CATALOG_FINGERPRINT_MAX_AGE_SECONDS:-86400}"
+OPENCODEX_PROFILE_ROUTE_MARKER=".codex-accounts-opencodex-route.json"
+OPENCODEX_PROFILE_ROUTE_OWNER="managed-by-codex-accounts-opencodex-route-v1"
+OPENCODEX_CLI_WRAPPER_DIR="$OPENCODEX_ROOT/bin"
+OPENCODEX_CLI_WRAPPER="$OPENCODEX_CLI_WRAPPER_DIR/codex-opencodex-router"
+OPENCODEX_CLI_WRAPPER_OWNER="managed-by-codex-accounts-opencodex-cli-route-v1"
 SCRIPT_DIR="${0:A:h}"
+OPENCODEX_RUNTIME_SEED_DIR="${OPENCODEX_RUNTIME_SEED_DIR:-}"
+OPENCODEX_RUNTIME_SEED_HELPER="${OPENCODEX_RUNTIME_SEED_HELPER:-$SCRIPT_DIR/opencodex_runtime_seed.py}"
+OPENCODEX_RUNTIME_ARCH="${OPENCODEX_RUNTIME_ARCH:-$(uname -m)}"
+OPENCODEX_HK_GUI_OVERLAY_DIR="${OPENCODEX_HK_GUI_OVERLAY_DIR:-}"
+OPENCODEX_HK_GUI_INDEX_SHA256="6378a09aedf2ee6e884e1eddc40620c335a0039bdc9ab59c7348b26a3c39b29c"
+OPENCODEX_HK_GUI_JS_NAME="index-Cgt7VoIY.js"
+OPENCODEX_HK_GUI_JS_SHA256="c149306ad9aeb9aeaa07f7bd7f117bd02b0c0d261482a025389859196f771c08"
+OPENCODEX_HK_GUI_CSS_NAME="index-D6Fcl4yM.css"
+OPENCODEX_HK_GUI_CSS_SHA256="bfd8420ec02a19a72e07be650f2da8fb256fbc2390af047b75b38ebf1ae3f742"
 CODEX_SHARE_HELPER="${CODEX_SHARE_HELPER:-$SCRIPT_DIR/codex_share_package.py}"
 
 SYNC_ITEMS=(
@@ -199,6 +239,14 @@ Usage:
   scripts/codex_multi_account.zsh list-accounts
   scripts/codex_multi_account.zsh account-status <account-name>
   scripts/codex_multi_account.zsh list-accounts-status
+  scripts/codex_multi_account.zsh opencodex-status
+  scripts/codex_multi_account.zsh opencodex-install
+  scripts/codex_multi_account.zsh opencodex-start
+  scripts/codex_multi_account.zsh opencodex-stop
+  scripts/codex_multi_account.zsh opencodex-restore
+  scripts/codex_multi_account.zsh opencodex-dashboard
+  scripts/codex_multi_account.zsh opencodex-launch
+  scripts/codex_multi_account.zsh opencodex-enable-all-profiles
   scripts/codex_multi_account.zsh delete-account <account-name>
   scripts/codex_multi_account.zsh link-history <account-name>
   scripts/codex_multi_account.zsh unlink-history <account-name>
@@ -227,6 +275,14 @@ Environment overrides:
   CODEX_PROXY_URL=http://127.0.0.1:7897
   CODEX_INJECT_PROXY_ENV=1
   CODEX_CLONE_PRIMARY_ON_LAUNCH=0
+
+OpenCodex Lab:
+  - Uses only $HOME/.codex-accounts/opencodex-lab for Codex data.
+  - Uses only "$HOME/Library/Application Support/Codex Accounts/OpenCodex/state"
+    for OpenCodex state, with a managed npm runtime and fake HOME beside it.
+  - Version is pinned to @bitkyc08/opencodex@2.7.33.
+  - It never installs an OpenCodex service or Codex shim.
+  - The dashboard is loopback-only; no remote management token is created.
 
 Notes:
   - Login separately inside the second Codex window.
@@ -424,6 +480,7 @@ resolve_node_bin() {
   local candidate
   for candidate in \
     "${NODE_BIN:-}" \
+    "$CODEX_APP/Contents/Resources/cua_node/bin/node" \
     "$CODEX_BUNDLED_NODE_BIN" \
     "/usr/local/bin/node" \
     "/opt/homebrew/bin/node"; do
@@ -446,6 +503,979 @@ resolve_npm_bin() {
     return 0
   done
   command -v npm 2>/dev/null || return 1
+}
+
+opencodex_managed_path() {
+  local node_bin
+  node_bin="$(resolve_node_bin 2>/dev/null || true)"
+  [[ -n "$node_bin" ]] || return 1
+  printf '%s\n' "$OPENCODEX_NPM_PREFIX/node_modules/.bin:${node_bin:h}:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+}
+
+run_opencodex_lab() {
+  local managed_path
+  # Providers may reference AI_API_KEY in OpenCodex's local state. Load the
+  # existing protected Coding Plan secret into this process only; never copy it
+  # into another Profile or the bundled release.
+  load_aliyun_coding_plan_key
+  managed_path="$(opencodex_managed_path)" || {
+    echo "node is required to run OpenCodex Lab." >&2
+    return 1
+  }
+  /usr/bin/env \
+    HOME="$OPENCODEX_FAKE_HOME" \
+    CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME" \
+    OPENCODEX_HOME="$OPENCODEX_STATE_DIR" \
+    NPM_CONFIG_PREFIX="$OPENCODEX_NPM_PREFIX" \
+    npm_config_prefix="$OPENCODEX_NPM_PREFIX" \
+    npm_config_cache="$OPENCODEX_ROOT/npm-cache" \
+    PATH="$managed_path" \
+    "$@"
+}
+
+validate_opencodex_lab_paths() {
+  OPENCODEX_VALIDATE_ACCOUNTS_ROOT="$ACCOUNTS_ROOT" \
+  OPENCODEX_VALIDATE_APP_DATA_ROOT="$APP_DATA_ROOT" \
+  OPENCODEX_VALIDATE_LAB_HOME="$OPENCODEX_LAB_CODEX_HOME" \
+  OPENCODEX_VALIDATE_LAB_APP_DATA="$OPENCODEX_LAB_APP_DATA" \
+  OPENCODEX_VALIDATE_ROOT="$OPENCODEX_ROOT" \
+  OPENCODEX_VALIDATE_STATE="$OPENCODEX_STATE_DIR" \
+  OPENCODEX_VALIDATE_RUNTIME="$OPENCODEX_NPM_PREFIX" \
+  OPENCODEX_VALIDATE_FAKE_HOME="$OPENCODEX_FAKE_HOME" \
+  OPENCODEX_VALIDATE_LOGS="$OPENCODEX_LOG_DIR" \
+  python3 - <<'PY'
+import os
+from pathlib import Path
+
+accounts_root = Path(os.environ["OPENCODEX_VALIDATE_ACCOUNTS_ROOT"]).expanduser().resolve(strict=False)
+app_data_root = Path(os.environ["OPENCODEX_VALIDATE_APP_DATA_ROOT"]).expanduser().resolve(strict=False)
+lab_home = Path(os.environ["OPENCODEX_VALIDATE_LAB_HOME"]).expanduser()
+lab_app_data = Path(os.environ["OPENCODEX_VALIDATE_LAB_APP_DATA"]).expanduser()
+managed_root = Path(os.environ["OPENCODEX_VALIDATE_ROOT"]).expanduser()
+
+expected_lab = accounts_root / "opencodex-lab"
+expected_lab_app_data = app_data_root / "opencodex-lab"
+expected_root = app_data_root / "OpenCodex"
+if lab_home.resolve(strict=False) != expected_lab:
+    raise SystemExit(f"Refusing unexpected OpenCodex Lab path: {lab_home}")
+if lab_app_data.resolve(strict=False) != expected_lab_app_data:
+    raise SystemExit(f"Refusing unexpected OpenCodex Lab app-data path: {lab_app_data}")
+if managed_root.resolve(strict=False) != expected_root:
+    raise SystemExit(f"Refusing unexpected OpenCodex managed root: {managed_root}")
+
+managed_children = [
+    Path(os.environ["OPENCODEX_VALIDATE_STATE"]).expanduser(),
+    Path(os.environ["OPENCODEX_VALIDATE_RUNTIME"]).expanduser(),
+    Path(os.environ["OPENCODEX_VALIDATE_FAKE_HOME"]).expanduser(),
+    Path(os.environ["OPENCODEX_VALIDATE_LOGS"]).expanduser(),
+]
+for candidate in [lab_home, lab_app_data, managed_root, *managed_children]:
+    if candidate.is_symlink():
+        raise SystemExit(f"Refusing OpenCodex symlink path: {candidate}")
+for candidate in managed_children:
+    try:
+        candidate.resolve(strict=False).relative_to(expected_root)
+    except ValueError:
+        raise SystemExit(f"Refusing OpenCodex path outside managed root: {candidate}")
+PY
+}
+
+claim_opencodex_managed_dir() {
+  local managed_dir="$1"
+  local marker="$managed_dir/$OPENCODEX_OWNERSHIP_MARKER"
+  local existing_value=""
+
+  if [[ -L "$managed_dir" || -L "$marker" ]]; then
+    echo "Refusing OpenCodex symlink ownership path: $managed_dir" >&2
+    return 1
+  fi
+  mkdir -p "$managed_dir"
+  if [[ -f "$marker" ]]; then
+    IFS= read -r existing_value < "$marker" || true
+    if [[ "$existing_value" == "$OPENCODEX_OWNERSHIP_VALUE" ]]; then
+      return 0
+    fi
+    echo "OpenCodex ownership marker is invalid: $marker" >&2
+    return 1
+  fi
+  if find "$managed_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+    echo "Refusing to adopt an existing unowned OpenCodex directory: $managed_dir" >&2
+    return 1
+  fi
+
+  local tmp_marker="${marker}.tmp.$$"
+  printf '%s\n' "$OPENCODEX_OWNERSHIP_VALUE" > "$tmp_marker"
+  chmod 600 "$tmp_marker"
+  mv "$tmp_marker" "$marker"
+}
+
+prepare_opencodex_lab_dirs() {
+  local home_was_missing=0
+  [[ -d "$OPENCODEX_LAB_CODEX_HOME" ]] || home_was_missing=1
+
+  validate_opencodex_lab_paths
+  ensure_dirs
+  claim_opencodex_managed_dir "$OPENCODEX_LAB_CODEX_HOME"
+  claim_opencodex_managed_dir "$OPENCODEX_LAB_APP_DATA"
+  claim_opencodex_managed_dir "$OPENCODEX_ROOT"
+  mkdir -p \
+    "$OPENCODEX_LAB_CODEX_HOME/sessions" \
+    "$OPENCODEX_LAB_CODEX_HOME/shell_snapshots" \
+    "$OPENCODEX_STATE_DIR" \
+    "$OPENCODEX_FAKE_HOME" \
+    "$OPENCODEX_LOG_DIR" \
+    "$OPENCODEX_ROOT/npm-cache"
+  chmod 700 "$OPENCODEX_STATE_DIR" "$OPENCODEX_FAKE_HOME" "$OPENCODEX_LOG_DIR" 2>/dev/null || true
+
+  if (( home_was_missing == 1 )); then
+    set_history_mode_for_home "$OPENCODEX_LAB_CODEX_HOME" private
+    : > "$OPENCODEX_LAB_CODEX_HOME/session_index.jsonl"
+  fi
+
+  OPENCODEX_CODEX_CONFIG="$OPENCODEX_LAB_CODEX_HOME/config.toml" python3 - <<'PY'
+import os
+import tempfile
+from pathlib import Path
+
+path = Path(os.environ["OPENCODEX_CODEX_CONFIG"])
+if path.exists():
+    raise SystemExit(0)
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp_name = tempfile.mkstemp(prefix=".config.toml.", suffix=".tmp", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("[features]\nfast_mode = true\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, 0o600)
+    if path.exists():
+        os.unlink(tmp_name)
+    else:
+        os.replace(tmp_name, path)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+write_safe_opencodex_lab_config() {
+  OPENCODEX_CONFIG_PATH="$OPENCODEX_STATE_DIR/config.json" python3 - <<'PY'
+import json
+import os
+import tempfile
+from pathlib import Path
+
+path = Path(os.environ["OPENCODEX_CONFIG_PATH"])
+path.parent.mkdir(parents=True, exist_ok=True)
+if path.is_symlink():
+    raise SystemExit(f"Refusing OpenCodex config symlink: {path}")
+
+config = {}
+if path.exists():
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"OpenCodex config is invalid; refusing to overwrite it: {exc}")
+    if not isinstance(parsed, dict):
+        raise SystemExit("OpenCodex config must be a JSON object; refusing to overwrite it")
+    config = parsed
+
+providers = config.get("providers")
+if not isinstance(providers, dict):
+    providers = {}
+openai = providers.get("openai")
+if not isinstance(openai, dict):
+    openai = {}
+openai.update({
+    "adapter": "openai-responses",
+    "baseUrl": "https://chatgpt.com/backend-api/codex",
+    "authMode": "forward",
+    "codexAccountMode": "direct",
+})
+providers["openai"] = openai
+config["providers"] = providers
+if not isinstance(config.get("defaultProvider"), str) or config["defaultProvider"] not in providers:
+    config["defaultProvider"] = "openai"
+port = config.get("port")
+if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+    config["port"] = 10100
+config["hostname"] = "127.0.0.1"
+config["openaiProviderTierVersion"] = 2
+config["syncResumeHistory"] = False
+config["codexAutoStart"] = False
+config.setdefault("websockets", False)
+claude = config.get("claudeCode")
+if not isinstance(claude, dict):
+    claude = {}
+claude["enabled"] = False
+claude["systemEnv"] = False
+config["claudeCode"] = claude
+
+fd, tmp_name = tempfile.mkstemp(prefix=".config.json.", suffix=".tmp", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, 0o600)
+    os.replace(tmp_name, path)
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+prepare_opencodex_lab() {
+  prepare_opencodex_lab_dirs
+  write_safe_opencodex_lab_config
+}
+
+opencodex_installed_version() {
+  validate_opencodex_lab_paths >/dev/null 2>&1 || return 1
+  [[ -x "$OPENCODEX_BIN" && -f "$OPENCODEX_PACKAGE_JSON" ]] || return 1
+  python3 - "$OPENCODEX_PACKAGE_JSON" <<'PY' 2>/dev/null
+import json
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("version")
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit(1)
+print(value.strip())
+PY
+}
+
+require_opencodex_lab_install() {
+  local installed_version
+  installed_version="$(opencodex_installed_version 2>/dev/null || true)"
+  if [[ "$installed_version" != "$OPENCODEX_VERSION" ]]; then
+    echo "OpenCodex Lab requires $OPENCODEX_PACKAGE@$OPENCODEX_VERSION; run opencodex-install first." >&2
+    return 1
+  fi
+}
+
+opencodex_hk_gui_overlay_dir() {
+  local candidate
+  if [[ -n "$OPENCODEX_HK_GUI_OVERLAY_DIR" ]]; then
+    [[ -d "$OPENCODEX_HK_GUI_OVERLAY_DIR" && ! -L "$OPENCODEX_HK_GUI_OVERLAY_DIR" ]] || return 1
+    printf '%s\n' "$OPENCODEX_HK_GUI_OVERLAY_DIR"
+    return 0
+  fi
+  for candidate in \
+    "$SCRIPT_DIR/opencodex-zh-hk/$OPENCODEX_VERSION" \
+    "$SCRIPT_DIR/../resources/opencodex-zh-hk/$OPENCODEX_VERSION"; do
+    [[ -d "$candidate" && ! -L "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+opencodex_sha256_matches() {
+  local path="$1"
+  local expected="$2"
+  local actual
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  actual="$(/usr/bin/shasum -a 256 "$path" 2>/dev/null | /usr/bin/awk '{print $1}')"
+  [[ "$actual" == "$expected" ]]
+}
+
+opencodex_runtime_seed_dir() {
+  local candidate
+  if [[ -n "$OPENCODEX_RUNTIME_SEED_DIR" ]]; then
+    [[ -d "$OPENCODEX_RUNTIME_SEED_DIR" && ! -L "$OPENCODEX_RUNTIME_SEED_DIR" ]] || return 1
+    printf '%s\n' "$OPENCODEX_RUNTIME_SEED_DIR"
+    return 0
+  fi
+  for candidate in \
+    "$SCRIPT_DIR/opencodex-runtime/$OPENCODEX_VERSION/$OPENCODEX_RUNTIME_ARCH" \
+    "$SCRIPT_DIR/../resources/opencodex-runtime/$OPENCODEX_VERSION/$OPENCODEX_RUNTIME_ARCH"; do
+    [[ -d "$candidate" && ! -L "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+opencodex_runtime_matches_seed() {
+  local seed_dir="$1"
+  [[ -f "$OPENCODEX_RUNTIME_SEED_HELPER" && ! -L "$OPENCODEX_RUNTIME_SEED_HELPER" ]] || {
+    echo "OpenCodex runtime seed verifier is missing." >&2
+    return 1
+  }
+  python3 "$OPENCODEX_RUNTIME_SEED_HELPER" validate-current \
+    --seed-dir "$seed_dir" \
+    --runtime "$OPENCODEX_NPM_PREFIX" \
+    --version "$OPENCODEX_VERSION" \
+    --arch "$OPENCODEX_RUNTIME_ARCH" >/dev/null
+}
+
+opencodex_install_runtime_seed() {
+  local seed_dir="$1"
+  validate_opencodex_lab_paths || return 1
+  [[ -f "$OPENCODEX_RUNTIME_SEED_HELPER" && ! -L "$OPENCODEX_RUNTIME_SEED_HELPER" ]] || {
+    echo "OpenCodex runtime seed verifier is missing." >&2
+    return 1
+  }
+  python3 "$OPENCODEX_RUNTIME_SEED_HELPER" install \
+    --seed-dir "$seed_dir" \
+    --runtime "$OPENCODEX_NPM_PREFIX" \
+    --managed-root "$OPENCODEX_ROOT" \
+    --version "$OPENCODEX_VERSION" \
+    --arch "$OPENCODEX_RUNTIME_ARCH" >/dev/null
+}
+
+validate_opencodex_gui_target() {
+  OPENCODEX_VALIDATE_PACKAGE_ROOT="$OPENCODEX_PACKAGE_ROOT" \
+  OPENCODEX_VALIDATE_PACKAGE_JSON="$OPENCODEX_PACKAGE_JSON" \
+  OPENCODEX_VALIDATE_PREFIX="$OPENCODEX_NPM_PREFIX" \
+  python3 - <<'PY'
+import os
+from pathlib import Path
+
+prefix = Path(os.environ["OPENCODEX_VALIDATE_PREFIX"]).expanduser().resolve(strict=False)
+package_root = Path(os.environ["OPENCODEX_VALIDATE_PACKAGE_ROOT"]).expanduser()
+package_json = Path(os.environ["OPENCODEX_VALIDATE_PACKAGE_JSON"]).expanduser()
+expected_root = prefix / "node_modules" / "@bitkyc08" / "opencodex"
+if package_root.resolve(strict=False) != expected_root.resolve(strict=False):
+    raise SystemExit(f"Refusing unexpected OpenCodex package path: {package_root}")
+if package_json.resolve(strict=False) != (expected_root / "package.json").resolve(strict=False):
+    raise SystemExit(f"Refusing unexpected OpenCodex package metadata path: {package_json}")
+dist = package_root / "gui" / "dist"
+assets = dist / "assets"
+for candidate in (package_root, package_json, package_root / "gui", dist, assets):
+    if candidate.is_symlink():
+        raise SystemExit(f"Refusing OpenCodex GUI symlink path: {candidate}")
+if assets.exists():
+    try:
+        assets.resolve(strict=False).relative_to(dist.resolve(strict=False))
+    except ValueError:
+        raise SystemExit(f"Refusing OpenCodex assets path outside GUI dist: {assets}")
+PY
+}
+
+opencodex_hk_gui_is_current() {
+  local dist="$OPENCODEX_PACKAGE_ROOT/gui/dist"
+  validate_opencodex_gui_target >/dev/null 2>&1 || return 1
+  opencodex_sha256_matches "$dist/index.html" "$OPENCODEX_HK_GUI_INDEX_SHA256" || return 1
+  opencodex_sha256_matches "$dist/assets/$OPENCODEX_HK_GUI_JS_NAME" "$OPENCODEX_HK_GUI_JS_SHA256" || return 1
+  opencodex_sha256_matches "$dist/assets/$OPENCODEX_HK_GUI_CSS_NAME" "$OPENCODEX_HK_GUI_CSS_SHA256"
+}
+
+opencodex_apply_hk_gui() {
+  local overlay dist rel source target tmp expected
+  require_opencodex_lab_install || return 1
+  validate_opencodex_gui_target || return 1
+  overlay="$(opencodex_hk_gui_overlay_dir 2>/dev/null || true)"
+  if [[ -z "$overlay" ]]; then
+    echo "OpenCodex Hong Kong Chinese interface files are missing." >&2
+    return 1
+  fi
+
+  opencodex_sha256_matches "$overlay/index.html" "$OPENCODEX_HK_GUI_INDEX_SHA256" || {
+    echo "OpenCodex Hong Kong Chinese index verification failed." >&2
+    return 1
+  }
+  opencodex_sha256_matches "$overlay/assets/$OPENCODEX_HK_GUI_JS_NAME" "$OPENCODEX_HK_GUI_JS_SHA256" || {
+    echo "OpenCodex Hong Kong Chinese script verification failed." >&2
+    return 1
+  }
+  opencodex_sha256_matches "$overlay/assets/$OPENCODEX_HK_GUI_CSS_NAME" "$OPENCODEX_HK_GUI_CSS_SHA256" || {
+    echo "OpenCodex Hong Kong Chinese style verification failed." >&2
+    return 1
+  }
+
+  dist="$OPENCODEX_PACKAGE_ROOT/gui/dist"
+  mkdir -p "$dist/assets"
+  for rel expected in \
+    "index.html" "$OPENCODEX_HK_GUI_INDEX_SHA256" \
+    "assets/$OPENCODEX_HK_GUI_JS_NAME" "$OPENCODEX_HK_GUI_JS_SHA256" \
+    "assets/$OPENCODEX_HK_GUI_CSS_NAME" "$OPENCODEX_HK_GUI_CSS_SHA256"; do
+    source="$overlay/$rel"
+    target="$dist/$rel"
+    [[ ! -L "$target" ]] || {
+      echo "Refusing OpenCodex GUI symlink target: $target" >&2
+      return 1
+    }
+    tmp="${target}.codex-accounts.$$"
+    cp "$source" "$tmp"
+    chmod 644 "$tmp"
+    mv "$tmp" "$target"
+    opencodex_sha256_matches "$target" "$expected" || return 1
+  done
+  opencodex_hk_gui_is_current
+}
+
+opencodex_runtime_values() {
+  local runtime_file="$OPENCODEX_STATE_DIR/runtime-port.json"
+  validate_opencodex_lab_paths >/dev/null 2>&1 || return 1
+  [[ -f "$runtime_file" && ! -L "$runtime_file" ]] || return 1
+  python3 - "$runtime_file" <<'PY' 2>/dev/null
+import json
+import sys
+from pathlib import Path
+
+state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+pid = state.get("pid")
+port = state.get("port")
+hostname = state.get("hostname") or "127.0.0.1"
+if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+    raise SystemExit(1)
+if hostname not in {"127.0.0.1", "localhost", "::1", "[::1]"}:
+    raise SystemExit(1)
+print(f"{pid}\t{port}")
+PY
+}
+
+opencodex_running_url() {
+  local runtime_values pid port health
+  runtime_values="$(opencodex_runtime_values 2>/dev/null || true)"
+  [[ -n "$runtime_values" ]] || return 1
+  IFS=$'\t' read -r pid port <<< "$runtime_values"
+  [[ "$pid" == <-> && "$port" == <-> ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -x "$OPENCODEX_CURL_BIN" ]] || return 1
+  health="$($OPENCODEX_CURL_BIN --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null || true)"
+  [[ -n "$health" ]] || return 1
+  printf '%s' "$health" | python3 -c '
+import json, sys
+expected_pid, expected_port = map(int, sys.argv[1:3])
+expected_version = sys.argv[3]
+value = json.load(sys.stdin)
+ok = (
+    isinstance(value, dict)
+    and value.get("status") == "ok"
+    and value.get("service") == "opencodex"
+    and value.get("version") == expected_version
+    and value.get("pid") == expected_pid
+    and value.get("port") == expected_port
+)
+raise SystemExit(0 if ok else 1)
+' "$pid" "$port" "$OPENCODEX_VERSION" >/dev/null 2>&1 || return 1
+  printf 'http://127.0.0.1:%s/\n' "$port"
+}
+
+opencodex_verify_shared_catalog_structure() {
+  local url="$1"
+  local log_file="$OPENCODEX_LOG_DIR/opencodex.log"
+  local expected_base_url="${url%/}/v1"
+
+  OPENCODEX_VERIFY_CONFIG="$OPENCODEX_LAB_CODEX_HOME/config.toml" \
+    OPENCODEX_VERIFY_CATALOG="$OPENCODEX_SHARED_CATALOG" \
+    OPENCODEX_VERIFY_STATE_CONFIG="$OPENCODEX_STATE_DIR/config.json" \
+    OPENCODEX_VERIFY_BASE_URL="$expected_base_url" \
+    python3 - 2>>"$log_file" <<'PY'
+import ast
+import json
+import os
+import re
+from pathlib import Path
+
+config_path = Path(os.environ["OPENCODEX_VERIFY_CONFIG"]).expanduser()
+catalog_path = Path(os.environ["OPENCODEX_VERIFY_CATALOG"]).expanduser()
+state_config_path = Path(os.environ["OPENCODEX_VERIFY_STATE_CONFIG"]).expanduser()
+expected_base_url = os.environ["OPENCODEX_VERIFY_BASE_URL"]
+
+for path, label in (
+    (config_path, "config"),
+    (catalog_path, "catalog"),
+    (state_config_path, "state config"),
+):
+    if path.is_symlink():
+        raise SystemExit(f"Refusing OpenCodex {label} symlink: {path}")
+    if not path.is_file():
+        raise SystemExit(f"OpenCodex {label} is missing: {path}")
+if not catalog_path.is_absolute():
+    raise SystemExit("OpenCodex shared catalog path must be absolute")
+
+values: dict[str, list[str]] = {"openai_base_url": [], "model_catalog_json": []}
+for raw_line in config_path.read_text(encoding="utf-8-sig", errors="strict").splitlines():
+    stripped = raw_line.strip()
+    if stripped.startswith("["):
+        break
+    match = re.match(r"^(openai_base_url|model_catalog_json)\s*=\s*(.+?)\s*$", stripped)
+    if not match:
+        continue
+    raw_value = match.group(2)
+    try:
+        value = ast.literal_eval(raw_value)
+    except (SyntaxError, ValueError):
+        raise SystemExit(f"Invalid top-level OpenCodex setting: {match.group(1)}")
+    if not isinstance(value, str):
+        raise SystemExit(f"OpenCodex setting must be a string: {match.group(1)}")
+    values[match.group(1)].append(value)
+
+if values["openai_base_url"] != [expected_base_url]:
+    raise SystemExit("OpenCodex did not write the verified loopback openai_base_url")
+if values["model_catalog_json"] != [str(catalog_path)]:
+    raise SystemExit("OpenCodex did not write the shared model_catalog_json")
+
+catalog = json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+if not isinstance(catalog, dict) or not isinstance(catalog.get("models"), list) or not catalog["models"]:
+    raise SystemExit("OpenCodex shared model catalog is empty or invalid")
+catalog_namespaces = {
+    slug.split("/", 1)[0]
+    for model in catalog["models"]
+    if isinstance(model, dict)
+    and isinstance((slug := model.get("slug")), str)
+    and "/" in slug
+}
+
+state_config = json.loads(state_config_path.read_text(encoding="utf-8-sig"))
+providers = state_config.get("providers") if isinstance(state_config, dict) else None
+expected_namespaces = {
+    name
+    for name, provider in (providers.items() if isinstance(providers, dict) else ())
+    if name != "openai"
+    and isinstance(provider, dict)
+    and provider.get("disabled") is not True
+    and isinstance(provider.get("models"), list)
+    and provider["models"]
+}
+missing_namespaces = expected_namespaces - catalog_namespaces
+if missing_namespaces:
+    raise SystemExit(
+        "OpenCodex shared catalog is missing configured provider namespaces: "
+        + ", ".join(sorted(missing_namespaces))
+    )
+PY
+}
+
+opencodex_catalog_fingerprint() {
+  local mode="$1"
+  local freshness="${2:-fresh}"
+
+  OPENCODEX_FINGERPRINT_MODE="$mode" \
+  OPENCODEX_FINGERPRINT_FRESHNESS="$freshness" \
+  OPENCODEX_FINGERPRINT_PATH="$OPENCODEX_CATALOG_FINGERPRINT" \
+  OPENCODEX_FINGERPRINT_STATE_DIR="$OPENCODEX_STATE_DIR" \
+  OPENCODEX_FINGERPRINT_STATE_CONFIG="$OPENCODEX_STATE_DIR/config.json" \
+  OPENCODEX_FINGERPRINT_CATALOG="$OPENCODEX_SHARED_CATALOG" \
+  OPENCODEX_FINGERPRINT_OWNER="$OPENCODEX_CATALOG_FINGERPRINT_OWNER" \
+  OPENCODEX_FINGERPRINT_VERSION="$OPENCODEX_VERSION" \
+  OPENCODEX_FINGERPRINT_MAX_AGE="$OPENCODEX_CATALOG_FINGERPRINT_MAX_AGE_SECONDS" \
+  python3 - <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import re
+import stat
+import tempfile
+import time
+from pathlib import Path
+
+mode = os.environ["OPENCODEX_FINGERPRINT_MODE"]
+freshness = os.environ["OPENCODEX_FINGERPRINT_FRESHNESS"]
+fingerprint_path = Path(os.environ["OPENCODEX_FINGERPRINT_PATH"])
+state_dir = Path(os.environ["OPENCODEX_FINGERPRINT_STATE_DIR"])
+state_config_path = Path(os.environ["OPENCODEX_FINGERPRINT_STATE_CONFIG"])
+catalog_path = Path(os.environ["OPENCODEX_FINGERPRINT_CATALOG"])
+owner = os.environ["OPENCODEX_FINGERPRINT_OWNER"]
+version = os.environ["OPENCODEX_FINGERPRINT_VERSION"]
+max_age = int(os.environ["OPENCODEX_FINGERPRINT_MAX_AGE"])
+
+if mode not in {"write", "verify"} or freshness not in {"fresh", "allow-stale"}:
+    raise SystemExit("Invalid OpenCodex catalog fingerprint operation")
+if state_dir.is_symlink() or not state_dir.is_dir():
+    raise SystemExit(f"Refusing invalid OpenCodex state directory: {state_dir}")
+if fingerprint_path.parent != state_dir or fingerprint_path.name != "catalog-verification.json":
+    raise SystemExit("Refusing unexpected OpenCodex catalog fingerprint path")
+for path, label in ((state_config_path, "state config"), (catalog_path, "catalog")):
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"Refusing invalid OpenCodex {label}: {path}")
+if fingerprint_path.is_symlink():
+    raise SystemExit(f"Refusing OpenCodex catalog fingerprint symlink: {fingerprint_path}")
+if fingerprint_path.exists() and not fingerprint_path.is_file():
+    raise SystemExit(f"Refusing invalid OpenCodex catalog fingerprint: {fingerprint_path}")
+
+state = json.loads(state_config_path.read_text(encoding="utf-8-sig"))
+if not isinstance(state, dict):
+    raise SystemExit("OpenCodex state config must be an object")
+
+secret_names = {
+    "apikey", "accesskey", "accesstoken", "refreshtoken", "idtoken",
+    "authtoken", "oauthtoken", "sessiontoken", "bearer", "secret",
+    "clientsecret", "password", "cookie", "cookies", "credential",
+    "credentials", "authorization", "header", "headers", "customheaders",
+}
+
+def is_secret_key(key):
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return normalized in secret_names or normalized.endswith("apikey")
+
+def sanitize(value, key=""):
+    if is_secret_key(key):
+        return {"secret_present": bool(value), "secret_type": type(value).__name__}
+    if isinstance(value, dict):
+        return {str(k): sanitize(v, str(k)) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list):
+        return [sanitize(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise SystemExit(f"Unsupported OpenCodex state value type for {key}")
+
+# Exclude runtime/UI-only fields. All other current and future state keys are
+# fingerprinted so model definitions, provider URLs, selections, capabilities,
+# and enabled/disabled flags cannot silently reuse an older catalog.
+runtime_only = {"hostname", "port", "codexAutoStart", "syncResumeHistory"}
+catalog_inputs = {
+    key: sanitize(value, key)
+    for key, value in sorted(state.items())
+    if key not in runtime_only
+}
+inputs_bytes = json.dumps(
+    {"opencodex_version": version, "state": catalog_inputs},
+    ensure_ascii=True,
+    sort_keys=True,
+    separators=(",", ":"),
+    allow_nan=False,
+).encode("utf-8")
+expected_inputs_hash = hashlib.sha256(inputs_bytes).hexdigest()
+expected_catalog_hash = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+
+if mode == "verify":
+    if not fingerprint_path.is_file():
+        raise SystemExit("OpenCodex catalog fingerprint is missing")
+    if stat.S_IMODE(fingerprint_path.stat().st_mode) != 0o600:
+        raise SystemExit("OpenCodex catalog fingerprint permissions are invalid")
+    fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(fingerprint, dict):
+        raise SystemExit("OpenCodex catalog fingerprint must be an object")
+    if fingerprint.get("schema") != 1 or fingerprint.get("owner") != owner:
+        raise SystemExit("OpenCodex catalog fingerprint owner/schema mismatch")
+    if fingerprint.get("opencodex_version") != version:
+        raise SystemExit("OpenCodex catalog fingerprint version mismatch")
+    if not hmac.compare_digest(str(fingerprint.get("catalog_inputs_sha256", "")), expected_inputs_hash):
+        raise SystemExit("OpenCodex provider/model settings changed after catalog verification")
+    if not hmac.compare_digest(str(fingerprint.get("catalog_sha256", "")), expected_catalog_hash):
+        raise SystemExit("OpenCodex shared catalog changed after verification")
+    written_at = fingerprint.get("written_at")
+    if isinstance(written_at, bool) or not isinstance(written_at, (int, float)):
+        raise SystemExit("OpenCodex catalog fingerprint timestamp is invalid")
+    now = time.time()
+    if written_at > now + 300:
+        raise SystemExit("OpenCodex catalog fingerprint timestamp is in the future")
+    if freshness == "fresh" and max_age >= 0 and now - written_at > max_age:
+        raise SystemExit("OpenCodex catalog fingerprint is stale")
+    raise SystemExit(0)
+
+payload = {
+    "schema": 1,
+    "owner": owner,
+    "opencodex_version": version,
+    "catalog_inputs_sha256": expected_inputs_hash,
+    "catalog_sha256": expected_catalog_hash,
+    "written_at": int(time.time()),
+}
+fd, tmp_name = tempfile.mkstemp(prefix=".catalog-verification.", suffix=".tmp", dir=state_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, 0o600)
+    os.replace(tmp_name, fingerprint_path)
+    dir_fd = os.open(state_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+opencodex_verify_shared_catalog() {
+  local url="$1"
+  local freshness="${2:-fresh}"
+  local log_file="$OPENCODEX_LOG_DIR/opencodex.log"
+  opencodex_verify_shared_catalog_structure "$url" || return 1
+  opencodex_catalog_fingerprint verify "$freshness" 2>>"$log_file"
+}
+
+opencodex_sync_and_verify_lab() {
+  local url="$1"
+  local log_file="$OPENCODEX_LOG_DIR/opencodex.log"
+  local attempt=1 max_attempts=3 sync_status=0
+
+  [[ "$url" =~ '^http://(127[.]0[.]0[.]1|localhost):[0-9]+/$' ]] || {
+    echo "Refusing to synchronize OpenCodex through a non-loopback URL." >&2
+    return 1
+  }
+
+  # A fresh fingerprint binds the provider/model settings and exact catalog
+  # bytes to the current loopback route. Do not make every Profile launch wait
+  # on provider discovery again unless a caller explicitly requests it.
+  if [[ "$OPENCODEX_FORCE_SYNC" != "1" ]] && opencodex_verify_shared_catalog "$url" fresh; then
+    return 0
+  fi
+
+  while (( attempt <= max_attempts )); do
+    sync_status=0
+    run_with_waits "$OPENCODEX_SYNC_MAX_WAITS" "$OPENCODEX_SYNC_WAIT_SECONDS" \
+      run_opencodex_lab "$OPENCODEX_BIN" sync >>"$log_file" 2>&1 || sync_status=$?
+
+    if (( sync_status == 124 )); then
+      if opencodex_verify_shared_catalog "$url" allow-stale; then
+        echo "OpenCodex model synchronization timed out; using the existing verified shared model catalog." >&2
+        return 0
+      fi
+      echo "OpenCodex model synchronization timed out without a verified shared model catalog; see $log_file" >&2
+      return 1
+    fi
+    if (( sync_status != 0 )); then
+      echo "OpenCodex model synchronization failed; see $log_file" >&2
+      return 1
+    fi
+
+    if opencodex_verify_shared_catalog_structure "$url"; then
+      if opencodex_catalog_fingerprint write fresh 2>>"$log_file" \
+        && opencodex_verify_shared_catalog "$url" fresh; then
+        return 0
+      fi
+      echo "OpenCodex catalog verification fingerprint could not be recorded safely; see $log_file" >&2
+      return 1
+    fi
+    attempt=$(( attempt + 1 ))
+    (( attempt <= max_attempts )) && sleep 0.1
+  done
+
+  echo "OpenCodex synchronized, but its shared model catalog did not become complete; see $log_file" >&2
+  return 1
+}
+
+opencodex_status() {
+  local installed=0 running=0 version="unknown" url=""
+  version="$(opencodex_installed_version 2>/dev/null || true)"
+  if [[ -n "$version" ]]; then
+    installed=1
+  else
+    version="unknown"
+  fi
+  url="$(opencodex_running_url 2>/dev/null || true)"
+  [[ -n "$url" ]] && running=1
+  printf '%s\t%s\t%s\t%s\n' "$installed" "$running" "$version" "$url"
+}
+
+opencodex_install() {
+  local npm_bin node_bin managed_path installed_version running_url="" restart_after_patch=0 seed_dir=""
+  prepare_opencodex_lab || return 1
+  seed_dir="$(opencodex_runtime_seed_dir 2>/dev/null || true)"
+  installed_version="$(opencodex_installed_version 2>/dev/null || true)"
+  if [[ "$installed_version" == "$OPENCODEX_VERSION" ]]; then
+    if [[ -z "$seed_dir" ]] || opencodex_runtime_matches_seed "$seed_dir"; then
+      if ! opencodex_hk_gui_is_current; then
+        running_url="$(opencodex_running_url 2>/dev/null || true)"
+        if [[ -n "$running_url" ]]; then
+          restart_after_patch=1
+          opencodex_stop >/dev/null
+        fi
+        opencodex_apply_hk_gui || return 1
+        if (( restart_after_patch == 1 )); then
+          opencodex_start >/dev/null
+        fi
+      fi
+      echo "OpenCodex Lab $OPENCODEX_VERSION is already installed."
+      return 0
+    fi
+
+    running_url="$(opencodex_running_url 2>/dev/null || true)"
+    if [[ -n "$running_url" ]]; then
+      restart_after_patch=1
+      opencodex_stop >/dev/null
+    fi
+  elif [[ -x "$OPENCODEX_BIN" ]]; then
+    opencodex_stop >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "$seed_dir" ]]; then
+    if ! opencodex_install_runtime_seed "$seed_dir"; then
+      echo "Bundled OpenCodex runtime verification failed; refusing network fallback." >&2
+      return 1
+    fi
+    installed_version="$(opencodex_installed_version 2>/dev/null || true)"
+    if [[ "$installed_version" != "$OPENCODEX_VERSION" ]]; then
+      echo "Bundled OpenCodex runtime install verification failed (found ${installed_version:-unknown})." >&2
+      return 1
+    fi
+    opencodex_apply_hk_gui || return 1
+    if (( restart_after_patch == 1 )); then
+      opencodex_start >/dev/null
+    fi
+    echo "Installed bundled OpenCodex Lab $installed_version (offline seed)."
+    return 0
+  fi
+
+  echo "Bundled OpenCodex runtime is unavailable for $OPENCODEX_RUNTIME_ARCH; falling back to npm." >&2
+  if [[ "$installed_version" == "$OPENCODEX_VERSION" ]]; then
+    if ! opencodex_hk_gui_is_current; then
+      running_url="$(opencodex_running_url 2>/dev/null || true)"
+      if [[ -n "$running_url" ]]; then
+        restart_after_patch=1
+        opencodex_stop >/dev/null
+      fi
+      opencodex_apply_hk_gui || return 1
+      if (( restart_after_patch == 1 )); then
+        opencodex_start >/dev/null
+      fi
+    fi
+    echo "OpenCodex Lab $OPENCODEX_VERSION is already installed."
+    return 0
+  fi
+
+  npm_bin="$(resolve_npm_bin 2>/dev/null || true)"
+  node_bin="$(resolve_node_bin 2>/dev/null || true)"
+  if [[ -z "$npm_bin" || -z "$node_bin" ]]; then
+    echo "node and npm are required to install OpenCodex Lab." >&2
+    return 1
+  fi
+  managed_path="$OPENCODEX_NPM_PREFIX/node_modules/.bin:${node_bin:h}:${npm_bin:h}:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+  /usr/bin/env \
+    HOME="$OPENCODEX_FAKE_HOME" \
+    CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME" \
+    OPENCODEX_HOME="$OPENCODEX_STATE_DIR" \
+    NPM_CONFIG_PREFIX="$OPENCODEX_NPM_PREFIX" \
+    npm_config_prefix="$OPENCODEX_NPM_PREFIX" \
+    npm_config_cache="$OPENCODEX_ROOT/npm-cache" \
+    npm_config_update_notifier=false \
+    PATH="$managed_path" \
+    "$npm_bin" install \
+      --prefix "$OPENCODEX_NPM_PREFIX" \
+      --no-save \
+      --package-lock=false \
+      --include=optional \
+      --no-audit \
+      --no-fund \
+      "$OPENCODEX_PACKAGE@$OPENCODEX_VERSION"
+
+  installed_version="$(opencodex_installed_version 2>/dev/null || true)"
+  if [[ "$installed_version" != "$OPENCODEX_VERSION" ]]; then
+    echo "OpenCodex Lab install verification failed (found ${installed_version:-unknown})." >&2
+    return 1
+  fi
+  opencodex_apply_hk_gui || return 1
+  echo "Installed OpenCodex Lab $installed_version."
+}
+
+opencodex_start() {
+  local managed_path log_file launcher_pid url waited=0
+  prepare_opencodex_lab || return 1
+  load_aliyun_coding_plan_key
+  if ! require_opencodex_lab_install >/dev/null 2>&1; then
+    if ! opencodex_install >/dev/null; then
+      remove_all_opencodex_profile_routes >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+  require_opencodex_lab_install || return 1
+  managed_path="$(opencodex_managed_path)" || return 1
+  log_file="$OPENCODEX_LOG_DIR/opencodex.log"
+
+  url="$(opencodex_running_url 2>/dev/null || true)"
+  if [[ -n "$url" ]]; then
+    opencodex_hk_gui_is_current || {
+      echo "OpenCodex Hong Kong Chinese interface needs repair. Stop the proxy and run opencodex-install." >&2
+      return 1
+    }
+    if ! opencodex_sync_and_verify_lab "$url"; then
+      run_opencodex_lab "$OPENCODEX_BIN" stop >>"$log_file" 2>&1 || true
+      remove_all_opencodex_profile_routes >/dev/null 2>&1 || true
+      return 1
+    fi
+    printf '%s\n' "$url"
+    return 0
+  fi
+
+  opencodex_apply_hk_gui || return 1
+
+  /usr/bin/nohup /usr/bin/env \
+    HOME="$OPENCODEX_FAKE_HOME" \
+    CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME" \
+    OPENCODEX_HOME="$OPENCODEX_STATE_DIR" \
+    NPM_CONFIG_PREFIX="$OPENCODEX_NPM_PREFIX" \
+    npm_config_prefix="$OPENCODEX_NPM_PREFIX" \
+    npm_config_cache="$OPENCODEX_ROOT/npm-cache" \
+    PATH="$managed_path" \
+    "$OPENCODEX_BIN" start >>"$log_file" 2>&1 </dev/null &
+  launcher_pid=$!
+  disown "$launcher_pid" >/dev/null 2>&1 || true
+
+  while (( waited < OPENCODEX_START_MAX_WAITS )); do
+    url="$(opencodex_running_url 2>/dev/null || true)"
+    if [[ -n "$url" ]]; then
+      if opencodex_sync_and_verify_lab "$url"; then
+        printf '%s\n' "$url"
+        return 0
+      fi
+      break
+    fi
+    sleep "$OPENCODEX_START_WAIT_SECONDS"
+    waited=$(( waited + 1 ))
+  done
+
+  kill "$launcher_pid" >/dev/null 2>&1 || true
+  wait "$launcher_pid" >/dev/null 2>&1 || true
+  run_opencodex_lab "$OPENCODEX_BIN" stop >>"$log_file" 2>&1 || true
+  remove_all_opencodex_profile_routes >/dev/null 2>&1 || true
+  echo "OpenCodex Lab did not become healthy and synchronized; see $log_file" >&2
+  return 1
+}
+
+opencodex_stop() {
+  local stop_status=0
+  if [[ ! -x "$OPENCODEX_BIN" ]]; then
+    remove_all_opencodex_profile_routes
+    echo "OpenCodex Lab is not installed."
+    return 0
+  fi
+  run_opencodex_lab "$OPENCODEX_BIN" stop || stop_status=$?
+  remove_all_opencodex_profile_routes || stop_status=$?
+  return "$stop_status"
+}
+
+opencodex_restore() {
+  require_opencodex_lab_install
+  run_opencodex_lab "$OPENCODEX_BIN" restore
+}
+
+opencodex_dashboard() {
+  local url
+  url="$(opencodex_running_url 2>/dev/null || true)"
+  if [[ ! "$url" =~ '^http://(127[.]0[.]0[.]1|localhost):[0-9]+/$' ]]; then
+    echo "OpenCodex Lab is not running on a verified loopback URL." >&2
+    return 1
+  fi
+  [[ -x "$OPENCODEX_OPEN_BIN" ]] || {
+    echo "open command was not found." >&2
+    return 1
+  }
+  "$OPENCODEX_OPEN_BIN" "$url"
+}
+
+opencodex_launch() {
+  opencodex_start >/dev/null
+  OPENCODEX_LAB_LAUNCH_VERIFIED=1 \
+  CODEX_PRELAUNCH_SYNC=0 \
+  CODEX_SHARED_SESSIONS=0 \
+  CODEX_SYNC_THREAD_HISTORY=0 \
+    launch_account "$OPENCODEX_LAB_ACCOUNT" "OpenCodex Lab"
 }
 
 is_primary_codex_home() {
@@ -919,6 +1949,570 @@ home_uses_account1_ai_proxy() {
   ' "$config_file" >/dev/null 2>&1
 }
 
+home_uses_opencodex_proxy() {
+  local home_dir="$1"
+  [[ "${home_dir:A}" == "${OPENCODEX_LAB_CODEX_HOME:A}" ]]
+}
+
+# This is deliberately separate from home_uses_opencodex_proxy(): ordinary
+# managed profiles only route model requests through the shared loopback proxy.
+# They keep their own auth and their existing private/shared history mode.
+profile_uses_opencodex_routing() {
+  local home_dir="$1"
+  is_primary_codex_home "$home_dir" && return 1
+  home_uses_opencodex_proxy "$home_dir" && return 1
+
+  OPENCODEX_ROUTE_HOME="$home_dir" \
+  OPENCODEX_ROUTE_ACCOUNTS_ROOT="$ACCOUNTS_ROOT" \
+  OPENCODEX_ROUTE_SECOND_HOME="$SECOND_CODEX_HOME" \
+  python3 - <<'PY' >/dev/null 2>&1
+import os
+from pathlib import Path
+
+home = Path(os.environ["OPENCODEX_ROUTE_HOME"]).expanduser()
+accounts_root = Path(os.environ["OPENCODEX_ROUTE_ACCOUNTS_ROOT"]).expanduser()
+second_home = Path(os.environ["OPENCODEX_ROUTE_SECOND_HOME"]).expanduser()
+if home.is_symlink():
+    raise SystemExit(1)
+resolved = home.resolve(strict=False)
+if resolved == second_home.resolve(strict=False):
+    raise SystemExit(0)
+try:
+    relative = resolved.relative_to(accounts_root.resolve(strict=False))
+except ValueError:
+    raise SystemExit(1)
+if len(relative.parts) != 1 or relative.name.startswith(".") or relative.name == "opencodex-lab":
+    raise SystemExit(1)
+PY
+}
+
+profile_has_user_owned_model_routing() {
+  local home_dir="$1"
+  local config_file="$home_dir/config.toml"
+  local marker_file="$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER"
+
+  OPENCODEX_ROUTE_CONFIG="$config_file" \
+  OPENCODEX_ROUTE_MARKER="$marker_file" \
+  OPENCODEX_ROUTE_OWNER="$OPENCODEX_PROFILE_ROUTE_OWNER" \
+  python3 - <<'PY' >/dev/null 2>&1
+import ast
+import json
+import os
+import re
+from pathlib import Path
+
+config_path = Path(os.environ["OPENCODEX_ROUTE_CONFIG"])
+marker_path = Path(os.environ["OPENCODEX_ROUTE_MARKER"])
+owner = os.environ["OPENCODEX_ROUTE_OWNER"]
+
+# Fail preserve: an invalid or linked file must never be treated as safe for an
+# automatic model/provider rewrite.
+if config_path.is_symlink() or marker_path.is_symlink():
+    raise SystemExit(0)
+
+lines = config_path.read_text(encoding="utf-8-sig", errors="strict").splitlines() if config_path.exists() else []
+assignments = {"openai_base_url": [], "model_catalog_json": [], "model_provider": []}
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith("["):
+        break
+    match = re.match(r"^(openai_base_url|model_catalog_json|model_provider)\s*=\s*(.+?)\s*$", stripped)
+    if not match:
+        continue
+    try:
+        value = ast.literal_eval(match.group(2))
+    except (SyntaxError, ValueError):
+        raise SystemExit(0)
+    assignments[match.group(1)].append(value)
+
+provider_values = assignments["model_provider"]
+custom_provider = bool(provider_values) and (len(provider_values) != 1 or provider_values[0] != "openai")
+
+if not marker_path.exists():
+    user_owned = bool(assignments["openai_base_url"] or assignments["model_catalog_json"] or custom_provider)
+    raise SystemExit(0 if user_owned else 1)
+if not marker_path.is_file():
+    raise SystemExit(0)
+try:
+    marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if (
+    not isinstance(marker, dict)
+    or marker.get("owner") != owner
+    or not isinstance(marker.get("openai_base_url"), str)
+    or not isinstance(marker.get("model_catalog_json"), str)
+):
+    raise SystemExit(0)
+
+managed_route_matches = all(
+    len(assignments[key]) == 1 and assignments[key][0] == marker[key]
+    for key in ("openai_base_url", "model_catalog_json")
+)
+raise SystemExit(1 if managed_route_matches and not custom_provider else 0)
+PY
+}
+
+configure_opencodex_routing_for_home() {
+  local home_dir="$1"
+  local url base_url
+  profile_uses_opencodex_routing "$home_dir" || {
+    echo "Refusing OpenCodex routing for an unmanaged profile: $home_dir" >&2
+    return 1
+  }
+  [[ -d "$home_dir" && ! -L "$home_dir" ]] || {
+    echo "Refusing missing or linked Codex profile: $home_dir" >&2
+    return 1
+  }
+  url="$(opencodex_running_url 2>/dev/null || true)"
+  [[ "$url" =~ '^http://(127[.]0[.]0[.]1|localhost):[0-9]+/$' ]] || {
+    echo "OpenCodex is not running on a verified loopback URL." >&2
+    return 1
+  }
+  base_url="${url%/}/v1"
+
+  OPENCODEX_ROUTE_HOME="$home_dir" \
+  OPENCODEX_ROUTE_CONFIG="$home_dir/config.toml" \
+  OPENCODEX_ROUTE_MARKER="$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" \
+  OPENCODEX_ROUTE_OWNER="$OPENCODEX_PROFILE_ROUTE_OWNER" \
+  OPENCODEX_ROUTE_BASE_URL="$base_url" \
+  OPENCODEX_ROUTE_CATALOG="$OPENCODEX_SHARED_CATALOG" \
+  python3 - <<'PY'
+import ast
+import json
+import os
+import re
+import stat
+import tempfile
+from pathlib import Path
+
+home = Path(os.environ["OPENCODEX_ROUTE_HOME"])
+config_path = Path(os.environ["OPENCODEX_ROUTE_CONFIG"])
+marker_path = Path(os.environ["OPENCODEX_ROUTE_MARKER"])
+owner = os.environ["OPENCODEX_ROUTE_OWNER"]
+base_url = os.environ["OPENCODEX_ROUTE_BASE_URL"]
+catalog_path = Path(os.environ["OPENCODEX_ROUTE_CATALOG"])
+
+for path, label in ((config_path, "config"), (marker_path, "route marker"), (catalog_path, "catalog")):
+    if path.is_symlink():
+        raise SystemExit(f"Refusing OpenCodex {label} symlink: {path}")
+if not catalog_path.is_absolute() or not catalog_path.is_file():
+    raise SystemExit(f"OpenCodex shared catalog is unavailable: {catalog_path}")
+
+def parse_value(raw: str, key: str) -> str:
+    try:
+        value = ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        raise SystemExit(f"Invalid top-level {key} in {config_path}")
+    if not isinstance(value, str):
+        raise SystemExit(f"Top-level {key} must be a string in {config_path}")
+    return value
+
+lines = config_path.read_text(encoding="utf-8-sig", errors="strict").splitlines() if config_path.exists() else []
+assignments: dict[str, list[tuple[int, str]]] = {
+    "openai_base_url": [],
+    "model_catalog_json": [],
+    "model_provider": [],
+}
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped.startswith("["):
+        break
+    match = re.match(r"^(openai_base_url|model_catalog_json|model_provider)\s*=\s*(.+?)\s*$", stripped)
+    if match:
+        assignments[match.group(1)].append((index, parse_value(match.group(2), match.group(1))))
+
+old_route = None
+if marker_path.exists():
+    try:
+        candidate = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Invalid OpenCodex route marker; refusing to overwrite profile config: {exc}")
+    if (
+        not isinstance(candidate, dict)
+        or candidate.get("owner") != owner
+        or not isinstance(candidate.get("openai_base_url"), str)
+        or not isinstance(candidate.get("model_catalog_json"), str)
+    ):
+        raise SystemExit("Unrecognized OpenCodex route marker; refusing to overwrite profile config")
+    old_route = candidate
+
+provider_values = assignments["model_provider"]
+custom_provider = bool(provider_values) and (
+    len(provider_values) != 1 or provider_values[0][1] != "openai"
+)
+
+if old_route is None:
+    if assignments["openai_base_url"] or assignments["model_catalog_json"] or custom_provider:
+        print(f"Keeping user-owned OpenCodex routing in {home}", file=os.sys.stderr)
+        raise SystemExit(0)
+else:
+    expected_old = {
+        "openai_base_url": old_route["openai_base_url"],
+        "model_catalog_json": old_route["model_catalog_json"],
+    }
+    if custom_provider or any(
+        len(assignments[key]) != 1 or assignments[key][0][1] != expected_old[key]
+        for key in ("openai_base_url", "model_catalog_json")
+    ):
+        print(f"Keeping user-modified OpenCodex routing in {home}", file=os.sys.stderr)
+        raise SystemExit(0)
+
+new_values = {"openai_base_url": base_url, "model_catalog_json": str(catalog_path)}
+if old_route is None:
+    insertion = next((i for i, line in enumerate(lines) if line.strip().startswith("[")), len(lines))
+    route_lines = [
+        f'openai_base_url = {json.dumps(base_url)}',
+        f'model_catalog_json = {json.dumps(str(catalog_path))}',
+    ]
+    if insertion > 0 and lines[insertion - 1].strip():
+        route_lines.append("")
+    lines[insertion:insertion] = route_lines
+else:
+    for key, value in new_values.items():
+        index = assignments[key][0][0]
+        lines[index] = f'{key} = {json.dumps(value)}'
+
+config_text = "\n".join(lines) + "\n"
+config_mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else 0o600
+fd, tmp_name = tempfile.mkstemp(prefix=".config.toml.", suffix=".tmp", dir=home)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(config_text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, config_mode)
+    os.replace(tmp_name, config_path)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+
+marker = {"owner": owner, **new_values}
+fd, tmp_name = tempfile.mkstemp(prefix=f".{marker_path.name}.", suffix=".tmp", dir=home)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(marker, handle, ensure_ascii=False, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, 0o600)
+    os.replace(tmp_name, marker_path)
+    dir_fd = os.open(home, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+prepare_opencodex_cli_wrapper() {
+  local url base_url real_codex
+
+  validate_opencodex_lab_paths || return 1
+  selected_codex_app_is_usable || {
+    report_missing_codex_app
+    return 1
+  }
+  url="$(opencodex_running_url 2>/dev/null || true)"
+  [[ "$url" =~ '^http://(127[.]0[.]0[.]1|localhost):[0-9]+/$' ]] || {
+    echo "OpenCodex is not running on a verified loopback URL." >&2
+    return 1
+  }
+  base_url="${url%/}/v1"
+  real_codex="$CODEX_APP/Contents/Resources/codex"
+
+  OPENCODEX_WRAPPER_ROOT="$OPENCODEX_ROOT" \
+  OPENCODEX_WRAPPER_ROOT_MARKER="$OPENCODEX_ROOT/$OPENCODEX_OWNERSHIP_MARKER" \
+  OPENCODEX_WRAPPER_ROOT_OWNER="$OPENCODEX_OWNERSHIP_VALUE" \
+  OPENCODEX_WRAPPER_DIR="$OPENCODEX_CLI_WRAPPER_DIR" \
+  OPENCODEX_WRAPPER_PATH="$OPENCODEX_CLI_WRAPPER" \
+  OPENCODEX_WRAPPER_OWNER="$OPENCODEX_CLI_WRAPPER_OWNER" \
+  OPENCODEX_WRAPPER_LAB_HOME="$OPENCODEX_LAB_CODEX_HOME" \
+  OPENCODEX_WRAPPER_CATALOG="$OPENCODEX_SHARED_CATALOG" \
+  OPENCODEX_WRAPPER_CODEX_APP="$CODEX_APP" \
+  OPENCODEX_WRAPPER_REAL_CODEX="$real_codex" \
+  OPENCODEX_WRAPPER_BASE_URL="$base_url" \
+  OPENCODEX_WRAPPER_MODEL="$CODEX_DEFAULT_OPENAI_MODEL" \
+  OPENCODEX_WRAPPER_EFFORT="$CODEX_DEFAULT_OPENAI_REASONING_EFFORT" \
+  python3 - <<'PY'
+import json
+import os
+import shlex
+import stat
+import tempfile
+from pathlib import Path
+
+root = Path(os.environ["OPENCODEX_WRAPPER_ROOT"]).expanduser()
+root_marker = Path(os.environ["OPENCODEX_WRAPPER_ROOT_MARKER"]).expanduser()
+root_owner = os.environ["OPENCODEX_WRAPPER_ROOT_OWNER"]
+wrapper_dir = Path(os.environ["OPENCODEX_WRAPPER_DIR"]).expanduser()
+wrapper = Path(os.environ["OPENCODEX_WRAPPER_PATH"]).expanduser()
+owner = os.environ["OPENCODEX_WRAPPER_OWNER"]
+lab_home = Path(os.environ["OPENCODEX_WRAPPER_LAB_HOME"]).expanduser()
+catalog = Path(os.environ["OPENCODEX_WRAPPER_CATALOG"]).expanduser()
+codex_app = Path(os.environ["OPENCODEX_WRAPPER_CODEX_APP"]).expanduser()
+real_codex = Path(os.environ["OPENCODEX_WRAPPER_REAL_CODEX"]).expanduser()
+base_url = os.environ["OPENCODEX_WRAPPER_BASE_URL"]
+model = os.environ["OPENCODEX_WRAPPER_MODEL"]
+effort = os.environ["OPENCODEX_WRAPPER_EFFORT"]
+
+for path, label in (
+    (root, "managed root"),
+    (root_marker, "ownership marker"),
+    (lab_home, "Lab home"),
+    (catalog, "catalog"),
+    (codex_app, "Codex app"),
+    (codex_app / "Contents", "Codex Contents"),
+    (codex_app / "Contents" / "Resources", "Codex Resources"),
+    (real_codex, "Codex CLI"),
+):
+    if path.is_symlink():
+        raise SystemExit(f"Refusing OpenCodex wrapper {label} symlink: {path}")
+
+if not root.is_absolute() or not root.is_dir():
+    raise SystemExit(f"OpenCodex managed root is unavailable: {root}")
+if not root_marker.is_file() or root_marker.read_text(encoding="utf-8").strip() != root_owner:
+    raise SystemExit("OpenCodex managed root ownership verification failed")
+if not lab_home.is_absolute() or not lab_home.is_dir():
+    raise SystemExit(f"OpenCodex Lab home is unavailable: {lab_home}")
+if not catalog.is_absolute() or not catalog.is_file():
+    raise SystemExit(f"OpenCodex shared catalog is unavailable: {catalog}")
+try:
+    catalog.resolve(strict=True).relative_to(lab_home.resolve(strict=True))
+except ValueError:
+    raise SystemExit(f"Refusing OpenCodex catalog outside Lab home: {catalog}")
+
+if not codex_app.is_absolute() or not codex_app.is_dir():
+    raise SystemExit(f"Codex app is unavailable: {codex_app}")
+expected_real_codex = codex_app / "Contents" / "Resources" / "codex"
+if os.path.abspath(real_codex) != os.path.abspath(expected_real_codex):
+    raise SystemExit(f"Refusing unexpected Codex CLI path: {real_codex}")
+if not real_codex.is_file() or not os.access(real_codex, os.X_OK):
+    raise SystemExit(f"Codex CLI is unavailable: {real_codex}")
+if real_codex.resolve(strict=True) != expected_real_codex.resolve(strict=True):
+    raise SystemExit(f"Refusing Codex CLI path escape: {real_codex}")
+
+expected_wrapper_dir = root / "bin"
+expected_wrapper = expected_wrapper_dir / "codex-opencodex-router"
+if os.path.abspath(wrapper_dir) != os.path.abspath(expected_wrapper_dir):
+    raise SystemExit(f"Refusing unexpected OpenCodex wrapper directory: {wrapper_dir}")
+if os.path.abspath(wrapper) != os.path.abspath(expected_wrapper):
+    raise SystemExit(f"Refusing unexpected OpenCodex wrapper path: {wrapper}")
+if wrapper_dir.is_symlink() or wrapper.is_symlink():
+    raise SystemExit("Refusing OpenCodex wrapper symlink path")
+if wrapper_dir.exists() and not wrapper_dir.is_dir():
+    raise SystemExit(f"OpenCodex wrapper directory is not a directory: {wrapper_dir}")
+if wrapper.exists():
+    if not wrapper.is_file():
+        raise SystemExit(f"OpenCodex wrapper target is not a regular file: {wrapper}")
+    with wrapper.open("r", encoding="utf-8", errors="strict") as handle:
+        if f"# {owner}" not in handle.read(4096):
+            raise SystemExit(f"Refusing to overwrite an unrecognized OpenCodex wrapper: {wrapper}")
+
+wrapper_dir.mkdir(mode=0o700, parents=False, exist_ok=True)
+if wrapper_dir.is_symlink() or wrapper_dir.resolve(strict=True).parent != root.resolve(strict=True):
+    raise SystemExit(f"Refusing OpenCodex wrapper directory path escape: {wrapper_dir}")
+os.chmod(wrapper_dir, 0o700)
+
+def toml_override(key: str, value: str) -> str:
+    return f"{key}={json.dumps(value, ensure_ascii=True)}"
+
+overrides = [
+    toml_override("model", model),
+    toml_override("model_provider", "openai"),
+    toml_override("model_reasoning_effort", effort),
+    toml_override("openai_base_url", base_url),
+    toml_override("model_catalog_json", str(catalog)),
+]
+script_lines = [
+    "#!/bin/zsh",
+    f"# {owner}",
+    "set -eu",
+    f"codex_app={shlex.quote(str(codex_app))}",
+    f"real_codex={shlex.quote(str(real_codex))}",
+    f"lab_home={shlex.quote(str(lab_home))}",
+    f"catalog={shlex.quote(str(catalog))}",
+    f"base_url={shlex.quote(base_url)}",
+    '[[ -d "$codex_app" && ! -L "$codex_app" ]] || exit 126',
+    '[[ ! -L "$codex_app/Contents" && ! -L "$codex_app/Contents/Resources" ]] || exit 126',
+    '[[ -f "$real_codex" && -x "$real_codex" && ! -L "$real_codex" ]] || exit 126',
+    '[[ "$real_codex" == /*/Contents/Resources/codex ]] || exit 126',
+    '[[ "${real_codex:A}" == "${codex_app:A}/Contents/Resources/codex" ]] || exit 126',
+    '[[ -d "$lab_home" && ! -L "$lab_home" ]] || exit 126',
+    '[[ -f "$catalog" && ! -L "$catalog" ]] || exit 126',
+    '[[ "${catalog:A}" == "${lab_home:A}/"* ]] || exit 126',
+    '[[ "$base_url" =~ \'^http://(127[.]0[.]0[.]1|localhost):[0-9]+/v1$\' ]] || exit 126',
+    'exec "$real_codex" \\',
+]
+script_lines.extend(f"  -c {shlex.quote(value)} \\" for value in overrides)
+script_lines.append('  "$@"')
+script = "\n".join(script_lines) + "\n"
+
+fd, tmp_name = tempfile.mkstemp(prefix=f".{wrapper.name}.", suffix=".tmp", dir=wrapper_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(script)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, 0o700)
+    os.replace(tmp_name, wrapper)
+    dir_fd = os.open(wrapper_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+
+if wrapper.is_symlink() or not wrapper.is_file() or stat.S_IMODE(wrapper.stat().st_mode) != 0o700:
+    raise SystemExit("OpenCodex wrapper verification failed")
+print(wrapper)
+PY
+}
+
+remove_opencodex_routing_for_home() {
+  local home_dir="$1"
+  profile_uses_opencodex_routing "$home_dir" || return 0
+  [[ -d "$home_dir" && ! -L "$home_dir" ]] || return 0
+
+  OPENCODEX_ROUTE_HOME="$home_dir" \
+  OPENCODEX_ROUTE_CONFIG="$home_dir/config.toml" \
+  OPENCODEX_ROUTE_MARKER="$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" \
+  OPENCODEX_ROUTE_OWNER="$OPENCODEX_PROFILE_ROUTE_OWNER" \
+  python3 - <<'PY'
+import ast
+import json
+import os
+import re
+import stat
+import tempfile
+from pathlib import Path
+
+home = Path(os.environ["OPENCODEX_ROUTE_HOME"])
+config_path = Path(os.environ["OPENCODEX_ROUTE_CONFIG"])
+marker_path = Path(os.environ["OPENCODEX_ROUTE_MARKER"])
+owner = os.environ["OPENCODEX_ROUTE_OWNER"]
+if not marker_path.exists():
+    raise SystemExit(0)
+if marker_path.is_symlink() or config_path.is_symlink():
+    raise SystemExit(f"Refusing linked OpenCodex route files in {home}")
+try:
+    marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"Invalid OpenCodex route marker; leaving profile unchanged: {exc}")
+if (
+    not isinstance(marker, dict)
+    or marker.get("owner") != owner
+    or not isinstance(marker.get("openai_base_url"), str)
+    or not isinstance(marker.get("model_catalog_json"), str)
+):
+    raise SystemExit("Unrecognized OpenCodex route marker; leaving profile unchanged")
+
+if config_path.exists():
+    lines = config_path.read_text(encoding="utf-8-sig", errors="strict").splitlines()
+    assignments: dict[str, list[tuple[int, object]]] = {"openai_base_url": [], "model_catalog_json": []}
+    in_table = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_table = True
+        match = None if in_table else re.match(r"^(openai_base_url|model_catalog_json)\s*=\s*(.+?)\s*$", stripped)
+        if match:
+            try:
+                value = ast.literal_eval(match.group(2))
+            except (SyntaxError, ValueError):
+                value = None
+            assignments[match.group(1)].append((index, value))
+    owned_indices = {
+        entries[0][0]
+        for key, entries in assignments.items()
+        if len(entries) == 1 and isinstance(entries[0][1], str) and entries[0][1] == marker.get(key)
+    }
+    changed = bool(owned_indices)
+    if changed:
+        out = [line for index, line in enumerate(lines) if index not in owned_indices]
+        text = "\n".join(out) + "\n"
+        mode = stat.S_IMODE(config_path.stat().st_mode)
+        fd, tmp_name = tempfile.mkstemp(prefix=".config.toml.", suffix=".tmp", dir=home)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_name, mode)
+            os.replace(tmp_name, config_path)
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+marker_path.unlink()
+PY
+}
+
+remove_all_opencodex_profile_routes() {
+  local raw_name raw_home raw_app_data name home_dir route_status=0
+  while IFS='|' read -r raw_name raw_home raw_app_data; do
+    name="$(printf '%s' "$raw_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    home_dir="$(printf '%s' "$raw_home" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -n "$name" && -n "$home_dir" ]] || continue
+    profile_uses_opencodex_routing "$home_dir" || continue
+    remove_opencodex_routing_for_home "$home_dir" || route_status=$?
+  done < <(list_accounts)
+  return "$route_status"
+}
+
+ensure_opencodex_available_for_profiles() {
+  local installed_version
+  installed_version="$(opencodex_installed_version 2>/dev/null || true)"
+  if [[ "$installed_version" != "$OPENCODEX_VERSION" ]]; then
+    if ! opencodex_install >/dev/null; then
+      remove_all_opencodex_profile_routes >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+  if ! opencodex_start >/dev/null; then
+    remove_all_opencodex_profile_routes >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+opencodex_enable_all_profiles() {
+  local raw_name raw_home raw_app_data name home_dir configured=0 failed=0
+  ensure_dirs
+  ensure_opencodex_available_for_profiles || return 1
+  prepare_opencodex_cli_wrapper >/dev/null || return 1
+  while IFS='|' read -r raw_name raw_home raw_app_data; do
+    name="$(printf '%s' "$raw_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    home_dir="$(printf '%s' "$raw_home" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -n "$name" && -d "$home_dir" ]] || continue
+    profile_uses_opencodex_routing "$home_dir" || continue
+    if configure_opencodex_routing_for_home "$home_dir"; then
+      if [[ -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]] \
+        && ! profile_has_user_owned_model_routing "$home_dir"; then
+        configured=$(( configured + 1 ))
+      fi
+    else
+      failed=$(( failed + 1 ))
+    fi
+  done < <(list_accounts)
+  if (( failed > 0 )); then
+    echo "OpenCodex routing failed for $failed managed profile(s)." >&2
+    return 1
+  fi
+  echo "OpenCodex routing is enabled for $configured managed profile(s)."
+}
+
 ensure_aliyun_coding_plan_bridge_running() {
   local health_url="http://${ALIYUN_CODING_PLAN_BRIDGE_HOST}:${ALIYUN_CODING_PLAN_BRIDGE_PORT}/health"
   local server_js="$ALIYUN_CODING_PLAN_BRIDGE_ROOT/node_modules/aliyun-codex-bridge/src/server.js"
@@ -1227,6 +2821,11 @@ history_mode_for_home() {
   local account_home="$1"
   local marker mode
 
+  if home_uses_opencodex_proxy "$account_home"; then
+    printf '%s\n' "private"
+    return 0
+  fi
+
   if is_history_anchor_home "$account_home"; then
     printf '%s\n' "shared"
     return 0
@@ -1260,6 +2859,11 @@ set_history_mode_for_home() {
       return 2
       ;;
   esac
+
+  if home_uses_opencodex_proxy "$account_home" && [[ "$mode" != "private" ]]; then
+    echo "OpenCodex Lab history is permanently private." >&2
+    return 2
+  fi
 
   mkdir -p "$account_home"
   marker="$(history_mode_marker_for_home "$account_home")"
@@ -1368,6 +2972,10 @@ init_account() {
   local home_dir app_data
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
+  if home_uses_opencodex_proxy "$home_dir"; then
+    echo "The opencodex-lab profile name is reserved for the managed OpenCodex Lab." >&2
+    return 2
+  fi
   rm -f "$ACCOUNTS_ROOT/.deleted-$(sanitize_account_name "$name")"
 
   if [[ "$home_dir" == "$PRIMARY_CODEX_HOME" ]]; then
@@ -1400,6 +3008,10 @@ init_shared_account() {
   local home_dir app_data
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
+  if home_uses_opencodex_proxy "$home_dir"; then
+    echo "OpenCodex Lab cannot use shared local history." >&2
+    return 2
+  fi
   rm -f "$ACCOUNTS_ROOT/.deleted-$(sanitize_account_name "$name")"
 
   if [[ "$home_dir" == "$PRIMARY_CODEX_HOME" ]]; then
@@ -1443,6 +3055,10 @@ delete_account() {
   if [[ "$name" == "account1" || "$name" == "primary" || "$name" == "default" ]]; then
     echo "Refusing to delete account1." >&2
     exit 2
+  fi
+  if [[ "$name" == "$OPENCODEX_LAB_ACCOUNT" ]]; then
+    echo "OpenCodex Lab is managed by Codex Accounts and cannot be deleted as a normal profile." >&2
+    return 2
   fi
 
   ensure_dirs
@@ -2024,7 +3640,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.6.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.7.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -2304,6 +3920,11 @@ account_status_for() {
   quota="unknown"
   reset="unknown"
   reset_credits="unknown"
+
+  if home_uses_opencodex_proxy "$home_dir"; then
+    echo "$(sanitize_account_name "$name") | signed_in_local | external | local-proxy | external | opencodex:$OPENCODEX_VERSION | none"
+    return 0
+  fi
 
   if home_uses_account1_ai_proxy "$home_dir"; then
     echo "$(sanitize_account_name "$name") | signed_in_local | external | api-key | external | aliyun:qwen3.7-plus | none"
@@ -4002,7 +5623,7 @@ repair_account1() {
   normalize_thread_sources_for_home "$PRIMARY_CODEX_HOME"
   restore_account1_visible_thread_model_providers_for_home "$PRIMARY_CODEX_HOME"
   CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \
-    repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
+    repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" || return $?
   prune_global_state_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
 }
 
@@ -4459,10 +6080,21 @@ launch_account() {
     exit 1
   fi
 
-  local home_dir app_data history_mode
+  local home_dir app_data history_mode opencodex_cli_wrapper="" preserve_user_model_route=0
   local -a launch_env launch_args
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
+
+  if home_uses_opencodex_proxy "$home_dir" && [[ "${OPENCODEX_LAB_LAUNCH_VERIFIED:-0}" != "1" ]]; then
+    opencodex_launch
+    return $?
+  fi
+  if home_uses_opencodex_proxy "$home_dir"; then
+    validate_opencodex_lab_paths || return 1
+    set_history_mode_for_home "$home_dir" private || return 1
+    CODEX_SHARED_SESSIONS=0
+    CODEX_SYNC_THREAD_HISTORY=0
+  fi
   mkdir -p "$home_dir" "$app_data"
 
   # The persisted per-profile mode is authoritative. In particular, a private
@@ -4490,18 +6122,55 @@ launch_account() {
   if is_primary_codex_home "$home_dir"; then
     configure_account1_aliyun_proxy_for_home "$home_dir"
     ensure_aliyun_coding_plan_bridge_running
+  elif home_uses_opencodex_proxy "$home_dir"; then
+    # OpenCodex owns this dedicated lab config while its proxy is running.
+    # Never rewrite it to the normal OpenAI defaults during an account launch.
+    opencodex_cli_wrapper="$(prepare_opencodex_cli_wrapper)" || {
+      echo "OpenCodex CLI routing could not be prepared safely; profile was not launched." >&2
+      return 1
+    }
   else
-    restore_non_account1_openai_config_for_home "$home_dir"
+    if profile_has_user_owned_model_routing "$home_dir"; then
+      preserve_user_model_route=1
+    elif profile_uses_opencodex_routing "$home_dir"; then
+      if ! ensure_opencodex_available_for_profiles; then
+        remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
+        echo "OpenCodex could not be prepared; refusing to launch with a dead loopback route." >&2
+        return 1
+      fi
+      if ! configure_opencodex_routing_for_home "$home_dir"; then
+        remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
+        echo "OpenCodex routing could not be configured safely; profile was not launched." >&2
+        return 1
+      fi
+      if profile_has_user_owned_model_routing "$home_dir" \
+        || [[ ! -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]]; then
+        # The config may have changed between the first read and the atomic
+        # route update. Preserve it instead of forcing defaults or a CLI shim.
+        preserve_user_model_route=1
+      else
+        restore_non_account1_openai_config_for_home "$home_dir"
+        opencodex_cli_wrapper="$(prepare_opencodex_cli_wrapper)" || {
+          remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
+          echo "OpenCodex CLI routing could not be prepared safely; profile was not launched." >&2
+          return 1
+        }
+      fi
+    fi
   fi
-  normalize_top_level_model_provider_for_home "$home_dir"
-  if [[ "$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" ]]; then
+  if ! home_uses_opencodex_proxy "$home_dir" && (( preserve_user_model_route == 0 )); then
+    normalize_top_level_model_provider_for_home "$home_dir"
+  fi
+  if [[ "$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" ]] && ! home_uses_opencodex_proxy "$home_dir"; then
     refresh_shared_history_for_home "$home_dir"
     repair_compacted_image_payloads_for_home "$home_dir" >/dev/null 2>&1 || true
     if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
       cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
     fi
     normalize_thread_sources_for_home "$home_dir"
-    restore_default_thread_model_providers_for_home "$home_dir"
+    if (( preserve_user_model_route == 0 )); then
+      restore_default_thread_model_providers_for_home "$home_dir"
+    fi
     restore_account1_visible_thread_model_providers_for_home "$home_dir"
   fi
 
@@ -4526,6 +6195,12 @@ launch_account() {
   # and can make later Codex windows inherit the wrong CODEX_HOME.
   launchctl unsetenv CODEX_HOME >/dev/null 2>&1 || true
   launch_env=(--env "CODEX_HOME=$home_dir")
+  if [[ -n "$opencodex_cli_wrapper" ]]; then
+    launch_env+=(
+      --env "CODEX_CLI_PATH=$opencodex_cli_wrapper"
+      --env "CODEX_APP_SERVER_FORCE_CLI=1"
+    )
+  fi
   if is_primary_codex_home "$home_dir"; then
     load_aliyun_coding_plan_key
     if [[ -n "${AI_API_KEY:-}" ]]; then
@@ -4976,6 +6651,11 @@ link_history_for_unlocked() {
   CODEX_SHARED_SESSIONS=1
   local account_home current_mode
   account_home="$(account_home_for "$name")"
+
+  if home_uses_opencodex_proxy "$account_home"; then
+    echo "OpenCodex Lab cannot use shared local history." >&2
+    return 2
+  fi
 
   if profile_transition_is_busy "$name" "$account_home"; then
     echo "Close this Codex profile and wait for its app-server/database writes before sharing local history." >&2
@@ -5483,22 +7163,56 @@ PY
 
 repair_compacted_image_payloads_for_home() {
   local account_home="$1"
+  local sessions_root="" lsof_output="" lsof_status=0 lsof_has_pid=0 lsof_line=""
 
   [[ "$CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH" == "1" ]] || return 0
   [[ -d "$account_home" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
+  [[ -d "$account_home/sessions" ]] || return 0
+
+  sessions_root="$(cd "$account_home/sessions" 2>/dev/null && pwd -P)" || {
+    echo "session-payload-repair sessions_resolve_failed=$account_home/sessions" >&2
+    return 1
+  }
+  if [[ ! -x /usr/sbin/lsof ]]; then
+    echo "session-payload-repair lsof_unavailable=/usr/sbin/lsof" >&2
+    return 1
+  fi
+  if lsof_output="$(/usr/sbin/lsof -t +D "$sessions_root" 2>&1)"; then
+    lsof_status=0
+  else
+    lsof_status=$?
+  fi
+  for lsof_line in "${(@f)lsof_output}"; do
+    if [[ "$lsof_line" =~ '^[0-9]+$' ]]; then
+      lsof_has_pid=1
+      break
+    fi
+  done
+  if (( lsof_has_pid == 1 )); then
+    echo "session-payload-repair busy sessions_open=$sessions_root; close Codex before repair." >&2
+    return 75
+  fi
+  if (( lsof_status != 1 )) || [[ -n "$lsof_output" ]]; then
+    echo "session-payload-repair lsof_failed=$sessions_root status=$lsof_status detail=$lsof_output" >&2
+    return 1
+  fi
 
   CODEX_REPAIR_ACCOUNT_HOME="$account_home" \
   CODEX_REPAIR_MIN_BYTES="$CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES" \
   CODEX_REPAIR_IMAGE_MIN_CHARS="$CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS" \
   CODEX_REPAIR_STRING_MAX_CHARS="$CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS" \
   python3 - <<'PY'
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -5516,47 +7230,303 @@ try:
     string_max_chars = int(os.environ.get("CODEX_REPAIR_STRING_MAX_CHARS", "200000"))
 except ValueError:
     string_max_chars = 200000
+try:
+    min_free_reserve = max(0, int(os.environ.get("CODEX_REPAIR_MIN_FREE_BYTES", str(2 * 1024 * 1024 * 1024))))
+except ValueError:
+    min_free_reserve = 2 * 1024 * 1024 * 1024
+try:
+    stale_tmp_min_age = max(0, int(os.environ.get("CODEX_REPAIR_STALE_TMP_MIN_AGE_SECONDS", "1800")))
+except ValueError:
+    stale_tmp_min_age = 1800
 
 if not sessions_dir.is_dir():
     raise SystemExit(0)
 
-stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-backup_dir = home / "recovery-backups" / f"session-payload-repair-{stamp}"
+try:
+    sessions_dir = sessions_dir.resolve()
+except OSError as exc:
+    print(f"session-payload-repair sessions_resolve_failed={sessions_dir}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+# All profiles may point at one shared sessions directory.  A nonblocking lock
+# prevents two repair runs from creating large temporary copies at once.
+lock_path = sessions_dir.parent / ".session-payload-repair.lock"
+try:
+    lock_handle = lock_path.open("a+", encoding="utf-8")
+except OSError as exc:
+    print(f"session-payload-repair lock_failed={lock_path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError as exc:
+    if isinstance(exc, BlockingIOError) or exc.errno in {errno.EACCES, errno.EAGAIN}:
+        print(f"session-payload-repair busy lock={lock_path}: {exc}", file=sys.stderr)
+        raise SystemExit(75)
+    print(f"session-payload-repair lock_failed={lock_path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+backup_root = home / "recovery-backups"
+backup_dir = backup_root / f"session-payload-repair-{stamp}"
 files_changed = 0
 images_omitted = 0
 image_chars_omitted = 0
 strings_omitted = 0
 string_chars_omitted = 0
+had_error = False
+saw_low_space = False
+active_tmp = None
+active_backup_tmp = None
+active_backup_target = None
+active_source_path = None
+active_source_identity = None
 
 def is_open(path: Path) -> bool:
+    global had_error
     try:
         result = subprocess.run(
-            ["lsof", "-t", "--", str(path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ["/usr/sbin/lsof", "-t", "--", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             check=False,
+            text=True,
         )
-        return result.returncode == 0
-    except OSError:
+    except OSError as exc:
+        had_error = True
+        print(f"session-payload-repair lsof_exec_failed={path}: {exc}", file=sys.stderr)
+        return True
+    stderr_text = result.stderr.strip()
+    if stderr_text:
+        had_error = True
+        print(
+            f"session-payload-repair lsof_error={path} status={result.returncode} detail={stderr_text}",
+            file=sys.stderr,
+        )
+        return True
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
         return False
+    had_error = True
+    print(f"session-payload-repair lsof_error={path} status={result.returncode}", file=sys.stderr)
+    return True
 
-def backup_file(path: Path) -> None:
+def prune_empty_backup_parents(path: Path):
+    current = path.parent
+    while current != backup_root:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+def remove_uncommitted_backup():
+    global active_backup_target, active_source_identity, active_source_path, had_error
+    backup_target = active_backup_target
+    source_path = active_source_path
+    initial_identity = active_source_identity
+    active_backup_target = None
+    active_source_path = None
+    active_source_identity = None
+    if backup_target is None or source_path is None or initial_identity is None:
+        return
+    try:
+        backup_target.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        had_error = True
+        print(f"session-payload-repair retained_backup_check_failed={backup_target}: {exc}", file=sys.stderr)
+        return
+    try:
+        current_identity = source_identity(source_path.stat())
+    except OSError as exc:
+        had_error = True
+        print(
+            f"session-payload-repair retained_backup_stat_failed={backup_target} source={source_path}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    if current_identity != initial_identity:
+        print(
+            f"session-payload-repair retained_committed_backup={backup_target} source_identity={current_identity}",
+            file=sys.stderr,
+        )
+        return
+    try:
+        backup_target.unlink()
+        print(f"session-payload-repair removed_uncommitted_backup={backup_target}", file=sys.stderr)
+        prune_empty_backup_parents(backup_target)
+    except OSError as exc:
+        had_error = True
+        print(f"session-payload-repair backup_rollback_failed={backup_target}: {exc}", file=sys.stderr)
+
+def remove_active_artifacts():
+    global active_backup_tmp, active_tmp, had_error
+    artifacts = (
+        ("repair_tmp", active_tmp, False),
+        ("backup_tmp", active_backup_tmp, True),
+    )
+    active_tmp = None
+    active_backup_tmp = None
+    for label, artifact, prune_backup_dirs in artifacts:
+        if artifact is None:
+            continue
+        try:
+            artifact.unlink()
+            print(f"session-payload-repair removed_{label}={artifact}", file=sys.stderr)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            had_error = True
+            print(f"session-payload-repair {label}_cleanup_failed={artifact}: {exc}", file=sys.stderr)
+        if prune_backup_dirs:
+            prune_empty_backup_parents(artifact)
+    remove_uncommitted_backup()
+
+def stop_and_cleanup(signum, _frame):
+    remove_active_artifacts()
+    print(f"session-payload-repair interrupted signal={signum}", file=sys.stderr)
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGTERM, stop_and_cleanup)
+signal.signal(signal.SIGINT, stop_and_cleanup)
+
+def cleanup_stale_tmp_files():
+    global had_error
+    removed_count = 0
+    removed_bytes = 0
+    now = time.time()
+    for candidate in sessions_dir.rglob(".*.tmp-session-payload-repair-*"):
+        if not candidate.is_file():
+            continue
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        if now - stat.st_mtime < stale_tmp_min_age:
+            continue
+        if is_open(candidate):
+            print(f"session-payload-repair stale_tmp_skip_open={candidate}", file=sys.stderr)
+            continue
+        try:
+            candidate.unlink()
+            removed_count += 1
+            removed_bytes += stat.st_size
+            print(f"session-payload-repair stale_tmp_removed={candidate} bytes={stat.st_size}", file=sys.stderr)
+        except OSError as exc:
+            had_error = True
+            print(f"session-payload-repair stale_tmp_cleanup_failed={candidate}: {exc}", file=sys.stderr)
+    if removed_count:
+        print(
+            f"session-payload-repair stale_tmp_summary files={removed_count} bytes={removed_bytes}",
+            file=sys.stderr,
+        )
+
+def cleanup_stale_backup_tmp_files():
+    global had_error
+    if not backup_root.is_dir():
+        return
+    removed_count = 0
+    removed_bytes = 0
+    now = time.time()
+    for candidate in backup_root.rglob(".*.tmp-session-backup-*"):
+        if not candidate.is_file():
+            continue
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        if now - stat.st_mtime < stale_tmp_min_age:
+            continue
+        if is_open(candidate):
+            print(f"session-payload-repair stale_backup_tmp_skip_open={candidate}", file=sys.stderr)
+            continue
+        try:
+            candidate.unlink()
+            removed_count += 1
+            removed_bytes += stat.st_size
+            print(
+                f"session-payload-repair stale_backup_tmp_removed={candidate} bytes={stat.st_size}",
+                file=sys.stderr,
+            )
+            prune_empty_backup_parents(candidate)
+        except OSError as exc:
+            had_error = True
+            print(f"session-payload-repair stale_backup_tmp_cleanup_failed={candidate}: {exc}", file=sys.stderr)
+    if removed_count:
+        print(
+            f"session-payload-repair stale_backup_tmp_summary files={removed_count} bytes={removed_bytes}",
+            file=sys.stderr,
+        )
+
+cleanup_stale_tmp_files()
+cleanup_stale_backup_tmp_files()
+
+def existing_parent(path: Path):
+    candidate = path
+    while True:
+        try:
+            return candidate, candidate.stat()
+        except FileNotFoundError:
+            parent = candidate.parent
+            if parent == candidate:
+                raise
+            candidate = parent
+
+def source_identity(stat):
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+def source_is_unchanged(path: Path, initial_identity, stage: str) -> bool:
+    global had_error
+    if is_open(path):
+        had_error = True
+        print(f"session-payload-repair abort_open stage={stage} path={path}", file=sys.stderr)
+        return False
+    try:
+        current_identity = source_identity(path.stat())
+    except OSError as exc:
+        had_error = True
+        print(f"session-payload-repair abort_stat_failed stage={stage} path={path}: {exc}", file=sys.stderr)
+        return False
+    if current_identity != initial_identity:
+        had_error = True
+        print(
+            "session-payload-repair abort_source_changed="
+            f"{path} stage={stage} initial={initial_identity} current={current_identity}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+def prepare_backup(path: Path):
+    global active_backup_tmp
     try:
         rel = path.relative_to(sessions_dir)
     except ValueError:
         rel = Path(path.name)
     target = backup_dir / rel
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError(f"backup target already exists: {target}")
+    backup_tmp = target.with_name(f".{target.name}.tmp-session-backup-{os.getpid()}")
+    active_backup_tmp = backup_tmp
     for args in (
-        ["/bin/cp", "-c", "-p", str(path), str(target)],
-        ["/bin/cp", "-p", str(path), str(target)],
+        ["/bin/cp", "-c", "-p", str(path), str(backup_tmp)],
+        ["/bin/cp", "-p", str(path), str(backup_tmp)],
     ):
         try:
             subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return
+            return target
         except (OSError, subprocess.CalledProcessError):
-            pass
-    shutil.copy2(path, target)
+            try:
+                backup_tmp.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise
+    shutil.copy2(path, backup_tmp)
+    return target
 
 def digest_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:16]
@@ -5635,19 +7605,61 @@ def scrub_session_payload(obj, stats, key=None):
     return obj
 
 def repair_rollout(path: Path):
-    global files_changed, images_omitted, image_chars_omitted, strings_omitted, string_chars_omitted
+    global active_backup_target, active_backup_tmp, active_source_identity, active_source_path, active_tmp
+    global files_changed, had_error
+    global image_chars_omitted, images_omitted, saw_low_space, string_chars_omitted, strings_omitted
 
     try:
-        if path.stat().st_size < min_bytes:
+        initial_stat = path.stat()
+        initial_identity = source_identity(initial_stat)
+        source_size = initial_stat.st_size
+        if source_size < min_bytes:
             return
-    except OSError:
+    except OSError as exc:
+        had_error = True
+        print(f"session-payload-repair source_stat_failed={path}: {exc}", file=sys.stderr)
         return
 
     if is_open(path):
         print(f"session-payload-repair skip_open={path}", file=sys.stderr)
         return
 
+    # Check the real filesystem for each destination without creating a backup
+    # directory first.  APFS clone is cheap, but the safe fallback is a full copy.
+    try:
+        backup_parent, backup_parent_stat = existing_parent(backup_root)
+        sessions_free = shutil.disk_usage(path.parent).free
+        backup_free = shutil.disk_usage(backup_parent).free
+    except OSError as exc:
+        had_error = True
+        print(f"session-payload-repair skip_disk_check_failed={path}: {exc}", file=sys.stderr)
+        return
+
+    if initial_stat.st_dev == backup_parent_stat.st_dev:
+        sessions_required = min_free_reserve + (source_size * 2)
+        backup_required = sessions_required
+        enough_space = sessions_free >= sessions_required
+    else:
+        sessions_required = min_free_reserve + source_size
+        backup_required = min_free_reserve + source_size
+        enough_space = sessions_free >= sessions_required and backup_free >= backup_required
+    if not enough_space:
+        saw_low_space = True
+        print(
+            "session-payload-repair skip_low_space="
+            f"{path} sessions_dev={initial_stat.st_dev} backup_dev={backup_parent_stat.st_dev} "
+            f"sessions_free={sessions_free} sessions_required={sessions_required} "
+            f"backup_free={backup_free} backup_required={backup_required} "
+            f"reserve_bytes={min_free_reserve} source_bytes={source_size}",
+            file=sys.stderr,
+        )
+        return
+
     tmp = path.with_name(f".{path.name}.tmp-session-payload-repair-{os.getpid()}")
+    active_tmp = tmp
+    active_backup_target = None
+    active_source_path = path
+    active_source_identity = initial_identity
     changed = False
     file_images = 0
     file_chars = 0
@@ -5678,30 +7690,38 @@ def repair_rollout(path: Path):
                 else:
                     dst.write(line)
     except Exception as exc:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        had_error = True
+        remove_active_artifacts()
         print(f"session-payload-repair failed={path}: {exc}", file=sys.stderr)
         return
 
     if not changed:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        remove_active_artifacts()
+        return
+
+    if not source_is_unchanged(path, initial_identity, "pre_backup"):
+        remove_active_artifacts()
         return
 
     try:
-        backup_file(path)
+        backup_target = prepare_backup(path)
+        if not source_is_unchanged(path, initial_identity, "pre_replace"):
+            remove_active_artifacts()
+            return
+        active_backup_target = backup_target
+        os.replace(active_backup_tmp, backup_target)
+        active_backup_tmp = None
         os.replace(tmp, path)
     except Exception as exc:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        had_error = True
+        remove_active_artifacts()
         print(f"session-payload-repair replace_failed={path}: {exc}", file=sys.stderr)
         return
+
+    active_tmp = None
+    active_backup_target = None
+    active_source_path = None
+    active_source_identity = None
 
     files_changed += 1
     images_omitted += file_images
@@ -5730,6 +7750,11 @@ else:
         backup_dir.rmdir()
     except OSError:
         pass
+
+if had_error:
+    raise SystemExit(1)
+if saw_low_space:
+    raise SystemExit(28)
 PY
 }
 
@@ -6648,6 +8673,14 @@ main() {
     list-accounts) list_accounts ;;
     account-status) account_status_for "${2:-}" ;;
     list-accounts-status) list_accounts_status ;;
+    opencodex-status) opencodex_status ;;
+    opencodex-install) opencodex_install ;;
+    opencodex-start) opencodex_start ;;
+    opencodex-stop) opencodex_stop ;;
+    opencodex-restore) opencodex_restore ;;
+    opencodex-dashboard) opencodex_dashboard ;;
+    opencodex-launch) opencodex_launch ;;
+    opencodex-enable-all-profiles) opencodex_enable_all_profiles ;;
     delete-account) delete_account "${2:-}" ;;
     link-history) link_history_for "${2:-}" ;;
     unlink-history) unlink_history_for "${2:-}" ;;

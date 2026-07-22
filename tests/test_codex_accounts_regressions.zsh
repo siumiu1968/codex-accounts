@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 HELPER="$ROOT/scripts/codex_multi_account.zsh"
 SWIFT_SOURCE="$ROOT/macos/CodexAccounts/Sources/CodexAccounts.swift"
+BUILD_SCRIPT="$ROOT/scripts/build_codex_accounts_app.zsh"
+OPENCODEX_HK_OVERLAY="$ROOT/resources/opencodex-zh-hk/2.7.33"
 TMP_ROOT="$(mktemp -d /tmp/codex-accounts-regression.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -97,6 +99,552 @@ make_fake_desktop_app "$TMP_ROOT/CustomDesktop.app" "example.custom.desktop"
   CODEX_USER_APPLICATIONS_DIR="$DETECTION_EMPTY_APPS" \
   "$HELPER" codex-app-path
 )" == "$TMP_ROOT/CustomDesktop.app" ]]
+
+# OpenCodex is an opt-in lab profile with its own Codex home, npm prefix,
+# OpenCodex state, and fake HOME. Its machine-readable status is always exactly
+# four TSV columns and must stay silent when the runtime is absent.
+OPENCODEX_TEST_ROOT="$TMP_ROOT/app-data/OpenCodex"
+OPENCODEX_TEST_STATE="$OPENCODEX_TEST_ROOT/state"
+OPENCODEX_TEST_PREFIX="$OPENCODEX_TEST_ROOT/runtime"
+OPENCODEX_TEST_HOME="$OPENCODEX_TEST_ROOT/home"
+OPENCODEX_TEST_LOGS="$OPENCODEX_TEST_ROOT/logs"
+OPENCODEX_TEST_FINGERPRINT="$OPENCODEX_TEST_STATE/catalog-verification.json"
+OPENCODEX_TEST_CODEX_HOME="$TMP_ROOT/accounts/opencodex-lab"
+OPENCODEX_TEST_BIN="$OPENCODEX_TEST_PREFIX/node_modules/.bin/ocx"
+OPENCODEX_TEST_PACKAGE_JSON="$OPENCODEX_TEST_PREFIX/node_modules/@bitkyc08/opencodex/package.json"
+OPENCODEX_TEST_DESKTOP_APP="$TMP_ROOT/OpenCodexDesktop.app"
+OPENCODEX_TEST_CLI_ARGS="$TMP_ROOT/opencodex-cli-args.txt"
+OPENCODEX_MOCK_BIN="$TMP_ROOT/opencodex-mock-bin"
+OPENCODEX_TEST_SECRET_ENV="$TMP_ROOT/opencodex-dashscope.env"
+mkdir -p "$OPENCODEX_MOCK_BIN"
+printf '%s\n' 'DASHSCOPE_API_KEY=mock-opencodex-secret' > "$OPENCODEX_TEST_SECRET_ENV"
+chmod 600 "$OPENCODEX_TEST_SECRET_ENV"
+printf '%s\n' '#!/bin/zsh' 'exit 66' > "$OPENCODEX_MOCK_BIN/npm"
+chmod +x "$OPENCODEX_MOCK_BIN/npm"
+make_fake_desktop_app "$OPENCODEX_TEST_DESKTOP_APP" "com.openai.codex"
+mkdir -p "$OPENCODEX_TEST_DESKTOP_APP/Contents/Resources"
+cat > "$OPENCODEX_TEST_DESKTOP_APP/Contents/Resources/codex" <<'MOCK_CODEX_CLI'
+#!/bin/zsh
+set -euo pipefail
+printf '%s\n' "$@" > "$MOCK_CODEX_ARGS_LOG"
+MOCK_CODEX_CLI
+chmod +x "$OPENCODEX_TEST_DESKTOP_APP/Contents/Resources/codex"
+
+opencodex_helper() {
+  CODEX_APP="$OPENCODEX_TEST_DESKTOP_APP" \
+  OPENCODEX_ROOT="$OPENCODEX_TEST_ROOT" \
+  OPENCODEX_STATE_DIR="$OPENCODEX_TEST_STATE" \
+  OPENCODEX_NPM_PREFIX="$OPENCODEX_TEST_PREFIX" \
+  OPENCODEX_FAKE_HOME="$OPENCODEX_TEST_HOME" \
+  OPENCODEX_LOG_DIR="$OPENCODEX_TEST_LOGS" \
+  OPENCODEX_LAB_CODEX_HOME="$OPENCODEX_TEST_CODEX_HOME" \
+  OPENCODEX_BIN="$OPENCODEX_TEST_BIN" \
+  OPENCODEX_PACKAGE_JSON="$OPENCODEX_TEST_PACKAGE_JSON" \
+  OPENCODEX_RUNTIME_SEED_DIR="$TMP_ROOT/no-opencodex-runtime-seed" \
+  OPENCODEX_CURL_BIN="$OPENCODEX_MOCK_BIN/curl" \
+  OPENCODEX_OPEN_BIN="$OPENCODEX_MOCK_BIN/open" \
+  DASHSCOPE_SECRET_ENV_FILE="$OPENCODEX_TEST_SECRET_ENV" \
+  DASHSCOPE_API_KEY= \
+  AI_API_KEY= \
+  NPM_BIN="$OPENCODEX_MOCK_BIN/npm" \
+  OPENCODEX_START_MAX_WAITS=40 \
+  OPENCODEX_START_WAIT_SECONDS=0.05 \
+  OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-40}" \
+  OPENCODEX_SYNC_WAIT_SECONDS="${OPENCODEX_SYNC_WAIT_SECONDS:-0.05}" \
+  OPENCODEX_FORCE_SYNC="${OPENCODEX_FORCE_SYNC:-0}" \
+  MOCK_SYNC_MODE="${MOCK_SYNC_MODE:-}" \
+  PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  SECOND_CODEX_HOME="$TMP_ROOT/account2" \
+  SECOND_APP_DATA="$TMP_ROOT/account2-data" \
+  "$HELPER" "$@"
+}
+
+[[ "$(opencodex_helper opencodex-status)" == $'0\t0\tunknown\t' ]]
+
+# A pre-existing symlink with the reserved Lab name must fail before it can
+# write an ownership marker or any OpenCodex configuration into its target.
+OPENCODEX_SYMLINK_ACCOUNTS="$TMP_ROOT/opencodex-symlink-accounts"
+OPENCODEX_SYMLINK_APP_DATA="$TMP_ROOT/opencodex-symlink-app-data"
+mkdir -p "$OPENCODEX_SYMLINK_ACCOUNTS" "$OPENCODEX_SYMLINK_APP_DATA"
+printf '%s\n' 'primary-sentinel' > "$PRIMARY_HOME/opencodex-symlink-sentinel"
+OPENCODEX_SYMLINK_SENTINEL_HASH="$(shasum -a 256 "$PRIMARY_HOME/opencodex-symlink-sentinel" | awk '{print $1}')"
+ln -s "$PRIMARY_HOME" "$OPENCODEX_SYMLINK_ACCOUNTS/opencodex-lab"
+opencodex_symlink_rc=0
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$OPENCODEX_SYMLINK_ACCOUNTS" \
+APP_DATA_ROOT="$OPENCODEX_SYMLINK_APP_DATA" \
+"$HELPER" opencodex-start >/dev/null 2>&1 || opencodex_symlink_rc=$?
+[[ "$opencodex_symlink_rc" != "0" ]]
+[[ ! -e "$PRIMARY_HOME/.codex-accounts-opencodex-lab" ]]
+[[ "$(shasum -a 256 "$PRIMARY_HOME/opencodex-symlink-sentinel" | awk '{print $1}')" == "$OPENCODEX_SYMLINK_SENTINEL_HASH" ]]
+
+# The first managed start claims only the dedicated empty Lab paths, then fails
+# closed because no pinned runtime is installed yet.
+opencodex_uninstalled_rc=0
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_uninstalled_rc=$?
+[[ "$opencodex_uninstalled_rc" != "0" ]]
+[[ "$(cat "$OPENCODEX_TEST_CODEX_HOME/.codex-accounts-opencodex-lab")" == "managed-by-codex-accounts-opencodex-lab-v1" ]]
+[[ "$(cat "$OPENCODEX_TEST_ROOT/.codex-accounts-opencodex-lab")" == "managed-by-codex-accounts-opencodex-lab-v1" ]]
+[[ "$(cat "$TMP_ROOT/app-data/opencodex-lab/.codex-accounts-opencodex-lab")" == "managed-by-codex-accounts-opencodex-lab-v1" ]]
+
+mkdir -p "${OPENCODEX_TEST_BIN:h}" "${OPENCODEX_TEST_PACKAGE_JSON:h}"
+cat > "$OPENCODEX_TEST_PACKAGE_JSON" <<'JSON'
+{"name":"@bitkyc08/opencodex","version":"2.7.33"}
+JSON
+cat > "$OPENCODEX_TEST_BIN" <<'MOCK_OCX'
+#!/bin/zsh
+set -euo pipefail
+
+[[ "$HOME" == "$MOCK_EXPECTED_HOME" ]]
+[[ "$CODEX_HOME" == "$MOCK_EXPECTED_CODEX_HOME" ]]
+[[ "$OPENCODEX_HOME" == "$MOCK_EXPECTED_STATE" ]]
+[[ "$NPM_CONFIG_PREFIX" == "$MOCK_EXPECTED_PREFIX" ]]
+[[ "${DASHSCOPE_API_KEY:-}" == "mock-opencodex-secret" ]]
+[[ "${AI_API_KEY:-}" == "mock-opencodex-secret" ]]
+
+case "${1:-}" in
+  start)
+    python3 - "$OPENCODEX_HOME/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert config["hostname"] == "127.0.0.1"
+assert config["syncResumeHistory"] is False
+assert config["codexAutoStart"] is False
+assert config["providers"]["openai"]["codexAccountMode"] == "direct"
+assert config["claudeCode"]["systemEnv"] is False
+PY
+    mkdir -p "$OPENCODEX_HOME"
+    printf '%s\n' "$$" > "$OPENCODEX_HOME/ocx.pid"
+    printf '{"pid":%s,"port":10123,"hostname":"127.0.0.1"}\n' "$$" > "$OPENCODEX_HOME/runtime-port.json"
+    printf '%s\n' 'start' >> "$OPENCODEX_HOME/order.log"
+    printf '%s\t%s\t%s\n' "$HOME" "$CODEX_HOME" "$OPENCODEX_HOME" > "$OPENCODEX_HOME/start-env.tsv"
+    trap 'rm -f "$OPENCODEX_HOME/ocx.pid" "$OPENCODEX_HOME/runtime-port.json"; exit 0' TERM INT HUP
+    while true; do sleep 0.1; done
+    ;;
+  sync)
+    [[ -e "$OPENCODEX_HOME/health-called" ]]
+    printf '%s\n' 'sync' >> "$OPENCODEX_HOME/order.log"
+    case "${MOCK_SYNC_MODE:-}" in
+      hang)
+        printf '%s\n' "$$" > "$OPENCODEX_HOME/sync-hang.pid"
+        trap 'rm -f "$OPENCODEX_HOME/sync-hang.pid"; exit 0' TERM INT HUP
+        while true; do sleep 0.1; done
+        ;;
+      fail)
+        exit 71
+        ;;
+    esac
+    sync_count=0
+    [[ -r "$OPENCODEX_HOME/sync-count" ]] && sync_count="$(cat "$OPENCODEX_HOME/sync-count")"
+    sync_count=$(( sync_count + 1 ))
+    printf '%s\n' "$sync_count" > "$OPENCODEX_HOME/sync-count"
+    if (( sync_count == 1 )); then
+      cat > "$CODEX_HOME/opencodex-catalog.json" <<'JSON'
+{"models":[{"slug":"gpt-test","display_name":"Incomplete GPT Test","visibility":"list"}]}
+JSON
+    else
+      cat > "$CODEX_HOME/opencodex-catalog.json" <<'JSON'
+{"models":[{"slug":"mock-provider/gpt-test","display_name":"GPT Test","visibility":"list"}]}
+JSON
+    fi
+    cat > "$CODEX_HOME/config.toml" <<EOF
+openai_base_url = "http://127.0.0.1:10123/v1"
+model_catalog_json = "$CODEX_HOME/opencodex-catalog.json"
+
+[features]
+fast_mode = true
+EOF
+    : > "$OPENCODEX_HOME/sync-called"
+    ;;
+  stop)
+    if [[ -r "$OPENCODEX_HOME/ocx.pid" ]]; then
+      pid="$(cat "$OPENCODEX_HOME/ocx.pid")"
+      [[ "$pid" == <-> ]] && kill -TERM "$pid" 2>/dev/null || true
+    fi
+    for _ in {1..40}; do
+      [[ ! -e "$OPENCODEX_HOME/runtime-port.json" ]] && break
+      sleep 0.05
+    done
+    rm -f "$OPENCODEX_HOME/ocx.pid" "$OPENCODEX_HOME/runtime-port.json"
+    ;;
+  restore)
+    : > "$OPENCODEX_HOME/restore-called"
+    ;;
+  service|codex-shim)
+    echo "service/shim must never be called" >&2
+    exit 99
+    ;;
+  *)
+    echo "unexpected mock ocx command: ${1:-}" >&2
+    exit 2
+    ;;
+esac
+MOCK_OCX
+chmod +x "$OPENCODEX_TEST_BIN"
+
+cat > "$OPENCODEX_MOCK_BIN/curl" <<'MOCK_CURL'
+#!/bin/zsh
+set -euo pipefail
+runtime="$MOCK_EXPECTED_STATE/runtime-port.json"
+[[ -r "$runtime" ]] || exit 7
+python3 - "$runtime" "${MOCK_HEALTH_VERSION:-2.7.33}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(sys.argv[1]).parent.joinpath("health-called").touch()
+with Path(sys.argv[1]).parent.joinpath("order.log").open("a", encoding="utf-8") as handle:
+    handle.write("health\n")
+print(json.dumps({
+    "status": "ok",
+    "service": "opencodex",
+    "version": sys.argv[2],
+    "pid": state["pid"],
+    "port": state["port"],
+}))
+PY
+MOCK_CURL
+chmod +x "$OPENCODEX_MOCK_BIN/curl"
+
+cat > "$OPENCODEX_MOCK_BIN/open" <<'MOCK_OPEN'
+#!/bin/zsh
+set -euo pipefail
+printf '%s\n' "$@" > "$MOCK_OPEN_LOG"
+MOCK_OPEN
+chmod +x "$OPENCODEX_MOCK_BIN/open"
+
+export MOCK_EXPECTED_HOME="$OPENCODEX_TEST_HOME"
+export MOCK_EXPECTED_CODEX_HOME="$OPENCODEX_TEST_CODEX_HOME"
+export MOCK_EXPECTED_STATE="$OPENCODEX_TEST_STATE"
+export MOCK_EXPECTED_PREFIX="$OPENCODEX_TEST_PREFIX"
+export MOCK_OPEN_LOG="$TMP_ROOT/opencodex-open.log"
+export MOCK_CODEX_ARGS_LOG="$OPENCODEX_TEST_CLI_ARGS"
+
+# A configured third-party provider makes a bare/native-only catalog incomplete.
+# The first mock sync intentionally writes that stale shape; the helper must
+# retry until the provider namespace is present.
+python3 - "$OPENCODEX_TEST_STATE/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+config = json.loads(path.read_text(encoding="utf-8"))
+config["providers"]["mock-provider"] = {
+    "adapter": "openai-chat",
+    "baseUrl": "https://mock.invalid/v1",
+    "models": [{"id": "gpt-test"}],
+}
+config["providers"]["disabled-provider"] = {
+    "adapter": "openai-chat",
+    "baseUrl": "https://disabled.invalid/v1",
+    "disabled": True,
+    "models": [{"id": "must-not-block-sync"}],
+}
+path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+# The GUI assets directory must not be a symlink, otherwise applying the
+# verified overlay could write outside the managed OpenCodex runtime.
+OPENCODEX_ASSETS_ESCAPE="$TMP_ROOT/opencodex-assets-escape"
+mkdir -p "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist" "$OPENCODEX_ASSETS_ESCAPE"
+printf '%s\n' 'outside-sentinel' > "$OPENCODEX_ASSETS_ESCAPE/sentinel"
+OPENCODEX_ASSETS_SENTINEL_HASH="$(shasum -a 256 "$OPENCODEX_ASSETS_ESCAPE/sentinel" | awk '{print $1}')"
+ln -s "$OPENCODEX_ASSETS_ESCAPE" "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist/assets"
+opencodex_assets_symlink_rc=0
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_assets_symlink_rc=$?
+[[ "$opencodex_assets_symlink_rc" != "0" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_ASSETS_ESCAPE/sentinel" | awk '{print $1}')" == "$OPENCODEX_ASSETS_SENTINEL_HASH" ]]
+[[ ! -e "$OPENCODEX_ASSETS_ESCAPE/index-Cgt7VoIY.js" ]]
+unlink "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist/assets"
+
+[[ "$(opencodex_helper account-status opencodex-lab)" == "opencodex-lab | signed_in_local | external | local-proxy | external | opencodex:2.7.33 | none" ]]
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+OPENCODEX_TEST_GUI="$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist"
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/index.html" | awk '{print $1}')" == "6378a09aedf2ee6e884e1eddc40620c335a0039bdc9ab59c7348b26a3c39b29c" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js" | awk '{print $1}')" == "c149306ad9aeb9aeaa07f7bd7f117bd02b0c0d261482a025389859196f771c08" ]]
+grep -q 'index-Cgt7VoIY.js' "$OPENCODEX_TEST_GUI/index.html"
+grep -q '繁體中文（香港）' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
+grep -q '"nav.dashboard":`總覽`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
+grep -q '"nav.providers":`供應商`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
+grep -q '"nav.logs":`記錄及偵錯`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
+grep -q '"storage.title":`儲存空間`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
+[[ "$(opencodex_helper opencodex-status)" == $'1\t1\t2.7.33\thttp://127.0.0.1:10123/' ]]
+[[ "$(MOCK_HEALTH_VERSION=2.7.32 opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+[[ "$(cat "$OPENCODEX_TEST_STATE/start-env.tsv")" == "${OPENCODEX_TEST_HOME}"$'\t'"${OPENCODEX_TEST_CODEX_HOME}"$'\t'"${OPENCODEX_TEST_STATE}" ]]
+python3 - "$OPENCODEX_TEST_STATE/config.json" <<'PY'
+import json
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+config = json.loads(path.read_text(encoding="utf-8"))
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+assert config["hostname"] == "127.0.0.1"
+assert config["syncResumeHistory"] is False
+assert config["codexAutoStart"] is False
+assert config["providers"]["openai"]["codexAccountMode"] == "direct"
+assert config["providers"]["openai"]["authMode"] == "forward"
+assert config["claudeCode"] == {"enabled": False, "systemEnv": False}
+PY
+[[ ! -e "$OPENCODEX_TEST_ROOT/ocx.pid" ]]
+[[ ! -e "$OPENCODEX_TEST_ROOT/runtime-port.json" ]]
+[[ ! -e "$OPENCODEX_TEST_HOME/.opencodex" ]]
+[[ "$(sed -n '1,3p' "$OPENCODEX_TEST_STATE/order.log")" == $'start\nhealth\nsync' ]]
+[[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "2" ]]
+grep -q '"slug":"mock-provider/gpt-test"' "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
+[[ -f "$OPENCODEX_TEST_FINGERPRINT" && ! -L "$OPENCODEX_TEST_FINGERPRINT" ]]
+[[ "$(stat -f '%Lp' "$OPENCODEX_TEST_FINGERPRINT")" == "600" ]]
+python3 - "$OPENCODEX_TEST_FINGERPRINT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert value["schema"] == 1
+assert value["owner"] == "managed-by-codex-accounts-opencodex-catalog-v1"
+assert value["opencodex_version"] == "2.7.33"
+assert len(value["catalog_inputs_sha256"]) == 64
+assert len(value["catalog_sha256"]) == 64
+assert "mock-opencodex-secret" not in json.dumps(value)
+PY
+
+# Every ordinary managed profile may consume the one verified shared catalog,
+# without copying auth/history or overwriting an existing user-owned route.
+ROUTE_CLEAN_NAME="route-clean"
+ROUTE_CHANGED_NAME="route-changed"
+ROUTE_USER_NAME="route-user"
+ROUTE_PROVIDER_NAME="route-provider"
+ROUTE_CLEAN_HOME="$TMP_ROOT/accounts/$ROUTE_CLEAN_NAME"
+ROUTE_CHANGED_HOME="$TMP_ROOT/accounts/$ROUTE_CHANGED_NAME"
+ROUTE_USER_HOME="$TMP_ROOT/accounts/$ROUTE_USER_NAME"
+ROUTE_PROVIDER_HOME="$TMP_ROOT/accounts/$ROUTE_PROVIDER_NAME"
+for route_name in "$ROUTE_CLEAN_NAME" "$ROUTE_CHANGED_NAME" "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
+  opencodex_helper init-account "$route_name" >/dev/null
+done
+cat > "$ROUTE_CLEAN_HOME/config.toml" <<'TOML'
+model = "gpt-5.6-sol"
+model_provider = "openai"
+
+[features]
+memories = true
+TOML
+cat > "$ROUTE_PROVIDER_HOME/config.toml" <<'TOML'
+model = "custom-model"
+model_provider = "user_proxy"
+
+[model_providers.user_proxy]
+name = "User Proxy"
+base_url = "http://127.0.0.1:45680/v1"
+wire_api = "responses"
+TOML
+cp "$ROUTE_CLEAN_HOME/config.toml" "$ROUTE_CHANGED_HOME/config.toml"
+cat > "$ROUTE_USER_HOME/config.toml" <<'TOML'
+model = "gpt-user"
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:45678/v1"
+model_catalog_json = "/Users/example/user-owned-catalog.json"
+
+[features]
+memories = true
+TOML
+printf '%s\n' '{"tokens":{"access_token":"do-not-touch"}}' > "$ROUTE_CLEAN_HOME/auth.json"
+ROUTE_AUTH_HASH="$(shasum -a 256 "$ROUTE_CLEAN_HOME/auth.json" | awk '{print $1}')"
+ROUTE_HISTORY_MODE="$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")"
+ROUTE_HISTORY_MARKER_HASH="$(shasum -a 256 "$ROUTE_CLEAN_HOME/.codex-accounts-history-mode" | awk '{print $1}')"
+ROUTE_USER_CONFIG_HASH="$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')"
+ROUTE_PROVIDER_CONFIG_HASH="$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')"
+
+# The shared CLI wrapper must stay inside the owned OpenCodex root. A linked
+# bin directory must fail before any profile route is changed or an external
+# target can be overwritten.
+OPENCODEX_WRAPPER_ESCAPE="$TMP_ROOT/opencodex-wrapper-escape"
+mkdir -p "$OPENCODEX_WRAPPER_ESCAPE"
+printf '%s\n' 'outside-wrapper-sentinel' > "$OPENCODEX_WRAPPER_ESCAPE/sentinel"
+OPENCODEX_WRAPPER_SENTINEL_HASH="$(shasum -a 256 "$OPENCODEX_WRAPPER_ESCAPE/sentinel" | awk '{print $1}')"
+ln -s "$OPENCODEX_WRAPPER_ESCAPE" "$OPENCODEX_TEST_ROOT/bin"
+opencodex_wrapper_symlink_rc=0
+opencodex_helper opencodex-enable-all-profiles >/dev/null 2>&1 || opencodex_wrapper_symlink_rc=$?
+[[ "$opencodex_wrapper_symlink_rc" != "0" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_WRAPPER_ESCAPE/sentinel" | awk '{print $1}')" == "$OPENCODEX_WRAPPER_SENTINEL_HASH" ]]
+[[ ! -e "$OPENCODEX_WRAPPER_ESCAPE/codex-opencodex-router" ]]
+[[ ! -e "$ROUTE_CLEAN_HOME/.codex-accounts-opencodex-route.json" ]]
+unlink "$OPENCODEX_TEST_ROOT/bin"
+
+opencodex_helper opencodex-enable-all-profiles >/dev/null
+OPENCODEX_TEST_WRAPPER="$OPENCODEX_TEST_ROOT/bin/codex-opencodex-router"
+[[ -x "$OPENCODEX_TEST_WRAPPER" && ! -L "$OPENCODEX_TEST_WRAPPER" ]]
+[[ "$(stat -f '%Lp' "$OPENCODEX_TEST_WRAPPER")" == "700" ]]
+grep -Fq '# managed-by-codex-accounts-opencodex-cli-route-v1' "$OPENCODEX_TEST_WRAPPER"
+! grep -Eq 'AI_API_KEY|DASHSCOPE_API_KEY|sk-[[:alnum:]]' "$OPENCODEX_TEST_WRAPPER"
+"$OPENCODEX_TEST_WRAPPER" app-server --listen stdio://
+python3 - "$OPENCODEX_TEST_CLI_ARGS" "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json" <<'PY'
+import sys
+from pathlib import Path
+
+args = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+catalog = sys.argv[2]
+assert args == [
+    "-c", 'model="gpt-5.6-sol"',
+    "-c", 'model_provider="openai"',
+    "-c", 'model_reasoning_effort="xhigh"',
+    "-c", 'openai_base_url="http://127.0.0.1:10123/v1"',
+    "-c", f'model_catalog_json="{catalog}"',
+    "app-server", "--listen", "stdio://",
+]
+PY
+for routed_home in "$ROUTE_CLEAN_HOME" "$ROUTE_CHANGED_HOME"; do
+  grep -Fq 'openai_base_url = "http://127.0.0.1:10123/v1"' "$routed_home/config.toml"
+  grep -Fq "model_catalog_json = \"$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json\"" "$routed_home/config.toml"
+  [[ -f "$routed_home/.codex-accounts-opencodex-route.json" ]]
+  [[ ! -e "$routed_home/models_cache.json" ]]
+done
+[[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/auth.json" | awk '{print $1}')" == "$ROUTE_AUTH_HASH" ]]
+[[ "$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")" == "$ROUTE_HISTORY_MODE" ]]
+[[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/.codex-accounts-history-mode" | awk '{print $1}')" == "$ROUTE_HISTORY_MARKER_HASH" ]]
+[[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
+[[ ! -e "$ROUTE_USER_HOME/.codex-accounts-opencodex-route.json" ]]
+[[ "$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_PROVIDER_CONFIG_HASH" ]]
+[[ ! -e "$ROUTE_PROVIDER_HOME/.codex-accounts-opencodex-route.json" ]]
+
+# A real launch reaches the fake-window verification failure only after model
+# routing decisions. User-owned URL/catalog and custom-provider profiles must
+# remain byte-for-byte unchanged through that path.
+for custom_route_name in "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
+  custom_route_launch_rc=0
+  PATH="$OPENCODEX_MOCK_BIN:$PATH" \
+  CODEX_PRELAUNCH_SYNC=0 \
+  CODEX_LAUNCH_VERIFY_MAX_WAITS=0 \
+  opencodex_helper launch-account-nosync "$custom_route_name" >/dev/null 2>&1 || custom_route_launch_rc=$?
+  [[ "$custom_route_launch_rc" != "0" ]]
+done
+[[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
+[[ "$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_PROVIDER_CONFIG_HASH" ]]
+[[ ! -e "$ROUTE_USER_HOME/.codex-accounts-opencodex-route.json" ]]
+[[ ! -e "$ROUTE_PROVIDER_HOME/.codex-accounts-opencodex-route.json" ]]
+
+# An idempotent start reuses the already verified shared catalog without making
+# Profile opening wait on provider discovery again. A forced refresh that hangs
+# must be bounded and may reuse only that same verified catalog.
+OPENCODEX_SYNC_COUNT_WITHOUT_FINGERPRINT="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
+mv "$OPENCODEX_TEST_FINGERPRINT" "$TMP_ROOT/removed-catalog-verification.json"
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+[[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "$(( OPENCODEX_SYNC_COUNT_WITHOUT_FINGERPRINT + 1 ))" ]]
+[[ -f "$OPENCODEX_TEST_FINGERPRINT" ]]
+OPENCODEX_SYNC_COUNT_BEFORE="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+[[ -e "$OPENCODEX_TEST_STATE/sync-called" ]]
+[[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "$OPENCODEX_SYNC_COUNT_BEFORE" ]]
+[[ "$(
+  OPENCODEX_FORCE_SYNC=1 \
+  OPENCODEX_SYNC_MAX_WAITS=4 \
+  OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
+  MOCK_SYNC_MODE=hang \
+  opencodex_helper opencodex-start
+)" == "http://127.0.0.1:10123/" ]]
+[[ ! -e "$OPENCODEX_TEST_STATE/sync-hang.pid" ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t1\t2.7.33\thttp://127.0.0.1:10123/' ]]
+
+# Dashboard opens only the verified loopback URL and never delegates to `ocx gui`.
+opencodex_helper opencodex-dashboard
+[[ "$(cat "$MOCK_OPEN_LOG")" == "http://127.0.0.1:10123/" ]]
+opencodex_helper opencodex-restore >/dev/null
+[[ -e "$OPENCODEX_TEST_STATE/restore-called" ]]
+python3 - "$ROUTE_CHANGED_HOME/config.toml" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+path.write_text(text.replace(
+    'openai_base_url = "http://127.0.0.1:10123/v1"',
+    'openai_base_url = "http://127.0.0.1:45679/v1"',
+), encoding="utf-8")
+PY
+opencodex_helper opencodex-stop >/dev/null
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+! grep -q '^openai_base_url[[:space:]]*=' "$ROUTE_CLEAN_HOME/config.toml"
+! grep -q '^model_catalog_json[[:space:]]*=' "$ROUTE_CLEAN_HOME/config.toml"
+grep -Fq 'openai_base_url = "http://127.0.0.1:45679/v1"' "$ROUTE_CHANGED_HOME/config.toml"
+! grep -q '^model_catalog_json[[:space:]]*=' "$ROUTE_CHANGED_HOME/config.toml"
+[[ ! -e "$ROUTE_CLEAN_HOME/.codex-accounts-opencodex-route.json" ]]
+[[ ! -e "$ROUTE_CHANGED_HOME/.codex-accounts-opencodex-route.json" ]]
+[[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/auth.json" | awk '{print $1}')" == "$ROUTE_AUTH_HASH" ]]
+[[ "$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")" == "$ROUTE_HISTORY_MODE" ]]
+[[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
+
+# Keeping the same provider namespace is not enough: a provider/model setting
+# change invalidates the verification fingerprint, so a timed-out refresh must
+# fail closed instead of silently serving the old catalog.
+cp "$OPENCODEX_TEST_STATE/config.json" "$TMP_ROOT/verified-opencodex-state-config.json"
+python3 - "$OPENCODEX_TEST_STATE/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["providers"]["mock-provider"]["modelContextWindows"] = {"gpt-test": 654321}
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+opencodex_timeout_changed_settings_rc=0
+OPENCODEX_FORCE_SYNC=1 \
+OPENCODEX_SYNC_MAX_WAITS=4 \
+OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
+MOCK_SYNC_MODE=hang \
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_timeout_changed_settings_rc=$?
+[[ "$opencodex_timeout_changed_settings_rc" != "0" ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+cp "$TMP_ROOT/verified-opencodex-state-config.json" "$OPENCODEX_TEST_STATE/config.json"
+chmod 600 "$OPENCODEX_TEST_STATE/config.json"
+
+# Catalog bytes are also bound to the fingerprint. A same-namespace tamper must
+# fail closed, stop the unhealthy launch, and leave managed routes removed.
+cp "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json" "$TMP_ROOT/verified-opencodex-catalog.json"
+printf '%s\n' '{"models":[{"slug":"mock-provider/gpt-test","display_name":"Tampered","visibility":"list"}]}' > "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
+opencodex_timeout_invalid_rc=0
+OPENCODEX_FORCE_SYNC=1 \
+OPENCODEX_SYNC_MAX_WAITS=4 \
+OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
+MOCK_SYNC_MODE=hang \
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_timeout_invalid_rc=$?
+[[ "$opencodex_timeout_invalid_rc" != "0" ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+[[ ! -e "$OPENCODEX_TEST_STATE/sync-hang.pid" ]]
+cp "$TMP_ROOT/verified-opencodex-catalog.json" "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
+
+# Never follow or replace a verification sidecar symlink outside the managed
+# state directory, even after a successful catalog sync.
+mv "$OPENCODEX_TEST_FINGERPRINT" "$TMP_ROOT/verified-catalog-fingerprint.json"
+OPENCODEX_FINGERPRINT_ESCAPE="$TMP_ROOT/opencodex-fingerprint-escape.json"
+printf '%s\n' 'outside-fingerprint-sentinel' > "$OPENCODEX_FINGERPRINT_ESCAPE"
+OPENCODEX_FINGERPRINT_ESCAPE_HASH="$(shasum -a 256 "$OPENCODEX_FINGERPRINT_ESCAPE" | awk '{print $1}')"
+ln -s "$OPENCODEX_FINGERPRINT_ESCAPE" "$OPENCODEX_TEST_FINGERPRINT"
+opencodex_fingerprint_symlink_rc=0
+opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_fingerprint_symlink_rc=$?
+[[ "$opencodex_fingerprint_symlink_rc" != "0" ]]
+[[ -L "$OPENCODEX_TEST_FINGERPRINT" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_FINGERPRINT_ESCAPE" | awk '{print $1}')" == "$OPENCODEX_FINGERPRINT_ESCAPE_HASH" ]]
+unlink "$OPENCODEX_TEST_FINGERPRINT"
+mv "$TMP_ROOT/verified-catalog-fingerprint.json" "$OPENCODEX_TEST_FINGERPRINT"
+
+printf 'tampered\n' > "$OPENCODEX_TEST_GUI/index.html"
+opencodex_helper opencodex-install >/dev/null
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/index.html" | awk '{print $1}')" == "6378a09aedf2ee6e884e1eddc40620c335a0039bdc9ab59c7348b26a3c39b29c" ]]
+[[ "$(opencodex_helper history-mode opencodex-lab)" == "private" ]]
+opencodex_share_rc=0
+opencodex_helper link-history opencodex-lab >/dev/null 2>&1 || opencodex_share_rc=$?
+[[ "$opencodex_share_rc" == "2" ]]
+opencodex_delete_rc=0
+opencodex_helper delete-account opencodex-lab >/dev/null 2>&1 || opencodex_delete_rc=$?
+[[ "$opencodex_delete_rc" == "2" ]]
 
 python3 - "$PROFILE_HOME" <<'PY'
 import json
@@ -372,6 +920,12 @@ catalog.close()
     encoding="utf-8",
 )
 PY
+for _ in {1..40}; do
+  if ! /usr/sbin/lsof "$SHARED_HISTORY_HOME/state_5.sqlite" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
 PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
 ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
 APP_DATA_ROOT="$TMP_ROOT/app-data" \
@@ -525,6 +1079,192 @@ APP_DATA_ROOT="$TMP_ROOT/app-data" \
 [[ ! -e "$SHARED_MEMORY_DIR/memories/private-memory.txt" ]]
 [[ ! -e "$PRIVATE_HISTORY_HOME/memories/shared-memory.txt" ]]
 
+# A stale payload-repair orphan must not remain as a large hidden sibling beside
+# the canonical rollout. This invokes the actual helper only on a blank
+# temporary profile: clean the old orphan, compact the real rollout, and retain
+# its pre-repair backup.
+REPAIR_ACCOUNT_NAME="payload-repair"
+REPAIR_ACCOUNT_HOME="$TMP_ROOT/accounts/$REPAIR_ACCOUNT_NAME"
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" init-account "$REPAIR_ACCOUNT_NAME" >/dev/null
+python3 - "$REPAIR_ACCOUNT_HOME" <<'PY'
+import json
+import os
+import time
+from pathlib import Path
+
+home = Path(os.sys.argv[1])
+sessions = home / "sessions"
+rollout = sessions / "rollout-repair.jsonl"
+rollout.write_text(
+    json.dumps(
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64," + ("A" * 256),
+            "detail": "low",
+        }
+    ) + "\n",
+    encoding="utf-8",
+)
+
+# This matches the helper's own temporary-file convention, but is old and not
+# open. It must go before the canonical rollout is repaired.
+stale = sessions / ".rollout-interrupted.jsonl.tmp-session-payload-repair-999"
+stale.write_bytes(b"partial repair payload")
+old = time.time() - 7200
+os.utime(stale, (old, old))
+PY
+
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES=1 \
+CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS=32 \
+CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS=64 \
+CODEX_REPAIR_MIN_FREE_BYTES=0 \
+"$HELPER" repair-compactions "$REPAIR_ACCOUNT_NAME" >/dev/null
+
+[[ ! -e "$REPAIR_ACCOUNT_HOME/sessions/.rollout-interrupted.jsonl.tmp-session-payload-repair-999" ]]
+[[ -f "$REPAIR_ACCOUNT_HOME/sessions/rollout-repair.jsonl" ]]
+! grep -q 'data:image/png;base64' "$REPAIR_ACCOUNT_HOME/sessions/rollout-repair.jsonl"
+grep -q 'screenshot omitted from local history' "$REPAIR_ACCOUNT_HOME/sessions/rollout-repair.jsonl"
+find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name rollout-repair.jsonl -print -quit | grep -q .
+
+# Refuse a fresh repair before writing either temporary artifact when the
+# configured reserve cannot be met. The canonical rollout must stay byte-for-
+# byte identical and the command must expose its dedicated low-space status.
+python3 - "$REPAIR_ACCOUNT_HOME/sessions/rollout-low-space.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps({"type": "input_image", "image_url": "data:image/png;base64," + ("B" * 256)}) + "\n",
+    encoding="utf-8",
+)
+PY
+LOW_SPACE_ROLLOUT="$REPAIR_ACCOUNT_HOME/sessions/rollout-low-space.jsonl"
+LOW_SPACE_HASH_BEFORE="$(shasum -a 256 "$LOW_SPACE_ROLLOUT" | awk '{print $1}')"
+low_space_rc=0
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES=1 \
+CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS=32 \
+CODEX_REPAIR_MIN_FREE_BYTES=999999999999999999 \
+"$HELPER" repair-compactions "$REPAIR_ACCOUNT_NAME" >/dev/null 2>&1 || low_space_rc=$?
+[[ "$low_space_rc" == "28" ]]
+[[ "$(shasum -a 256 "$LOW_SPACE_ROLLOUT" | awk '{print $1}')" == "$LOW_SPACE_HASH_BEFORE" ]]
+! find "$REPAIR_ACCOUNT_HOME/sessions" -type f -name '.*.tmp-session-payload-repair-*' -print -quit | grep -q .
+! find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name '.*.tmp-session-backup-*' -print -quit | grep -q .
+! find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name rollout-low-space.jsonl -print -quit | grep -q .
+
+# A second repair sharing the same sessions root must fail fast while another
+# process owns the repair lock. Hold the real advisory lock in a tiny helper,
+# then always terminate and reap it before checking the result.
+python3 - "$REPAIR_ACCOUNT_HOME/sessions/rollout-lock-contention.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps({"type": "input_image", "image_url": "data:image/png;base64," + ("C" * 256)}) + "\n",
+    encoding="utf-8",
+)
+PY
+LOCKED_ROLLOUT="$REPAIR_ACCOUNT_HOME/sessions/rollout-lock-contention.jsonl"
+LOCKED_HASH_BEFORE="$(shasum -a 256 "$LOCKED_ROLLOUT" | awk '{print $1}')"
+REPAIR_LOCK_READY="$TMP_ROOT/repair-lock-ready"
+python3 - "$REPAIR_ACCOUNT_HOME/.session-payload-repair.lock" "$REPAIR_LOCK_READY" <<'PY' &
+import fcntl
+import signal
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open("a+", encoding="utf-8") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    Path(sys.argv[2]).touch()
+    signal.pause()
+PY
+REPAIR_LOCK_HOLDER_PID=$!
+for _ in {1..100}; do
+  [[ -e "$REPAIR_LOCK_READY" ]] && break
+  sleep 0.02
+done
+if [[ ! -e "$REPAIR_LOCK_READY" ]]; then
+  kill "$REPAIR_LOCK_HOLDER_PID" 2>/dev/null || true
+  wait "$REPAIR_LOCK_HOLDER_PID" 2>/dev/null || true
+  echo "Repair lock holder did not become ready." >&2
+  exit 1
+fi
+lock_contention_rc=0
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES=1 \
+CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS=32 \
+"$HELPER" repair-compactions "$REPAIR_ACCOUNT_NAME" >/dev/null 2>&1 || lock_contention_rc=$?
+kill "$REPAIR_LOCK_HOLDER_PID" 2>/dev/null || true
+wait "$REPAIR_LOCK_HOLDER_PID" 2>/dev/null || true
+[[ "$lock_contention_rc" == "75" ]]
+[[ "$(shasum -a 256 "$LOCKED_ROLLOUT" | awk '{print $1}')" == "$LOCKED_HASH_BEFORE" ]]
+! find "$REPAIR_ACCOUNT_HOME/sessions" -type f -name '.*.tmp-session-payload-repair-*' -print -quit | grep -q .
+! find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name '.*.tmp-session-backup-*' -print -quit | grep -q .
+! find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name rollout-lock-contention.jsonl -print -quit | grep -q .
+
+# The sessions-root offline gate must fail closed before the transaction starts
+# when any rollout is open. Keep a fresh canonical rollout open in a tiny
+# helper, then always terminate and reap it before validating the result.
+python3 - "$REPAIR_ACCOUNT_HOME/sessions/rollout-open-session.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps({"type": "input_image", "image_url": "data:image/png;base64," + ("D" * 256)}) + "\n",
+    encoding="utf-8",
+)
+PY
+OPEN_SESSION_ROLLOUT="$REPAIR_ACCOUNT_HOME/sessions/rollout-open-session.jsonl"
+OPEN_SESSION_HASH_BEFORE="$(shasum -a 256 "$OPEN_SESSION_ROLLOUT" | awk '{print $1}')"
+OPEN_SESSION_READY="$TMP_ROOT/open-session-ready"
+python3 - "$OPEN_SESSION_ROLLOUT" "$OPEN_SESSION_READY" <<'PY' &
+import signal
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open("r", encoding="utf-8"):
+    Path(sys.argv[2]).touch()
+    signal.pause()
+PY
+OPEN_SESSION_HOLDER_PID=$!
+for _ in {1..100}; do
+  [[ -e "$OPEN_SESSION_READY" ]] && break
+  sleep 0.02
+done
+if [[ ! -e "$OPEN_SESSION_READY" ]]; then
+  kill "$OPEN_SESSION_HOLDER_PID" 2>/dev/null || true
+  wait "$OPEN_SESSION_HOLDER_PID" 2>/dev/null || true
+  echo "Open-session holder did not become ready." >&2
+  exit 1
+fi
+open_session_rc=0
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES=1 \
+CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS=32 \
+"$HELPER" repair-compactions "$REPAIR_ACCOUNT_NAME" >/dev/null 2>&1 || open_session_rc=$?
+kill "$OPEN_SESSION_HOLDER_PID" 2>/dev/null || true
+wait "$OPEN_SESSION_HOLDER_PID" 2>/dev/null || true
+[[ "$open_session_rc" == "75" ]]
+[[ "$(shasum -a 256 "$OPEN_SESSION_ROLLOUT" | awk '{print $1}')" == "$OPEN_SESSION_HASH_BEFORE" ]]
+! find "$REPAIR_ACCOUNT_HOME/sessions" -type f -name '.*.tmp-session-payload-repair-*' -print -quit | grep -q .
+! find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name '.*.tmp-session-backup-*' -print -quit | grep -q .
+! find "$REPAIR_ACCOUNT_HOME/recovery-backups" -type f -name rollout-open-session.jsonl -print -quit | grep -q .
+
 python3 - "$PROFILE_HOME" "$HELPER" "$SWIFT_SOURCE" <<'PY'
 import re
 import sqlite3
@@ -633,6 +1373,90 @@ assert '"$app_path/Contents/MacOS/ChatGPT"' in codex_process_match.group(1)
 assert '"$app_path/Contents/MacOS/Codex"' in codex_process_match.group(1)
 assert 'CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"' in helper
 assert 'CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"' in helper
+assert 'OPENCODEX_VERSION="2.7.33"' in helper
+assert 'OPENCODEX_PACKAGE="@bitkyc08/opencodex"' in helper
+assert 'OPENCODEX_LAB_CODEX_HOME="${OPENCODEX_LAB_CODEX_HOME:-$ACCOUNTS_ROOT/$OPENCODEX_LAB_ACCOUNT}"' in helper
+assert 'OPENCODEX_LAB_APP_DATA="${OPENCODEX_LAB_APP_DATA:-$APP_DATA_ROOT/$OPENCODEX_LAB_ACCOUNT}"' in helper
+assert 'OPENCODEX_STATE_DIR="${OPENCODEX_STATE_DIR:-$OPENCODEX_ROOT/state}"' in helper
+assert 'OPENCODEX_FAKE_HOME="${OPENCODEX_FAKE_HOME:-$OPENCODEX_ROOT/home}"' in helper
+assert 'OPENCODEX_OWNERSHIP_VALUE="managed-by-codex-accounts-opencodex-lab-v1"' in helper
+assert 'validate_opencodex_lab_paths() {' in helper
+assert 'claim_opencodex_managed_dir() {' in helper
+assert 'home_uses_opencodex_proxy() {' in helper
+assert 'profile_uses_opencodex_routing() {' in helper
+assert 'OPENCODEX_PROFILE_ROUTE_OWNER="managed-by-codex-accounts-opencodex-route-v1"' in helper
+assert 'configure_opencodex_routing_for_home() {' in helper
+assert 'OPENCODEX_CLI_WRAPPER_OWNER="managed-by-codex-accounts-opencodex-cli-route-v1"' in helper
+assert 'prepare_opencodex_cli_wrapper() {' in helper
+assert 'remove_all_opencodex_profile_routes() {' in helper
+assert 'OPENCODEX_LAB_LAUNCH_VERIFIED=1' in helper
+assert '[[ "${OPENCODEX_LAB_LAUNCH_VERIFIED:-0}" != "1" ]]' in launch_match.group(1)
+assert 'set_history_mode_for_home "$home_dir" private' in launch_match.group(1)
+assert 'elif home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
+assert 'if ! home_uses_opencodex_proxy "$home_dir" && (( preserve_user_model_route == 0 )); then' in launch_match.group(1)
+assert '&& ! home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
+assert 'profile_has_user_owned_model_routing() {' in helper
+assert launch_match.group(1).index('profile_has_user_owned_model_routing "$home_dir"') < launch_match.group(1).index('ensure_opencodex_available_for_profiles')
+assert launch_match.group(1).index('ensure_opencodex_available_for_profiles') < launch_match.group(1).index('configure_opencodex_routing_for_home "$home_dir"')
+assert launch_match.group(1).index('configure_opencodex_routing_for_home "$home_dir"') < launch_match.group(1).index('restore_non_account1_openai_config_for_home "$home_dir"')
+assert '--env "CODEX_CLI_PATH=$opencodex_cli_wrapper"' in launch_match.group(1)
+assert '--env "CODEX_APP_SERVER_FORCE_CLI=1"' in launch_match.group(1)
+assert 'model_provider", "openai"' in helper
+assert 'model_catalog_json", str(catalog)' in helper
+opencodex_start_match = re.search(r"opencodex_start\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert opencodex_start_match
+assert opencodex_start_match.group(1).index("prepare_opencodex_lab") < opencodex_start_match.group(1).index("require_opencodex_lab_install")
+assert "/usr/bin/nohup /usr/bin/env" in opencodex_start_match.group(1)
+assert 'HOME="$OPENCODEX_FAKE_HOME"' in opencodex_start_match.group(1)
+assert 'CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME"' in opencodex_start_match.group(1)
+assert 'OPENCODEX_HOME="$OPENCODEX_STATE_DIR"' in opencodex_start_match.group(1)
+assert '"$OPENCODEX_BIN" start' in opencodex_start_match.group(1)
+assert 'opencodex_sync_and_verify_lab "$url"' in opencodex_start_match.group(1)
+assert opencodex_start_match.group(1).index('url="$(opencodex_running_url') < opencodex_start_match.group(1).index('opencodex_sync_and_verify_lab "$url"')
+assert 'local attempt=1 max_attempts=3' in helper
+assert 'OPENCODEX_SYNC_MAX_WAITS="${OPENCODEX_SYNC_MAX_WAITS:-200}"' in helper
+assert 'OPENCODEX_SYNC_WAIT_SECONDS="${OPENCODEX_SYNC_WAIT_SECONDS:-0.1}"' in helper
+assert 'opencodex_verify_shared_catalog() {' in helper
+assert 'OPENCODEX_CATALOG_FINGERPRINT_OWNER="managed-by-codex-accounts-opencodex-catalog-v1"' in helper
+assert 'catalog_inputs_sha256' in helper
+assert 'catalog_sha256' in helper
+assert 'opencodex_catalog_fingerprint verify "$freshness"' in helper
+assert 'run_with_waits "$OPENCODEX_SYNC_MAX_WAITS" "$OPENCODEX_SYNC_WAIT_SECONDS"' in helper
+assert 'if (( sync_status == 124 )); then' in helper
+assert 'using the existing verified shared model catalog' in helper
+assert 'missing configured provider namespaces' in helper
+assert "service install" not in opencodex_start_match.group(1)
+assert "codex-shim install" not in opencodex_start_match.group(1)
+opencodex_dashboard_match = re.search(r"opencodex_dashboard\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert opencodex_dashboard_match
+assert "127[.]0[.]0[.]1|localhost" in opencodex_dashboard_match.group(1)
+assert '"$OPENCODEX_OPEN_BIN" "$url"' in opencodex_dashboard_match.group(1)
+assert '"$OPENCODEX_BIN" gui' not in opencodex_dashboard_match.group(1)
+opencodex_status_match = re.search(r"opencodex_status\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert opencodex_status_match
+assert "printf '%s\\t%s\\t%s\\t%s\\n'" in opencodex_status_match.group(1)
+assert 'config["hostname"] = "127.0.0.1"' in helper
+assert 'config["syncResumeHistory"] = False' in helper
+assert 'config["codexAutoStart"] = False' in helper
+assert '"codexAccountMode": "direct"' in helper
+assert 'value.get("version") == expected_version' in helper
+assert "import fcntl" in helper
+assert "fcntl.flock" in helper
+assert "cleanup_stale_tmp_files" in helper
+assert "signal.signal(signal.SIGTERM" in helper
+assert "active_tmp" in helper
+assert "sessions_free = shutil.disk_usage(path.parent).free" in helper
+assert "CODEX_REPAIR_MIN_FREE_BYTES" in helper
+assert 'source_is_unchanged(path, initial_identity, "pre_backup")' in helper
+assert 'source_is_unchanged(path, initial_identity, "pre_replace")' in helper
+assert "active_backup_tmp" in helper
+assert "cleanup_stale_backup_tmp_files" in helper
+assert "tmp-session-backup-" in helper
+assert "backup_free = shutil.disk_usage(backup_parent).free" in helper
+assert "backup_free >= backup_required" in helper
+assert '/usr/sbin/lsof -t +D "$sessions_root"' in helper
+assert "remove_uncommitted_backup" in helper
+assert 'strftime("%Y%m%d-%H%M%S-%f")' in helper
 assert helper.count('CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \\\n    repair_compacted_image_payloads_for_home') >= 2
 assert 'prepare_profile_login_storage_for_launch "$home_dir"' in launch_match.group(1)
 assert 'history_mode="$(history_mode_for_home "$home_dir")"' in launch_match.group(1)
@@ -645,7 +1469,7 @@ assert 'wait_for_codex_window_start "$app_data"' in launch_match.group(1)
 assert 'open -na "$CODEX_APP"' in launch_match.group(1)
 assert launch_match.group(1).index('wait_for_codex_window_start "$app_data"') > launch_match.group(1).index('open -na "$CODEX_APP"')
 heavy_launch_match = re.search(
-    r'if \[\[ "\$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" \]\]; then(.*?)\n  fi',
+    r'if \[\[ "\$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" \]\] && ! home_uses_opencodex_proxy "\$home_dir"; then(.*?)\n  fi',
     launch_match.group(1),
     flags=re.DOTALL,
 )
@@ -704,6 +1528,7 @@ assert 'launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = syncBeforeLaunch && sha
 assert 'private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)' in swift
 assert 'queue: DispatchQueue = codexAccountsWorkQueue' in swift
 assert 'runBackground(loadingText, queue: codexAccountsLaunchQueue)' in swift
+assert 'timeout: 60,\n                environment: launchEnvironment' in swift
 assert 'runBackground(tr("關閉 \\(profile.displayName)...", "Closing \\(profile.displayName)..."), queue: codexAccountsLaunchQueue)' in swift
 assert 'busyProfiles.isDisjoint(with: busyIDs)' in swift
 assert '.disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)' in swift
@@ -711,6 +1536,9 @@ assert 'alertMessage(failureText, detail.isEmpty ? fallback : detail)' in swift
 assert 'var arguments = ["launch-account-nosync", routed.name]' in swift
 assert '.repeatForever(' not in swift
 assert 'environment["CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH"] = "1"' in swift
+assert 'timeout: 1800' in swift
+assert 'case 28:' in swift
+assert 'case 75:' in swift
 assert "startSidebarPruneLoop()" not in swift
 assert "if silent {\n            lastAutoSyncAt = Date()" in swift
 assert "private let liveUsageParallelism = 10" in swift
@@ -755,7 +1583,16 @@ assert 'private func quotaAuthenticationStatus(_ profile: CodexProfile, compact:
 assert 'tr("打開重新登入", "Open to sign in again")' in swift
 assert 'private func quotaUnavailableStatus(compact: Bool) -> some View' in swift
 assert 'tr("暫時未能取得用量", "Usage is temporarily unavailable")' in swift
-assert '"version":"2.6.2"' in helper
+assert 'let isOpenCodexLab = profile.id == "opencodex-lab"' in swift
+assert 'enabled: !isOpenCodexLab && historyMode != .shared' in swift
+assert 'profile.id != "account1" && !isOpenCodexLab' in swift
+assert 'openCodexStatusRefreshPending = true' in swift
+assert 'Repair bundled 2.7.33' in swift
+assert 'private func prepareBundledOpenCodexIfNeeded()' in swift
+assert 'OpenCodex Models' in swift
+assert 'title: isOpenCodex ? "OpenCodex" : "Coding Plan"' in swift
+assert 'OpenCodex Lab uses an isolated local loopback proxy.' in swift
+assert '"version":"2.7.0"' in helper
 
 theme_match = re.search(
     r'private var themeOptions: \[AppThemeOption\] \{(.*?)\n    \}\n\n    private func canonicalThemeID',
@@ -1051,8 +1888,11 @@ while IFS= read -r private_header_file; do
   [[ ! -e "$private_header_file" ]]
 done < "$HEADER_PATH_LOG"
 
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.2" ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "62" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.7.0" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "70" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "14.0" ]]
+(cd "$OPENCODEX_HK_OVERLAY" && shasum -a 256 -c manifest.sha256 >/dev/null)
+grep -q 'opencodex-zh-hk' "$BUILD_SCRIPT"
+zsh "$ROOT/tests/test_opencodex_runtime_seed.zsh"
 
 echo "✅ Codex Accounts regression checks passed"

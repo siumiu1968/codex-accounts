@@ -10,6 +10,15 @@ Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / Open
 
 > 两张图片都只使用虚构 profile 名称、`/tmp/demo-profiles/...` 演示路径和模拟用量，不包含真实账号、姓名、电脑用户名、token 或对话内容。
 
+## 2.7.0 更新
+
+- 安装包内置 arm64 OpenCodex 2.7.33 runtime 与香港繁体 Dashboard，更新后无需通过 npm 下载。
+- 打开受管理 Profile 前会先启动本地 loopback 代理并验证共享模型目录；已验证目录会立即沿用，仅在提供商／模型设置改变或验证超过 24 小时时重新同步。
+- 网络同步设有 20 秒上限，超时只有设置指纹与目录 SHA-256 完全一致才会沿用旧目录，避免打开 Profile 时无限转圈。
+- 自定义模型路由／provider 会原样保留，不会被默认 OpenAI 设置覆盖。
+- 已登录的第三方模型可以在未设置自定义模型路由的不同 Profile 中选择；OpenAI 仍使用每个 Profile 自己的登录身份。
+- 不会改变现有的共享／私人本地对话设置，安装包也不包含任何用户 token、OAuth credential 或对话数据。
+
 ## 2.6.2 更新
 
 - 自动检测 `/Applications/Codex.app`、`/Applications/ChatGPT.app` 及用户 `~/Applications` 下的统一 ChatGPT／Codex 应用。
@@ -45,6 +54,7 @@ Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / Open
 
 - 创建、打开、关闭、改名、显示目录、归档和删除多个 profile。
 - 每个 profile 保持独立的 Codex / OpenAI 登录状态。
+- 内置 OpenCodex；受管理 Profile 可共用本地第三方模型提供商，同时保留逐 Profile OpenAI 身份。
 - 每个 profile 可选择私人本地对话或共享模式；私人 profile 不参与本地对话、记忆和批量导入共享。
 - 显示官方接口当前提供的 quota、剩余百分比和恢复时间，并支持手动刷新。
 - 统计当天实际运行时间，睡眠和关机时间不计入。
