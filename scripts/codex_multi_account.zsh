@@ -21,6 +21,7 @@ if [[ -z "${CODEX_HISTORY_ANCHOR_HOME:-}" && -r "$CODEX_HISTORY_ANCHOR_FILE" ]];
   IFS= read -r CODEX_HISTORY_ANCHOR_HOME < "$CODEX_HISTORY_ANCHOR_FILE" || true
 fi
 CODEX_HISTORY_ANCHOR_HOME="${CODEX_HISTORY_ANCHOR_HOME:-$PRIMARY_CODEX_HOME}"
+CODEX_HISTORY_MODE_MARKER_NAME="${CODEX_HISTORY_MODE_MARKER_NAME:-.codex-accounts-history-mode}"
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-20}"
 CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS="${CODEX_SIDEBAR_PRUNE_INTERVAL_SECONDS:-5}"
 USAGE_API_URL="${USAGE_API_URL:-https://chatgpt.com/backend-api/wham/usage}"
@@ -53,7 +54,8 @@ CODEX_DEFAULT_OPENAI_REASONING_EFFORT="${CODEX_DEFAULT_OPENAI_REASONING_EFFORT:-
 CODEX_PRUNE_GLOBAL_STATE_ON_SYNC="${CODEX_PRUNE_GLOBAL_STATE_ON_SYNC:-0}"
 CODEX_PRUNE_LOCAL_THREAD_CATALOG="${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-1}"
 CODEX_CATALOG_ORPHAN_GRACE_SECONDS="${CODEX_CATALOG_ORPHAN_GRACE_SECONDS:-120}"
-CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-1}"
+CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"
+CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"
 CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES="${CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES:-67108864}"
 CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS="${CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS:-65536}"
 CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS="${CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS:-200000}"
@@ -117,6 +119,7 @@ Usage:
   scripts/codex_multi_account.zsh link-history <account-name>
   scripts/codex_multi_account.zsh unlink-history <account-name>
   scripts/codex_multi_account.zsh separate-history <account-name>
+  scripts/codex_multi_account.zsh history-mode <account-name>
   scripts/codex_multi_account.zsh separate-all-history
   scripts/codex_multi_account.zsh cleanup-empty-projects
   scripts/codex_multi_account.zsh list-exportable-threads <account-name> [limit]
@@ -1110,6 +1113,107 @@ account_app_data_for() {
   fi
 }
 
+history_mode_marker_for_home() {
+  local account_home="$1"
+  printf '%s/%s\n' "$account_home" "$CODEX_HISTORY_MODE_MARKER_NAME"
+}
+
+is_history_anchor_home() {
+  local account_home="$1"
+  same_resolved_path "$account_home" "$CODEX_HISTORY_ANCHOR_HOME"
+}
+
+portable_history_links_point_to_shared() {
+  local account_home="$1"
+  local item target source
+
+  for item in session_index.jsonl sessions shell_snapshots; do
+    target="$account_home/$item"
+    source="$(shared_history_source_for_item "$item")"
+    [[ -L "$target" ]] || return 1
+    same_resolved_path "$target" "$source" || return 1
+  done
+  return 0
+}
+
+# Markerless legacy profiles are only treated as shared when every portable
+# history path already points at the shared store. Anything else is private by
+# default so an old or partially detached profile is never silently re-linked.
+history_mode_for_home() {
+  local account_home="$1"
+  local marker mode
+
+  if is_history_anchor_home "$account_home"; then
+    printf '%s\n' "shared"
+    return 0
+  fi
+
+  marker="$(history_mode_marker_for_home "$account_home")"
+  if [[ -r "$marker" ]]; then
+    IFS= read -r mode < "$marker" || true
+    mode="${mode//[[:space:]]/}"
+    if [[ "$mode" == "shared" || "$mode" == "private" ]]; then
+      printf '%s\n' "$mode"
+      return 0
+    fi
+  fi
+
+  if portable_history_links_point_to_shared "$account_home"; then
+    printf '%s\n' "shared"
+  else
+    printf '%s\n' "private"
+  fi
+}
+
+set_history_mode_for_home() {
+  local account_home="$1" mode="$2"
+  local marker tmp_marker
+
+  case "$mode" in
+    shared|private) ;;
+    *)
+      echo "Invalid history mode: $mode" >&2
+      return 2
+      ;;
+  esac
+
+  mkdir -p "$account_home"
+  marker="$(history_mode_marker_for_home "$account_home")"
+  if is_history_anchor_home "$account_home"; then
+    rm -f "$marker"
+    return 0
+  fi
+
+  tmp_marker="${marker}.tmp.$$"
+  printf '%s\n' "$mode" > "$tmp_marker"
+  mv "$tmp_marker" "$marker"
+}
+
+history_mode_for() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "history-mode requires an account name." >&2
+    exit 2
+  fi
+  history_mode_for_home "$(account_home_for "$name")"
+}
+
+shared_history_homes() {
+  local account_home mode
+  for account_home in "$@"; do
+    [[ -n "$account_home" ]] || continue
+    mode="$(history_mode_for_home "$account_home")"
+    [[ "$mode" == "shared" ]] && printf '%s\n' "$account_home"
+  done
+}
+
+profile_window_is_running() {
+  local name="$1"
+  local app_data
+  app_data="$(account_app_data_for "$name")"
+  [[ -n "$(matching_codex_window_pids_for_app_data "$app_data")" ]]
+}
+
 copy_initial_profile() {
   require_rsync
   ensure_dirs
@@ -1190,11 +1294,10 @@ init_account() {
   mkdir -p "$home_dir" "$app_data"
   remove_shared_history_links_for_blank_account "$home_dir"
   rm -f "$home_dir/.codex-global-state.json" "$home_dir/.codex-global-state.json.bak"
-  local history_mode="isolated"
-  if [[ "$CODEX_SHARED_SESSIONS" == "1" ]]; then
-    link_history_for "$name" >/dev/null
-    history_mode="shared with pro history"
-  fi
+  mkdir -p "$home_dir/sessions" "$home_dir/shell_snapshots"
+  [[ -e "$home_dir/session_index.jsonl" || -L "$home_dir/session_index.jsonl" ]] || : > "$home_dir/session_index.jsonl"
+  set_history_mode_for_home "$home_dir" private
+  local history_mode="private"
 
   echo "Initialized blank account:"
   echo "  name: $(sanitize_account_name "$name")"
@@ -1837,7 +1940,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.6.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.6.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -2450,23 +2553,28 @@ sync_fast_plugin_payloads_direct() {
 }
 
 sync_memory_and_config_for_homes() {
-  local -a homes
+  local -a homes history_homes
   homes=("$@")
   (( ${#homes[@]} > 0 )) || return 0
 
   local home_dir
   for item in "${SYNC_ITEMS[@]}"; do
     for home_dir in "${homes[@]}"; do
+      [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_to_shared "$home_dir" "$item"
     done
     for home_dir in "${homes[@]}"; do
+      [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_from_shared "$home_dir" "$item"
     done
   done
   if [[ "$CODEX_SYNC_PLUGIN_CONFIG" == "1" ]]; then
     sync_plugin_config_entries "${homes[@]}"
   fi
-  sync_global_state_for_homes "${homes[@]}"
+  history_homes=("${(@f)$(shared_history_homes "${homes[@]}")}")
+  if (( ${#history_homes[@]} > 0 )) && [[ -n "${history_homes[1]:-}" ]]; then
+    sync_global_state_for_homes "${history_homes[@]}"
+  fi
 }
 
 sync_memory_and_config_to_selected_homes() {
@@ -2486,9 +2594,11 @@ sync_memory_and_config_to_selected_homes() {
 
   for item in "${SYNC_ITEMS[@]}"; do
     for home_dir in "${source_homes[@]}"; do
+      [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_to_shared "$home_dir" "$item"
     done
     for home_dir in "${dest_homes[@]}"; do
+      [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_from_shared "$home_dir" "$item"
     done
   done
@@ -3660,34 +3770,45 @@ cleanup_thread_indexes_for_homes() {
 
 sync_selected_homes() {
   local -a homes
+  local -a history_homes
   homes=("$@")
   (( ${#homes[@]} > 0 )) || return 0
 
   sync_memory_and_config_for_homes "${homes[@]}"
   sync_plugin_payloads_for_homes "${homes[@]}"
+  history_homes=("${(@f)$(shared_history_homes "${homes[@]}")}")
   if [[ "$CODEX_SYNC_THREAD_HISTORY" == "1" ]]; then
-    sync_thread_index_for_homes "${homes[@]}"
-    sync_global_state_for_homes "${homes[@]}"
-    sync_goal_state_for_homes "${homes[@]}"
+    if (( ${#history_homes[@]} > 0 )) && [[ -n "${history_homes[1]:-}" ]]; then
+      sync_thread_index_for_homes "${history_homes[@]}"
+      sync_global_state_for_homes "${history_homes[@]}"
+      sync_goal_state_for_homes "${history_homes[@]}"
+    fi
   fi
-  cleanup_thread_indexes_for_homes "${homes[@]}"
+  cleanup_thread_indexes_for_homes "${history_homes[@]}"
   sync_message
 }
 
 sync_history_selected_homes() {
   local -a homes
+  local -a history_homes
   homes=("$@")
   (( ${#homes[@]} > 0 )) || return 0
 
+  history_homes=("${(@f)$(shared_history_homes "${homes[@]}")}")
+  if (( ${#history_homes[@]} == 0 )) || [[ -z "${history_homes[1]:-}" ]]; then
+    echo "No shared Codex history profiles selected."
+    return 0
+  fi
+
   local home_dir
-  for home_dir in "${homes[@]}"; do
+  for home_dir in "${history_homes[@]}"; do
     seed_shared_history_from_home "$home_dir"
   done
   CODEX_SYNC_THREAD_HISTORY=1
-  sync_thread_index_for_homes "${homes[@]}"
-  sync_global_state_for_homes "${homes[@]}"
-  sync_goal_state_for_homes "${homes[@]}"
-  cleanup_thread_indexes_for_homes "${homes[@]}"
+  sync_thread_index_for_homes "${history_homes[@]}"
+  sync_global_state_for_homes "${history_homes[@]}"
+  sync_goal_state_for_homes "${history_homes[@]}"
+  cleanup_thread_indexes_for_homes "${history_homes[@]}"
   echo "Synced shared Codex history for inactive profiles at $(date '+%Y-%m-%d %H:%M:%S'). Active profiles finish syncing before their next launch."
 }
 
@@ -3764,6 +3885,7 @@ refresh_shared_history_for_home() {
   local target_home="$1"
   [[ "$CODEX_SHARED_SESSIONS" == "1" ]] || return 0
   [[ -n "$target_home" ]] || return 0
+  [[ "$(history_mode_for_home "$target_home")" == "shared" ]] || return 0
 
   local home_dir
   local -a homes
@@ -3774,6 +3896,7 @@ refresh_shared_history_for_home() {
   done < <(collect_account_homes)
   homes+=("$CODEX_HISTORY_ANCHOR_HOME" "$target_home")
   homes=("${(@f)$(dedupe_homes "${homes[@]}")}")
+  homes=("${(@f)$(shared_history_homes "${homes[@]}")}")
 
   seed_shared_history_from_home "$CODEX_HISTORY_ANCHOR_HOME"
   seed_shared_history_from_home "$target_home"
@@ -3794,7 +3917,8 @@ repair_account1() {
   refresh_shared_history_for_home "$PRIMARY_CODEX_HOME"
   normalize_thread_sources_for_home "$PRIMARY_CODEX_HOME"
   restore_account1_visible_thread_model_providers_for_home "$PRIMARY_CODEX_HOME"
-  repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
+  CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \
+    repair_compacted_image_payloads_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
   prune_global_state_for_home "$PRIMARY_CODEX_HOME" >/dev/null 2>&1 || true
 }
 
@@ -3808,7 +3932,8 @@ repair_compactions_for_account() {
   ensure_dirs
   local account_home
   account_home="$(account_home_for "$name")"
-  repair_compacted_image_payloads_for_home "$account_home"
+  CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \
+    repair_compacted_image_payloads_for_home "$account_home"
 }
 
 sync_once() {
@@ -3848,7 +3973,7 @@ sync_history_loop() {
 sync_account_unlocked() {
   local name="$1"
   local target_home home_dir
-  local -a all_homes payload_homes
+  local -a all_homes payload_homes history_homes
   target_home="$(account_home_for "$name")"
   mkdir -p "$target_home"
 
@@ -3864,19 +3989,22 @@ sync_account_unlocked() {
 
   sync_memory_and_config_for_homes "${all_homes[@]}"
   sync_plugin_payloads_for_homes "${payload_homes[@]}"
+  history_homes=("${(@f)$(shared_history_homes "${all_homes[@]}")}")
   if [[ "$CODEX_SYNC_THREAD_HISTORY" == "1" ]]; then
-    sync_thread_index_for_homes "${all_homes[@]}"
-    sync_global_state_for_homes "${all_homes[@]}"
-    sync_goal_state_for_homes "${all_homes[@]}"
+    if (( ${#history_homes[@]} > 0 )) && [[ -n "${history_homes[1]:-}" ]]; then
+      sync_thread_index_for_homes "${history_homes[@]}"
+      sync_global_state_for_homes "${history_homes[@]}"
+      sync_goal_state_for_homes "${history_homes[@]}"
+    fi
   fi
-  cleanup_thread_indexes_for_homes "${all_homes[@]}"
+  cleanup_thread_indexes_for_homes "${history_homes[@]}"
   sync_message
 }
 
 sync_account_prelaunch_unlocked() {
   local name="$1"
   local target_home home_dir
-  local -a all_homes dest_homes payload_homes
+  local -a all_homes dest_homes payload_homes history_homes
   target_home="$(account_home_for "$name")"
   mkdir -p "$target_home"
 
@@ -3894,18 +4022,21 @@ sync_account_prelaunch_unlocked() {
     sync_debug "prelaunch plugin-payloads account=$name"
     sync_plugin_payloads_for_homes "${payload_homes[@]}"
   fi
+  history_homes=("${(@f)$(shared_history_homes "${all_homes[@]}")}")
   if [[ "$CODEX_SYNC_THREAD_HISTORY" == "1" ]]; then
-    sync_debug "prelaunch global-state account=$name"
-    sync_global_state_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
-    sync_debug "prelaunch thread-index account=$name"
-    sync_thread_index_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
-    sync_debug "prelaunch global-state-prune account=$name"
-    sync_global_state_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
-    sync_debug "prelaunch goal-state account=$name"
-    sync_goal_state_to_selected_homes "${#dest_homes[@]}" "${dest_homes[@]}" "${all_homes[@]}"
+    if [[ "$(history_mode_for_home "$target_home")" == "shared" && ${#history_homes[@]} -gt 0 && -n "${history_homes[1]:-}" ]]; then
+      sync_debug "prelaunch global-state account=$name"
+      sync_global_state_to_selected_homes 1 "$target_home" "${history_homes[@]}"
+      sync_debug "prelaunch thread-index account=$name"
+      sync_thread_index_to_selected_homes 1 "$target_home" "${history_homes[@]}"
+      sync_debug "prelaunch global-state-prune account=$name"
+      sync_global_state_to_selected_homes 1 "$target_home" "${history_homes[@]}"
+      sync_debug "prelaunch goal-state account=$name"
+      sync_goal_state_to_selected_homes 1 "$target_home" "${history_homes[@]}"
+    fi
   fi
   sync_debug "prelaunch thread-index-cleanup account=$name"
-  cleanup_thread_indexes_for_homes "${dest_homes[@]}"
+  cleanup_thread_indexes_for_homes "${history_homes[@]}"
   sync_debug "prelaunch complete account=$name"
   sync_message
 }
@@ -4071,6 +4202,52 @@ stop_codex_servers_for_home() {
   stop_pids "Closing stale Codex app-server(s) for this profile" "${pids[@]}"
 }
 
+matching_codex_window_pids_for_app_data() {
+  local app_data="$1"
+  local pid args
+
+  while read -r pid args; do
+    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
+    [[ "$args" == "$CODEX_APP/Contents/MacOS/Codex"* \
+      || "$args" == "$CODEX_APP/Contents/MacOS/ChatGPT"* ]] || continue
+    if args_has_user_data_dir "$args" "$app_data"; then
+      printf '%s\n' "$pid"
+      continue
+    fi
+    if [[ "$app_data" == "$HOME/Library/Application Support/Codex" && "$args" != *"--user-data-dir="* ]]; then
+      printf '%s\n' "$pid"
+    fi
+  done < <(ps axww -o pid= -o args=)
+}
+
+wait_for_codex_window_exit() {
+  local app_data="$1"
+  local max_waits="${CODEX_LAUNCH_EXIT_MAX_WAITS:-20}"
+  local wait_seconds="${CODEX_LAUNCH_EXIT_WAIT_SECONDS:-0.1}"
+  local waited=0
+
+  while [[ -n "$(matching_codex_window_pids_for_app_data "$app_data")" ]]; do
+    (( waited >= max_waits )) && return 1
+    sleep "$wait_seconds"
+    waited=$(( waited + 1 ))
+  done
+  return 0
+}
+
+wait_for_codex_window_start() {
+  local app_data="$1"
+  local max_waits="${CODEX_LAUNCH_VERIFY_MAX_WAITS:-40}"
+  local wait_seconds="${CODEX_LAUNCH_VERIFY_WAIT_SECONDS:-0.2}"
+  local waited=0
+
+  while (( waited < max_waits )); do
+    [[ -n "$(matching_codex_window_pids_for_app_data "$app_data")" ]] && return 0
+    sleep "$wait_seconds"
+    waited=$(( waited + 1 ))
+  done
+  return 1
+}
+
 process_args_match_app_data_snapshot() {
   local args="$1"
   local app_data="$2"
@@ -4188,39 +4365,51 @@ launch_account() {
     exit 1
   fi
 
-  local home_dir app_data
+  local home_dir app_data history_mode
   local -a launch_env launch_args
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
   mkdir -p "$home_dir" "$app_data"
 
+  # The persisted per-profile mode is authoritative. In particular, a private
+  # profile must stay local even when an older UI or menu process supplies the
+  # historical global CODEX_SHARED_SESSIONS=1 environment.
+  history_mode="$(history_mode_for_home "$home_dir")"
+  if [[ "$history_mode" == "private" ]]; then
+    CODEX_SHARED_SESSIONS=0
+    CODEX_SYNC_THREAD_HISTORY=0
+  else
+    CODEX_SHARED_SESSIONS=1
+    CODEX_SYNC_THREAD_HISTORY=1
+  fi
+
   if [[ "$CODEX_CLONE_PRIMARY_ON_LAUNCH" == "1" && "$home_dir" != "$PRIMARY_CODEX_HOME" && ! -e "$home_dir/config.toml" ]]; then
     copy_initial_profile_to "$home_dir"
   fi
-  stop_codex_windows_for_app_data "$app_data" >/dev/null 2>&1 || true
-  stop_codex_servers_for_home "$home_dir" >/dev/null 2>&1 || true
   if [[ "$CODEX_PRELAUNCH_SYNC" == "1" ]]; then
     if ! sync_account_for_launch "$name" >/dev/null; then
       echo "Prelaunch sync did not finish; not launching Codex profile to avoid SQLite startup conflicts." >&2
       exit 1
     fi
   fi
-  prepare_profile_login_storage "$home_dir"
+  prepare_profile_login_storage_for_launch "$home_dir"
   if is_primary_codex_home "$home_dir"; then
     configure_account1_aliyun_proxy_for_home "$home_dir"
     ensure_aliyun_coding_plan_bridge_running
   else
     restore_non_account1_openai_config_for_home "$home_dir"
   fi
-  refresh_shared_history_for_home "$home_dir"
-  repair_compacted_image_payloads_for_home "$home_dir" >/dev/null 2>&1 || true
-  if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
-    cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
-  fi
   normalize_top_level_model_provider_for_home "$home_dir"
-  normalize_thread_sources_for_home "$home_dir"
-  restore_default_thread_model_providers_for_home "$home_dir"
-  restore_account1_visible_thread_model_providers_for_home "$home_dir"
+  if [[ "$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" ]]; then
+    refresh_shared_history_for_home "$home_dir"
+    repair_compacted_image_payloads_for_home "$home_dir" >/dev/null 2>&1 || true
+    if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
+      cleanup_thread_index_for_home "$home_dir" >/dev/null 2>&1 || true
+    fi
+    normalize_thread_sources_for_home "$home_dir"
+    restore_default_thread_model_providers_for_home "$home_dir"
+    restore_account1_visible_thread_model_providers_for_home "$home_dir"
+  fi
 
   echo "Launching Codex profile..."
   echo "  account=$(sanitize_account_name "$name")"
@@ -4233,6 +4422,10 @@ launch_account() {
 
   stop_codex_windows_for_app_data "$app_data"
   stop_codex_servers_for_home "$home_dir"
+  if ! wait_for_codex_window_exit "$app_data"; then
+    echo "Existing Codex window for this profile did not exit in time." >&2
+    return 1
+  fi
   ensure_owl_auth_features_enabled "$app_data"
 
   # Keep the account env scoped to this launch. `launchctl setenv` is global
@@ -4270,6 +4463,11 @@ launch_account() {
   open -na "$CODEX_APP" \
     "${launch_env[@]}" \
     --args "${launch_args[@]}"
+
+  if ! wait_for_codex_window_start "$app_data"; then
+    echo "Codex did not start a matching profile process within 8 seconds." >&2
+    return 1
+  fi
 
   echo "Started Codex profile."
 }
@@ -4553,6 +4751,29 @@ ensure_shared_history_links() {
   done
 }
 
+# Constant-size readiness probe for the three portable shared-history links.
+# A normal launch can skip backup recovery and rsync seeding when these links
+# already point at the shared store.
+shared_history_links_ready() {
+  local account_home="$1"
+  local item target source
+
+  [[ "$CODEX_SHARED_SESSIONS" == "1" ]] || return 1
+  for item in session_index.jsonl sessions shell_snapshots; do
+    target="$account_home/$item"
+    source="$(shared_history_source_for_item "$item")"
+    [[ -L "$target" ]] || return 1
+    same_resolved_path "$target" "$source" || return 1
+  done
+  return 0
+}
+
+prepare_profile_login_storage_for_launch() {
+  local account_home="$1"
+  shared_history_links_ready "$account_home" && return 0
+  prepare_profile_login_storage "$account_home"
+}
+
 ensure_shared_sessions_link() {
   local account_home="$1"
   local target="$account_home/sessions"
@@ -4642,7 +4863,7 @@ prepare_profile_login_storage() {
   fi
 }
 
-link_history_for() {
+link_history_for_unlocked() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
     echo "link-history requires an account name." >&2
@@ -4651,8 +4872,22 @@ link_history_for() {
 
   ensure_dirs
   CODEX_SHARED_SESSIONS=1
-  local account_home
+  local account_home current_mode
   account_home="$(account_home_for "$name")"
+
+  if profile_transition_is_busy "$name" "$account_home"; then
+    echo "Close this Codex profile and wait for its app-server/database writes before sharing local history." >&2
+    return 1
+  fi
+  current_mode="$(history_mode_for_home "$account_home")"
+  if [[ "${CODEX_LINK_HISTORY_SKIP_PRIVATE:-0}" == "1" && "$current_mode" == "private" ]]; then
+    echo "Skipping private history profile: $(sanitize_account_name "$name")"
+    return 0
+  fi
+  if [[ "$current_mode" == "shared" ]] && portable_history_links_point_to_shared "$account_home"; then
+    echo "$(sanitize_account_name "$name") history is already shared."
+    return 0
+  fi
 
   mkdir -p "$account_home"
   seed_shared_history_from_home "$CODEX_HISTORY_ANCHOR_HOME"
@@ -4673,6 +4908,18 @@ link_history_for() {
   sync_thread_index_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
   sync_global_state_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
   sync_goal_state_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
+  set_history_mode_for_home "$account_home" shared
+}
+
+link_history_for() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "link-history requires an account name." >&2
+    exit 2
+  fi
+  ensure_dirs
+  CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock link_history_for_unlocked "$name"
 }
 
 unlink_history_for() {
@@ -4682,20 +4929,7 @@ unlink_history_for() {
     exit 2
   fi
 
-  ensure_dirs
-  local account_home
-  account_home="$(account_home_for "$name")"
-
-  { history_items; state_items; } | while read -r item; do
-    local target="$account_home/$item"
-    if [[ -L "$target" ]]; then
-      rm "$target"
-      echo "Removed symlink: $target"
-    fi
-  done
-
-  echo "$(sanitize_account_name "$name") history links removed. Previous files, if any, are under:"
-  echo "  $account_home/backups/"
+  separate_history_for "$name"
 }
 
 cleanup_thread_index_for_home() {
@@ -4718,6 +4952,8 @@ from pathlib import Path
 
 home = Path(os.environ["CODEX_CLEANUP_ACCOUNT_HOME"]).expanduser()
 backup_dir = Path(os.environ["CODEX_CLEANUP_BACKUP_DIR"]).expanduser()
+private_history_cleanup = os.environ.get("CODEX_CLEANUP_PRIVATE_HISTORY", "0") == "1"
+shared_sessions_root = Path(os.environ.get("CODEX_SHARED_SESSIONS_DIR", "")).expanduser()
 state_paths = [home / "state_5.sqlite", home / "sqlite" / "state_5.sqlite"]
 state_paths = [path for path in state_paths if path.exists()]
 index_path = home / "session_index.jsonl"
@@ -4793,9 +5029,27 @@ def rollout_exists(row):
     rollout_path = text(row, "rollout_path")
     if not rollout_path:
         return False
+    if private_history_cleanup and rollout_is_shared_source(rollout_path):
+        return False
     try:
         return Path(rollout_path).exists()
     except OSError:
+        return False
+
+def rollout_is_shared_source(value):
+    raw = str(value or "").strip()
+    if not raw or not str(shared_sessions_root):
+        return False
+    path = Path(raw).expanduser()
+    try:
+        path.relative_to(shared_sessions_root)
+        return True
+    except ValueError:
+        pass
+    try:
+        path.resolve().relative_to(shared_sessions_root.resolve())
+        return True
+    except (OSError, ValueError):
         return False
 
 def is_live(row):
@@ -4910,7 +5164,7 @@ for thread_id, rows in rows_by_id.items():
     delete_ids.add(thread_id)
     for row in rows:
         rollout_path = text(row, "rollout_path")
-        if rollout_path:
+        if rollout_path and not (private_history_cleanup and rollout_is_shared_source(rollout_path)):
             rollouts_to_move.append((thread_id, Path(rollout_path)))
 
 changed = bool(delete_ids)
@@ -5096,6 +5350,10 @@ if state:
     value = next_state.get("projectless-thread-ids")
     if isinstance(value, list):
         next_state["projectless-thread-ids"] = [thread_id for thread_id in value if str(thread_id) in live_thread_ids]
+
+    value = next_state.get("pinned-thread-ids")
+    if isinstance(value, list):
+        next_state["pinned-thread-ids"] = [thread_id for thread_id in value if str(thread_id) in live_thread_ids]
 
     if next_state != state:
         if not backup_dir.exists():
@@ -5641,10 +5899,12 @@ home = Path(os.environ["CODEX_PRUNE_ACCOUNT_HOME"]).expanduser()
 catalog_db = home / "sqlite" / "codex-dev.db"
 state_paths = [path for path in (home / "state_5.sqlite", home / "sqlite" / "state_5.sqlite") if path.exists()]
 
+private_history = os.environ.get("CODEX_PRUNE_PRIVATE_HISTORY", "0") == "1"
 try:
-    grace_seconds = max(30, int(float(os.environ.get("CODEX_CATALOG_ORPHAN_GRACE_SECONDS", "120"))))
+    configured_grace = int(float(os.environ.get("CODEX_CATALOG_ORPHAN_GRACE_SECONDS", "120")))
+    grace_seconds = max(0 if private_history else 30, configured_grace)
 except ValueError:
-    grace_seconds = 120
+    grace_seconds = 0 if private_history else 120
 
 if not catalog_db.exists() or not state_paths:
     raise SystemExit(0)
@@ -5697,11 +5957,12 @@ def good_state_thread_ids():
 
 def maybe_session_dirs():
     seen = set()
-    candidates = [
-        home / "sessions",
-        Path.home() / ".codex-shared-history" / "sessions",
-        Path.home() / ".codex" / "sessions",
-    ]
+    candidates = [home / "sessions"]
+    if not private_history:
+        candidates.extend([
+            Path.home() / ".codex-shared-history" / "sessions",
+            Path.home() / ".codex" / "sessions",
+        ])
     for path in candidates:
         try:
             resolved = path.resolve()
@@ -5812,18 +6073,330 @@ prune_global_state_loop() {
   done
 }
 
-separate_history_for() {
+quarantine_memories_for_private_history() {
+  local account_home="$1"
+  local source="$account_home/memories"
+  local backup_dir="${2:-}"
+
+  [[ "${CODEX_PRIVATE_HISTORY_QUARANTINE_FORCE_FAIL:-0}" != "1" ]] || return 1
+  if [[ -e "$source" || -L "$source" ]]; then
+    [[ -n "$backup_dir" ]] || backup_dir="$account_home/backups/history-private-$(date '+%Y%m%d-%H%M%S')"
+    mkdir -p "$backup_dir" || return 1
+    mv "$source" "$backup_dir/memories" || return 1
+    echo "Quarantined previous memories: $backup_dir/memories"
+  fi
+  mkdir -p "$source" || return 1
+}
+
+restore_quarantined_memories_after_private_failure() {
+  local account_home="$1" backup_dir="${2:-}"
+  [[ -n "$backup_dir" && -e "$backup_dir/memories" ]] || return 0
+  [[ ! -e "$account_home/memories" && ! -L "$account_home/memories" ]] || rmdir "$account_home/memories"
+  mv "$backup_dir/memories" "$account_home/memories"
+}
+
+capture_shared_thread_ids_for_private_history() {
+  local account_home="$1" ids_file="$2"
+  CODEX_PRIVATE_HOME="$account_home" CODEX_PRIVATE_SHARED_SESSIONS="$SHARED_SESSIONS_DIR" CODEX_PRIVATE_IDS_FILE="$ids_file" python3 - <<'PY'
+import json, os, sqlite3
+from pathlib import Path
+home = Path(os.environ['CODEX_PRIVATE_HOME'])
+shared = Path(os.environ['CODEX_PRIVATE_SHARED_SESSIONS'])
+ids = set()
+def is_shared(value):
+    if not value: return False
+    path = Path(str(value)).expanduser()
+    try:
+        path.relative_to(shared); return True
+    except ValueError: pass
+    try:
+        path.resolve().relative_to(shared.resolve()); return True
+    except (OSError, ValueError): return False
+for db in (home / 'state_5.sqlite', home / 'sqlite' / 'state_5.sqlite'):
+    if not db.exists() or db.is_symlink(): continue
+    try:
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+        cols = [row[1] for row in con.execute('PRAGMA table_info(threads)')]
+        if 'id' in cols and 'rollout_path' in cols:
+            for thread_id, rollout_path in con.execute('SELECT id, rollout_path FROM threads'):
+                if thread_id and is_shared(rollout_path): ids.add(str(thread_id))
+        con.close()
+    except sqlite3.Error: pass
+index = home / 'session_index.jsonl'
+if index.exists():
+    for line in index.read_text(encoding='utf-8', errors='replace').splitlines():
+        try:
+            thread_id = json.loads(line).get('id')
+            if thread_id: ids.add(str(thread_id))
+        except (json.JSONDecodeError, AttributeError): pass
+catalog = home / 'sqlite' / 'codex-dev.db'
+if catalog.exists() and not catalog.is_symlink():
+    try:
+        con = sqlite3.connect(f'file:{catalog}?mode=ro', uri=True, timeout=2)
+        ids.update(str(row[0]) for row in con.execute('SELECT thread_id FROM local_thread_catalog') if row[0])
+        con.close()
+    except sqlite3.Error: pass
+Path(os.environ['CODEX_PRIVATE_IDS_FILE']).write_text('\n'.join(sorted(ids)) + ('\n' if ids else ''), encoding='utf-8')
+PY
+}
+
+verify_private_history_detached() {
+  local account_home="$1" ids_file="$2"
+  CODEX_PRIVATE_HOME="$account_home" CODEX_PRIVATE_SHARED_SESSIONS="$SHARED_SESSIONS_DIR" CODEX_PRIVATE_IDS_FILE="$ids_file" python3 - <<'PY'
+import json, os, sqlite3, sys
+from pathlib import Path
+home = Path(os.environ['CODEX_PRIVATE_HOME'])
+shared = Path(os.environ['CODEX_PRIVATE_SHARED_SESSIONS'])
+ids = {line.strip() for line in Path(os.environ['CODEX_PRIVATE_IDS_FILE']).read_text(encoding='utf-8').splitlines() if line.strip()}
+for item in ('session_index.jsonl', 'sessions', 'shell_snapshots'):
+    path = home / item
+    if path.is_symlink(): raise SystemExit(f'private history link remains: {path}')
+def is_shared(value):
+    if not value: return False
+    path = Path(str(value)).expanduser()
+    try:
+        path.relative_to(shared); return True
+    except ValueError: pass
+    try:
+        path.resolve().relative_to(shared.resolve()); return True
+    except (OSError, ValueError): return False
+for db in (home / 'state_5.sqlite', home / 'sqlite' / 'state_5.sqlite'):
+    if not db.exists() or db.is_symlink(): continue
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+    cols = [row[1] for row in con.execute('PRAGMA table_info(threads)')]
+    if 'rollout_path' in cols:
+        if any(is_shared(row[0]) for row in con.execute('SELECT rollout_path FROM threads')):
+            raise SystemExit(f'shared thread metadata remains: {db}')
+    con.close()
+catalog = home / 'sqlite' / 'codex-dev.db'
+if ids and catalog.exists() and not catalog.is_symlink():
+    con = sqlite3.connect(f'file:{catalog}?mode=ro', uri=True, timeout=2)
+    if any(row[0] in ids for row in con.execute('SELECT thread_id FROM local_thread_catalog')):
+        raise SystemExit('shared catalog metadata remains')
+    con.close()
+index = home / 'session_index.jsonl'
+if ids and index.exists():
+    for line in index.read_text(encoding='utf-8', errors='replace').splitlines():
+        try:
+            if str(json.loads(line).get('id', '')) in ids: raise SystemExit('shared session index metadata remains')
+        except json.JSONDecodeError: continue
+PY
+}
+
+remove_captured_private_history_metadata() {
+  local account_home="$1" ids_file="$2"
+  CODEX_PRIVATE_HOME="$account_home" CODEX_PRIVATE_IDS_FILE="$ids_file" python3 - <<'PY'
+import json, os, sqlite3
+from pathlib import Path
+
+home = Path(os.environ['CODEX_PRIVATE_HOME'])
+ids = {line.strip() for line in Path(os.environ['CODEX_PRIVATE_IDS_FILE']).read_text(encoding='utf-8').splitlines() if line.strip()}
+if not ids:
+    raise SystemExit(0)
+
+def columns(con, table):
+    try:
+        return {row[1] for row in con.execute(f'PRAGMA table_info("{table}")')}
+    except sqlite3.Error:
+        return set()
+
+def remove_from_database(path):
+    if not path.exists() or path.is_symlink():
+        return
+    con = sqlite3.connect(path, timeout=3)
+    try:
+        for table, field in (("threads", "id"), ("local_thread_catalog", "thread_id")):
+            if field not in columns(con, table):
+                continue
+            placeholders = ','.join('?' for _ in ids)
+            con.execute(f'DELETE FROM "{table}" WHERE "{field}" IN ({placeholders})', tuple(ids))
+        con.commit()
+    finally:
+        con.close()
+
+for path in (home / 'state_5.sqlite', home / 'sqlite' / 'state_5.sqlite', home / 'sqlite' / 'codex-dev.db'):
+    remove_from_database(path)
+
+index = home / 'session_index.jsonl'
+if index.exists() and not index.is_symlink():
+    kept = []
+    for line in index.read_text(encoding='utf-8', errors='replace').splitlines():
+        try:
+            if str(json.loads(line).get('id', '')) in ids:
+                continue
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        kept.append(line)
+    index.write_text(('\n'.join(kept) + '\n') if kept else '', encoding='utf-8')
+
+state_path = home / '.codex-global-state.json'
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        state = None
+    if isinstance(state, dict):
+        def strip_ids(value):
+            if isinstance(value, list):
+                return [strip_ids(item) for item in value if str(item) not in ids]
+            if isinstance(value, dict):
+                return {key: strip_ids(item) for key, item in value.items() if str(key) not in ids}
+            return value
+        state_path.write_text(json.dumps(strip_ids(state), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+backup_private_history_transaction_metadata() {
+  local account_home="$1" backup_dir="$2"
+  CODEX_TX_HOME="$account_home" CODEX_TX_BACKUP="$backup_dir" python3 - <<'PY'
+import os, shutil, sqlite3
+from pathlib import Path
+home, backup = Path(os.environ['CODEX_TX_HOME']), Path(os.environ['CODEX_TX_BACKUP'])
+backup.mkdir(parents=True, exist_ok=True)
+for rel in ('state_5.sqlite', 'sqlite/state_5.sqlite', 'sqlite/codex-dev.db'):
+    source = home / rel
+    if not source.exists() or source.is_symlink(): continue
+    target = backup / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src = dst = None
+    try:
+        src = sqlite3.connect(f'file:{source}?mode=ro', uri=True, timeout=2)
+        dst = sqlite3.connect(target)
+        src.backup(dst)
+    finally:
+        if dst is not None:
+            dst.close()
+        if src is not None:
+            src.close()
+for rel in ('.codex-global-state.json', 'session_index.jsonl'):
+    source = home / rel
+    if source.exists():
+        target = backup / rel; target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(source, target)
+PY
+}
+
+restore_private_history_transaction_metadata() {
+  local account_home="$1" backup_dir="$2"
+  CODEX_TX_HOME="$account_home" CODEX_TX_BACKUP="$backup_dir" python3 - <<'PY'
+import os, shutil
+from pathlib import Path
+home, backup = Path(os.environ['CODEX_TX_HOME']), Path(os.environ['CODEX_TX_BACKUP'])
+for rel in ('state_5.sqlite', 'sqlite/state_5.sqlite', 'sqlite/codex-dev.db', '.codex-global-state.json'):
+    source, target = backup / rel, home / rel
+    if source.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.suffix in ('.sqlite', '.db'):
+            for sidecar in (target.with_name(target.name + '-wal'), target.with_name(target.name + '-shm')):
+                try: sidecar.unlink()
+                except FileNotFoundError: pass
+        shutil.copy2(source, target)
+PY
+}
+
+restore_shared_history_after_private_failure() {
+  local account_home="$1" backup_dir="${2:-}"
+  [[ -z "$backup_dir" ]] || restore_private_history_transaction_metadata "$account_home" "$backup_dir" || return 1
+  CODEX_SHARED_SESSIONS=1 ensure_shared_history_links "$account_home" || return 1
+  set_history_mode_for_home "$account_home" shared
+}
+
+profile_transition_is_busy() {
+  local name="$1" home_dir="$2" pid args active_homes
+  profile_window_is_running "$name" && return 0
+  while read -r pid args; do
+    [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
+    [[ "$args" == *"codex app-server"* ]] || continue
+    [[ "$args" == *"--codex-home $home_dir"* || "$args" == *"--codex-home=$home_dir"* ]] && return 0
+    process_env_contains "$pid" "CODEX_HOME=$home_dir" && return 0
+  done < <(ps axww -o pid= -o args=)
+  active_homes="$(active_sqlite_homes_payload "$home_dir" 2>/dev/null || true)"
+  [[ "$active_homes" == *"$home_dir"* ]]
+}
+
+separate_history_for_unlocked() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
     echo "separate-history requires an account name." >&2
     exit 2
   fi
 
-  ensure_dirs
-  local account_home
+  local account_home current_mode
   account_home="$(account_home_for "$name")"
-  detach_shared_sessions_link "$account_home"
-  cleanup_thread_index_for_home "$account_home"
+  if is_history_anchor_home "$account_home"; then
+    echo "The history anchor must remain shared." >&2
+    return 1
+  fi
+  if profile_transition_is_busy "$name" "$account_home"; then
+    echo "Close this Codex profile and wait for its app-server/database writes before switching history." >&2
+    return 1
+  fi
+  current_mode="$(history_mode_for_home "$account_home")"
+  if [[ "$current_mode" == "private" ]]; then
+    echo "$(sanitize_account_name "$name") history is already private."
+    return 0
+  fi
+
+  local ids_file transaction_backup_dir memory_backup_dir
+  ids_file="$(mktemp "$account_home/.private-history-ids.XXXXXX")"
+  capture_shared_thread_ids_for_private_history "$account_home" "$ids_file" || { rm -f "$ids_file"; return 1; }
+  transaction_backup_dir="$account_home/backups/private-history-transaction-$(date '+%Y%m%d-%H%M%S')"
+  backup_private_history_transaction_metadata "$account_home" "$transaction_backup_dir" || { rm -f "$ids_file"; return 1; }
+
+  # Do not copy from, move, or rewrite the shared source. These calls only
+  # replace this profile's three symlinks with blank local paths.
+  detach_shared_history_links "$account_home"
+  # The rollout paths were resolved through this profile's former symlink. Now
+  # that it is detached, cleanup backs up local metadata and removes only rows
+  # whose local rollout path is absent; it never moves the shared source.
+  if [[ "${CODEX_PRIVATE_HISTORY_CLEANUP_FORCE_FAIL:-0}" == "1" ]] || ! CODEX_CLEANUP_PRIVATE_HISTORY=1 CODEX_SHARED_SESSIONS_DIR="$SHARED_SESSIONS_DIR" \
+    cleanup_thread_index_for_home "$account_home" >/dev/null 2>&1; then
+    restore_shared_history_after_private_failure "$account_home" "$transaction_backup_dir" || true
+    rm -f "$ids_file"
+    return 1
+  fi
+  # Private mode intentionally does not inspect the global shared sessions
+  # directory, so stale catalog rows cannot keep shared titles visible.
+  if ! CODEX_PRUNE_PRIVATE_HISTORY=1 CODEX_CATALOG_ORPHAN_GRACE_SECONDS=0 \
+    prune_local_thread_catalog_for_home "$account_home" >/dev/null 2>&1 \
+    || ! remove_captured_private_history_metadata "$account_home" "$ids_file" \
+    || ! verify_private_history_detached "$account_home" "$ids_file"; then
+    restore_shared_history_after_private_failure "$account_home" "$transaction_backup_dir" || true
+    rm -f "$ids_file"
+    return 1
+  fi
+  if [[ "${CODEX_PRIVATE_HISTORY_POST_CLEANUP_FORCE_FAIL:-0}" == "1" ]]; then
+    restore_shared_history_after_private_failure "$account_home" "$transaction_backup_dir" || true
+    rm -f "$ids_file"
+    return 1
+  fi
+  # Existing memories may already contain synchronized summaries. Preserve a
+  # reversible backup, then start this profile with a local empty directory.
+  memory_backup_dir="$account_home/backups/history-private-$(date '+%Y%m%d-%H%M%S')"
+  if ! quarantine_memories_for_private_history "$account_home" "$memory_backup_dir"; then
+    restore_quarantined_memories_after_private_failure "$account_home" "$memory_backup_dir" || true
+    restore_shared_history_after_private_failure "$account_home" "$transaction_backup_dir" || true
+    rm -f "$ids_file"
+    return 1
+  fi
+  if ! set_history_mode_for_home "$account_home" private; then
+    restore_quarantined_memories_after_private_failure "$account_home" "$memory_backup_dir" || true
+    restore_shared_history_after_private_failure "$account_home" "$transaction_backup_dir" || true
+    rm -f "$ids_file"
+    return 1
+  fi
+  rm -f "$ids_file"
+  echo "Separated $(sanitize_account_name "$name") history: future local conversations stay private."
+}
+
+separate_history_for() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "separate-history requires an account name." >&2
+    exit 2
+  fi
+  ensure_dirs
+  CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock separate_history_for_unlocked "$name"
 }
 
 separate_all_history() {
@@ -5836,14 +6409,18 @@ separate_all_history() {
 }
 
 link_all_history() {
+  local raw_name name home_dir
   CODEX_SHARED_SESSIONS=1
-  collect_account_homes | while read -r home_dir; do
-    [[ -n "$home_dir" ]] || continue
-    seed_shared_history_from_home "$home_dir"
-  done
-  list_accounts | cut -d '|' -f 1 | sed 's/[[:space:]]//g' | while read -r name; do
-    link_history_for "$name"
-  done
+  while IFS='|' read -r raw_name _; do
+    name="$(printf '%s' "$raw_name" | sed 's/[[:space:]]//g')"
+    [[ -n "$name" ]] || continue
+    home_dir="$(account_home_for "$name")"
+    if [[ "$(history_mode_for_home "$home_dir")" == "private" ]]; then
+      echo "Skipping private history profile: $(sanitize_account_name "$name")"
+      continue
+    fi
+    CODEX_LINK_HISTORY_SKIP_PRIVATE=1 link_history_for "$name"
+  done < <(list_accounts)
 }
 
 link_account2_history() {
@@ -5896,7 +6473,7 @@ inspect_thread_package() {
   run_codex_share_helper inspect --package "$package_path"
 }
 
-import_thread_package() {
+import_thread_package_unlocked() {
   local package_path="${1:-}" target="${2:-all}" mark_latest_arg="${3:---mark-latest}"
   local -a target_args
   local raw_name raw_home name home
@@ -5911,6 +6488,10 @@ import_thread_package() {
       name="$(printf '%s' "$raw_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
       home="$(printf '%s' "$raw_home" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
       [[ -n "$name" && -n "$home" ]] || continue
+      if [[ "$(history_mode_for_home "$home")" == "private" ]]; then
+        echo "Skipping private history profile during import-all: $(sanitize_account_name "$name")" >&2
+        continue
+      fi
       target_args+=(--target "$name=$home")
     done < <(list_accounts)
   else
@@ -5929,6 +6510,14 @@ import_thread_package() {
   else
     run_codex_share_helper import --package "$package_path" "${target_args[@]}" --mark-latest
   fi
+}
+
+import_thread_package() {
+  local package_path="${1:-}" target="${2:-all}" mark_latest_arg="${3:---mark-latest}"
+  ensure_dirs
+  CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
+      import_thread_package_unlocked "$package_path" "$target" "$mark_latest_arg"
 }
 
 main() {
@@ -5960,6 +6549,7 @@ main() {
     link-history) link_history_for "${2:-}" ;;
     unlink-history) unlink_history_for "${2:-}" ;;
     separate-history) separate_history_for "${2:-}" ;;
+    history-mode) history_mode_for "${2:-}" ;;
     separate-all-history) separate_all_history ;;
     cleanup-empty-projects) cleanup_empty_projects ;;
     list-exportable-threads) list_exportable_threads "${2:-account1}" "${3:-30}" ;;

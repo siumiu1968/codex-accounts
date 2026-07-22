@@ -16,6 +16,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.6.1 更新介紹
+
+V2.6.1 修正部分 Mac 撳「打開」後長時間轉圈或冇反應：Profile 啟動改用獨立高優先序佇列，預設略過啟動前嘅重型資料修復，並會確認對應 Codex 程序真正啟動；失敗時會顯示原因，唔再無限等待。今版亦新增每個 Profile 獨立嘅「私人本機對話」模式，私人 Profile 會略過本機對話、記憶同批量匯入共享。呢個設定只隔離本機紀錄；使用 OpenAI 模型時，內容仍會傳送到 OpenAI 處理。
+
 ### V2.6.0 更新介紹
 
 V2.6.0 重新整理 quota 同登入狀態顯示：憑證確定失效時會清楚顯示「登入過期」或「需要登入」，已登入但暫時攞唔到官方用量時則顯示「暫時未能取得」，Reload 期間唔再閃出假嘅 `0%` 或 `00/00`。只有官方 OAuth 明確回覆 token 無效先會判定登入過期；一般網絡錯誤或 5xx 會保留上一個可用 quota。後備 quota 查詢亦會停用 MCP 同 plugins，減少背景程序同系統負荷。登入過期仍然需要使用者重新登入，App 唔會代替使用者修復或複製登入憑證。
@@ -92,10 +96,10 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
 - 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
-- 打開 profile 前先同步：先同步本機記憶、rules、AGENTS 同外掛設定，之後才打開該帳戶視窗。
+- 輕量啟動與獨立同步：打開 profile 唔會被重型同步阻塞；本機記憶、rules、AGENTS 同外掛設定可用自動或手動同步。
 - 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間；「今日使用」只計 Codex 實際運行時間，睡眠同關機時間唔會計算。
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
-- 本機對話紀錄共享：可選擇將本機 Codex history 共享到其他 profile。
+- 本機對話私隱：每個 profile 可選擇「私人本機對話」或共享模式；私人 profile 會略過本機對話、記憶同批量匯入共享。
 - 記憶與外掛同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，外掛啟用狀態會喺不同帳號之間合併。
 - 三段防睡眠：關閉、開屏防睡眠、合蓋繼續運行；開屏模式使用 `caffeinate`，合蓋模式需要 macOS 管理員確認，離開時會恢復系統設定。
 - 電腦清潔模式：暫停大部分鍵盤輸入，方便清潔鍵盤，保留滑鼠/觸控板操作去關閉模式。
@@ -122,7 +126,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.6.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.6.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
 
 ### 從源碼構建
 
@@ -175,6 +179,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.6.1 更新介绍
+
+V2.6.1 修复部分 Mac 点击“打开”后长时间转圈或没有反应：Profile 启动改用独立高优先级队列，默认跳过启动前的重型数据修复，并会确认对应 Codex 进程真正启动；失败时会显示原因，不再无限等待。本版也新增每个 Profile 独立的“私人本地对话”模式，私人 Profile 会跳过本地对话、记忆和批量导入共享。此设置只隔离本地记录；使用 OpenAI 模型时，内容仍会发送到 OpenAI 处理。
 
 ### V2.6.0 更新介绍
 
@@ -252,10 +260,10 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
 - 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
-- 打开 profile 前先同步：先同步本地记忆、rules、AGENTS 和插件设置，然后才打开该账号窗口。
+- 轻量启动与独立同步：打开 profile 不会被重型同步阻塞；本地记忆、rules、AGENTS 和插件设置可自动或手动同步。
 - 用量显示：显示 5H / 1W 额度、百分比和恢复时间；“今日使用”只计算 Codex 实际运行时间，睡眠和关机时间不会计入。
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
-- 本地对话记录共享：可选择将本地 Codex history 共享到其他 profile。
+- 本地对话隐私：每个 profile 可选择“私人本地对话”或共享模式；私人 profile 会跳过本地对话、记忆和批量导入共享。
 - 记忆与插件同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，插件启用状态会在不同账号之间合并。
 - 三段防睡眠：关闭、开屏防睡眠、合盖继续运行；开屏模式使用 `caffeinate`，合盖模式需要 macOS 管理员确认，离开时会恢复系统设置。
 - 电脑清洁模式：暂停大部分键盘输入，方便清洁键盘，保留鼠标/触控板操作去关闭模式。
@@ -282,7 +290,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.6.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.6.1 之后，可以直接在 app 里检查并安装下一个 GitHub release。
 
 ### 从源码构建
 
@@ -335,6 +343,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.6.1 Update
+
+V2.6.1 fixes profile launches that could keep spinning or appear to do nothing on some Macs. Launch work now uses a dedicated high-priority queue, skips heavy state repair by default, verifies that the matching Codex process actually started, and shows an actionable error instead of waiting indefinitely. This release also adds a per-profile **Private local chats** mode. Private profiles are excluded from local chat, memory, and bulk-import sharing. This setting isolates local records only; content is still sent to OpenAI when an OpenAI model is used.
 
 ### V2.6.0 Update
 
@@ -412,10 +424,10 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
 - Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
-- Sync before opening: when opening a profile, the app syncs local memory, rules, AGENTS, and plugin settings first, then opens the account window.
+- Lightweight launch with independent sync: opening a profile is not blocked by heavy sync; local memory, rules, AGENTS, and plugin settings can sync automatically or on demand.
 - Usage meters: show 5H / 1W quota, percentage, and reset time; Today counts only actual Codex runtime and excludes sleep and offline time.
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
-- Optional local history sharing across profiles.
+- Per-profile local history privacy: choose private local chats or shared mode; private profiles are excluded from local chat, memory, and bulk-import sharing.
 - Optional memory and plugin sync for `AGENTS.md`, `memories/`, `rules/`, `plugins/`, `skills/`, and `vendor_imports/`, including enabled plugin entries across accounts.
 - Three-level Keep Awake: Off, Screen Awake, and Lid Closed; Screen Awake uses `caffeinate`, while Lid Closed requires macOS administrator approval and restores the system setting when disabled.
 - Keyboard Clean Mode: blocks most keyboard input while keeping mouse/trackpad control available so the mode can be turned off safely.
@@ -442,7 +454,7 @@ System requirement: macOS 14 or later.
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.6.0, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.6.1, future GitHub releases can be checked and installed directly inside the app.
 
 ### Build From Source
 

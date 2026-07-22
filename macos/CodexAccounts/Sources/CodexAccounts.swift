@@ -8,6 +8,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .utility)
+private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)
 private let profileRefreshPayloadSeparator = "\u{1E}"
 
 private final class ProcessFinishState {
@@ -83,6 +84,11 @@ struct CodexProfile: Identifiable {
         self.reset = reset
         self.resetCredits = resetCredits
     }
+}
+
+private enum ProfileHistoryMode {
+    case shared
+    case privateOnly
 }
 
 private struct ExportableThread: Identifiable {
@@ -896,47 +902,15 @@ private struct StatusRingOverlay: View {
     let cornerRadius: CGFloat
     let lineWidth: CGFloat
 
-    @State private var pulse = false
-
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(
-                    color.opacity(active ? (pulse ? 1.0 : 0.26) : 0.98),
-                    lineWidth: lineWidth
-                )
-                .shadow(
-                    color: color.opacity(active ? (pulse ? 0.82 : 0.12) : 0.34),
-                    radius: active ? (pulse ? 18 : 8) : 8,
-                    x: 0,
-                    y: 0
-                )
-
-            if active {
-                RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
-                    .stroke(color.opacity(pulse ? 0.78 : 0.0), lineWidth: max(lineWidth * 0.34, 1))
-                    .scaleEffect(pulse ? 1.18 : 1.02)
-            }
-        }
-        .onAppear {
-            configurePulse()
-        }
-        .onChange(of: active) { _, _ in
-            configurePulse()
-        }
-    }
-
-    private func configurePulse() {
-        if active {
-            pulse = false
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.54).repeatForever(autoreverses: true)) {
-                    pulse = true
-                }
-            }
-        } else {
-            pulse = false
-        }
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(color.opacity(active ? 0.98 : 0.88), lineWidth: lineWidth)
+            .shadow(
+                color: color.opacity(active ? 0.34 : 0.24),
+                radius: active ? 9 : 7,
+                x: 0,
+                y: 0
+            )
     }
 }
 
@@ -2412,6 +2386,7 @@ struct AccountsRootView: View {
     @State private var showKeyboardCleanHelp = false
     @State private var showSyncHelp = false
     @State private var busyProfiles: Set<String> = []
+    @State private var isClosingAllAccounts = false
     @State private var expandedResetKeys: Set<String> = []
     @State private var expandedResetCreditProfileIDs: Set<String> = []
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
@@ -3723,7 +3698,7 @@ struct AccountsRootView: View {
 
                 HStack(spacing: scaled(8)) {
                     miniButton(tr("立即同步", "Sync now")) { syncMemories() }
-                    miniButton(tr("共享全部", "Share all")) { shareAll() }
+                    miniButton(tr("同步共享 Profile", "Sync shared profiles")) { shareAll() }
                 }
             }
 
@@ -6018,6 +5993,7 @@ struct AccountsRootView: View {
         .shadow(color: accent.opacity(depleted ? 0.26 : 0.18), radius: 9, x: 0, y: 3)
         .clipShape(Capsule())
         .modifier(HoverLiftGlow(glow: accent, scale: 1.055, opacity: 0.50, radius: 18, y: 5))
+        .disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)
         .keyboardShortcut(profile.id == "account1" ? "1" : "2", modifiers: [.command])
     }
 
@@ -6031,6 +6007,7 @@ struct AccountsRootView: View {
             closeAccount(profile)
         }
         .frame(width: scaled(38), height: scaled(40))
+        .disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)
         .contentShape(Rectangle())
         .onHover { hovering in
             updateHoveredProfile(profile.id, hovering: hovering)
@@ -6083,12 +6060,29 @@ struct AccountsRootView: View {
             importConversationPackage(defaultTarget: profile)
         })
         menu.addItem(.separator())
-        menu.addItem(CallbackMenuItem(title: tr("共享對話紀錄", "Share History")) {
-            shareHistory(profile)
-        })
-        menu.addItem(CallbackMenuItem(title: tr("分開對話紀錄", "Separate History")) {
+
+        let historyMode = profileHistoryMode(for: profile)
+        let privateHistoryItem = CallbackMenuItem(
+            title: tr("🔒 私人本機對話（只限此 Profile）", "🔒 Private local chats (this profile only)"),
+            enabled: !isHistoryAnchor(profile) && historyMode != .privateOnly
+        ) {
             separateHistory(profile)
-        })
+        }
+        privateHistoryItem.state = historyMode == .privateOnly ? .on : .off
+        menu.addItem(privateHistoryItem)
+
+        let sharedHistoryItem = CallbackMenuItem(
+            title: tr("共享本機對話（其他 Profile 可見）", "Share local chats (visible to other profiles)"),
+            enabled: historyMode != .shared
+        ) {
+            shareHistory(profile)
+        }
+        sharedHistoryItem.state = historyMode == .shared ? .on : .off
+        menu.addItem(sharedHistoryItem)
+        menu.addItem(CallbackMenuItem(
+            title: tr("只隔離本機紀錄；唔會關閉 OpenAI 雲端處理", "Isolates local records only; OpenAI cloud processing stays on"),
+            enabled: false
+        ) {})
         menu.addItem(.separator())
         menu.addItem(CallbackMenuItem(title: tr("刪除 Profile...", "Delete Profile..."), enabled: profile.id != "account1") {
             deleteProfile(profile)
@@ -6209,6 +6203,7 @@ struct AccountsRootView: View {
 
     private func runBackground(
         _ message: String?,
+        queue: DispatchQueue = codexAccountsWorkQueue,
         work: @escaping () -> (Int32, String),
         completion: @escaping ((Int32, String)) -> Void
     ) {
@@ -6217,7 +6212,7 @@ struct AccountsRootView: View {
             loadingMessage = message
         }
 
-        codexAccountsWorkQueue.async {
+        queue.async {
             let result = work()
             DispatchQueue.main.async {
                 if message != nil {
@@ -6657,7 +6652,10 @@ struct AccountsRootView: View {
             defaultName: defaultName
         ) else { return }
         runBackground(tr("建立帳戶...", "Creating account...")) {
-            runCodexScript(scriptPath, ["init-account", name], wait: true, timeout: 60)
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_SHARED_SESSIONS"] = "0"
+            environment["CODEX_SYNC_THREAD_HISTORY"] = "0"
+            return runCodexScript(scriptPath, ["init-account", name], wait: true, timeout: 60, environment: environment)
         } completion: { result in
             guard result.0 == 0 else {
                 alertMessage(tr("建立帳戶失敗", "Could Not Create Account"), result.1)
@@ -6697,11 +6695,13 @@ struct AccountsRootView: View {
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = true) {
+    private func openAccount(_ name: String, displayName: String? = nil, syncBeforeLaunch: Bool = false) {
         let requestedName = displayName ?? name
         let route = quotaPoolRoute(for: name)
         let targetID = route?.target.id ?? name
         let targetName = route?.target.displayName ?? requestedName
+        let targetProfile = route?.target ?? profiles.first(where: { $0.id == targetID })
+        let sharesLocalHistory = targetProfile.map { profileHistoryMode(for: $0) == .shared } ?? true
         let launchCommand = syncBeforeLaunch ? "launch-account" : "launch-account-nosync"
         var launchArguments = [launchCommand, targetID]
         if !targetName.isEmpty {
@@ -6710,6 +6710,7 @@ struct AccountsRootView: View {
         let requestedID = sanitizedProfileId(name)
         let targetProfileID = sanitizedProfileId(targetID)
         let busyIDs = Set([requestedID, targetProfileID])
+        guard !isClosingAllAccounts, busyProfiles.isDisjoint(with: busyIDs) else { return }
         startUsageSession()
         busyIDs.forEach { setProfileBusy($0, true) }
         let loadingText: String
@@ -6718,15 +6719,15 @@ struct AccountsRootView: View {
         } else {
             loadingText = tr("正在打開 \(targetName)...", "Opening \(targetName)...")
         }
-        runBackground(loadingText) {
+        runBackground(loadingText, queue: codexAccountsLaunchQueue) {
             if route?.didSwitch == true {
                 _ = runCodexScript(scriptPath, ["close-account", name], wait: true, timeout: 12)
             }
 
             var launchEnvironment = ProcessInfo.processInfo.environment
             launchEnvironment["CODEX_PRELAUNCH_SYNC"] = syncBeforeLaunch ? "1" : "0"
-            launchEnvironment["CODEX_SHARED_SESSIONS"] = "1"
-            launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = syncBeforeLaunch ? "1" : "0"
+            launchEnvironment["CODEX_SHARED_SESSIONS"] = sharesLocalHistory ? "1" : "0"
+            launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = syncBeforeLaunch && sharesLocalHistory ? "1" : "0"
             if syncBeforeLaunch {
                 launchEnvironment["CODEX_PRELAUNCH_SYNC_LOCK_MAX_WAITS"] = "8"
                 launchEnvironment["CODEX_RSYNC_MAX_WAITS"] = "50"
@@ -6755,12 +6756,18 @@ struct AccountsRootView: View {
                 failureText = tr("打開失敗", "Open failed")
             }
             statusText = result.0 == 0 ? tr("已打開 \(targetName)", "Opened \(targetName)") : failureText
+            if result.0 != 0 {
+                let detail = trimmedToolOutput(result.1, maxLength: 900)
+                let fallback = tr("Codex 未能確認啟動。請稍後再試。", "Codex could not be verified as running. Please try again.")
+                alertMessage(failureText, detail.isEmpty ? fallback : detail)
+            }
         }
     }
 
     private func closeAccount(_ profile: CodexProfile) {
+        guard !isClosingAllAccounts, !busyProfiles.contains(profile.id) else { return }
         setProfileBusy(profile.id, true)
-        runBackground(tr("關閉 \(profile.displayName)...", "Closing \(profile.displayName)...")) {
+        runBackground(tr("關閉 \(profile.displayName)...", "Closing \(profile.displayName)..."), queue: codexAccountsLaunchQueue) {
             runCodexScript(scriptPath, ["close-account", profile.id], wait: true, timeout: 25)
         } completion: { result in
             setProfileBusy(profile.id, false)
@@ -6771,13 +6778,19 @@ struct AccountsRootView: View {
             statusText = result.0 == 0
                 ? tr("已關閉 \(profile.displayName)", "Closed \(profile.displayName)")
                 : tr("關閉失敗", "Close failed")
+            if result.0 != 0 {
+                alertMessage(tr("關閉失敗", "Close failed"), trimmedToolOutput(result.1, maxLength: 900))
+            }
         }
     }
 
     private func closeAllAccounts() {
-        runBackground(tr("關閉全部 Codex 視窗...", "Closing all Codex windows...")) {
+        guard !isClosingAllAccounts else { return }
+        isClosingAllAccounts = true
+        runBackground(tr("關閉全部 Codex 視窗...", "Closing all Codex windows..."), queue: codexAccountsLaunchQueue) {
             runCodexScript(scriptPath, ["close-all-accounts"], wait: true, timeout: 35)
         } completion: { result in
+            isClosingAllAccounts = false
             if result.0 == 0 {
                 finishUsageSession()
                 activeQuotaPoolProfileID = nil
@@ -6786,6 +6799,9 @@ struct AccountsRootView: View {
             statusText = result.0 == 0
                 ? tr("已關閉全部 Codex 視窗", "Closed all Codex windows")
                 : tr("關閉全部失敗", "Close all failed")
+            if result.0 != 0 {
+                alertMessage(tr("關閉全部失敗", "Close all failed"), trimmedToolOutput(result.1, maxLength: 900))
+            }
         }
     }
 
@@ -6873,7 +6889,7 @@ struct AccountsRootView: View {
     }
 
     private func shareAll() {
-        runBackground(tr("共享對話紀錄...", "Sharing history...")) {
+        runBackground(tr("同步共享 Profile 對話...", "Syncing shared profile history...")) {
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_SHARED_SESSIONS"] = "1"
             let linkResult = runCodexScript(scriptPath, ["link-all-history"], wait: true, timeout: 60, environment: environment)
@@ -6881,7 +6897,9 @@ struct AccountsRootView: View {
             environment["CODEX_SYNC_THREAD_HISTORY"] = "1"
             return runCodexScript(scriptPath, ["sync-history-once"], wait: true, timeout: 60, environment: environment)
         } completion: { result in
-            statusText = result.0 == 0 ? tr("已同全部 profile 共享對話紀錄", "History shared with all profiles") : tr("共享失敗", "History share failed")
+            statusText = result.0 == 0
+                ? tr("已同步共享 Profile；私人 Profile 已略過", "Shared profiles synced; private profiles skipped")
+                : tr("共享同步失敗", "Shared profile sync failed")
             refreshProfiles(showLoading: false)
         }
     }
@@ -7213,22 +7231,129 @@ struct AccountsRootView: View {
         return String(trimmed.prefix(maxLength)) + "\n..."
     }
 
+    private func profileHistoryMode(for profile: CodexProfile) -> ProfileHistoryMode {
+        if isHistoryAnchor(profile) {
+            return .shared
+        }
+
+        let markerURL = URL(fileURLWithPath: profile.home)
+            .appendingPathComponent(".codex-accounts-history-mode")
+        if let marker = try? String(contentsOf: markerURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+            if marker == "private" {
+                return .privateOnly
+            }
+            if marker == "shared" {
+                return .shared
+            }
+        }
+
+        let sharedRoot = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex-shared-history")
+        let expectedPaths = [
+            "session_index.jsonl": sharedRoot.appendingPathComponent("session_index.jsonl").path,
+            "sessions": sharedRoot.appendingPathComponent("sessions").path,
+            "shell_snapshots": sharedRoot.appendingPathComponent("shell_snapshots").path
+        ]
+        let fileManager = FileManager.default
+        let allShared = expectedPaths.allSatisfy { item, expectedPath in
+            let targetPath = URL(fileURLWithPath: profile.home).appendingPathComponent(item).path
+            guard let destination = try? fileManager.destinationOfSymbolicLink(atPath: targetPath) else {
+                return false
+            }
+            let destinationURL: URL
+            if destination.hasPrefix("/") {
+                destinationURL = URL(fileURLWithPath: destination)
+            } else {
+                destinationURL = URL(fileURLWithPath: targetPath)
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(destination)
+            }
+            return destinationURL.resolvingSymlinksInPath().standardizedFileURL.path
+                == URL(fileURLWithPath: expectedPath).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        return allShared ? .shared : .privateOnly
+    }
+
+    private func isHistoryAnchor(_ profile: CodexProfile) -> Bool {
+        let anchorFile = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/Codex Accounts/history-anchor-home")
+        let fallback = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
+        let anchorPath = (try? String(contentsOf: anchorFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+        return URL(fileURLWithPath: profile.home).resolvingSymlinksInPath().standardizedFileURL.path
+            == URL(fileURLWithPath: anchorPath).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     private func shareHistory(_ profile: CodexProfile) {
-        runBackground(tr("共享 \(profile.displayName) 對話紀錄...", "Sharing \(profile.displayName) history...")) {
+        guard profileHistoryMode(for: profile) != .shared,
+              !busyProfiles.contains(profile.id)
+        else { return }
+
+        let alert = NSAlert()
+        alert.messageText = tr(
+            "同其他 Profile 共享 \(profile.displayName) 嘅本機對話？",
+            "Share \(profile.displayName)'s local chats with other profiles?"
+        )
+        alert.informativeText = tr(
+            "現有私人本機對話會合併入共享紀錄，本機記憶之後亦會參與共享同步；其他 Profile 都可能見到，而且唔會自動拆返。請先關閉呢個 Profile。",
+            "Existing private local chats will be merged into shared history, and local memories will join shared sync afterward. Other profiles may see them, and this cannot be automatically undone. Close this profile first."
+        )
+        alert.addButton(withTitle: tr("共享本機對話", "Share Local Chats"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        setProfileBusy(profile.id, true)
+        runBackground(tr("共享 \(profile.displayName) 本機對話...", "Sharing \(profile.displayName) local chats..."), queue: codexAccountsLaunchQueue) {
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_SHARED_SESSIONS"] = "1"
             return runCodexScript(scriptPath, ["link-history", profile.id], wait: true, timeout: 45, environment: environment)
         } completion: { result in
-            statusText = result.0 == 0 ? tr("已同 \(profile.displayName) 共享對話紀錄", "History shared with \(profile.displayName)") : tr("共享失敗", "History share failed")
+            setProfileBusy(profile.id, false)
+            statusText = result.0 == 0
+                ? tr("\(profile.displayName) 已改為共享本機對話", "\(profile.displayName) now shares local chats")
+                : tr("共享失敗", "History share failed")
+            if result.0 != 0 {
+                alertMessage(tr("共享失敗", "History Share Failed"), trimmedToolOutput(result.1, maxLength: 900))
+            }
             refreshProfiles(showLoading: false)
         }
     }
 
     private func separateHistory(_ profile: CodexProfile) {
-        runBackground(tr("分開 \(profile.displayName) 對話紀錄...", "Separating \(profile.displayName) history...")) {
+        guard !isHistoryAnchor(profile),
+              profileHistoryMode(for: profile) != .privateOnly,
+              !busyProfiles.contains(profile.id)
+        else { return }
+
+        let alert = NSAlert()
+        alert.messageText = tr(
+            "將 \(profile.displayName) 設為私人本機對話？",
+            "Make \(profile.displayName)'s local chats private?"
+        )
+        alert.informativeText = tr(
+            "請先關閉呢個 Profile。之後佢唔會再見到其他 Profile 嘅本機對話，並會由空白私人側欄開始；先前同步到嘅本機記憶會先備份再重置。共享原檔唔會刪除。使用 OpenAI 模型時，內容仍會送到 OpenAI 處理，呢個唔係離線模式。",
+            "Close this profile first. It will stop seeing other profiles' local chats and start with an empty private sidebar. Previously synced local memories are backed up, then reset. Shared source files are not deleted. Content is still sent to OpenAI when you use OpenAI models—this is not offline mode."
+        )
+        alert.addButton(withTitle: tr("設為私人", "Make Private"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        setProfileBusy(profile.id, true)
+        runBackground(tr("隔離 \(profile.displayName) 本機對話...", "Isolating \(profile.displayName) local chats..."), queue: codexAccountsLaunchQueue) {
             runCodexScript(scriptPath, ["separate-history", profile.id], wait: true, timeout: 45)
         } completion: { result in
-            statusText = result.0 == 0 ? tr("已分開 \(profile.displayName) 對話紀錄", "Separated \(profile.displayName) history") : tr("分開紀錄失敗", "History separation failed")
+            setProfileBusy(profile.id, false)
+            statusText = result.0 == 0
+                ? tr("\(profile.displayName) 已改為私人本機對話", "\(profile.displayName) now uses private local chats")
+                : tr("私人模式設定失敗", "Could not enable private history")
+            if result.0 != 0 {
+                alertMessage(tr("私人模式設定失敗", "Could Not Enable Private History"), trimmedToolOutput(result.1, maxLength: 900))
+            }
             refreshProfiles(showLoading: false)
         }
     }
@@ -7939,7 +8064,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openAccount(_ name: String, displayName: String? = nil) {
         let routed = quotaPoolRouteForMenu(requestedName: name)
-        var arguments = ["launch-account", routed.name]
+        var arguments = ["launch-account-nosync", routed.name]
         if !routed.displayName.isEmpty {
             arguments.append(routed.displayName)
         }

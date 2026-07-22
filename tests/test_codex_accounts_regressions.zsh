@@ -11,6 +11,8 @@ PRIMARY_HOME="$TMP_ROOT/primary"
 PROFILE_HOME="$TMP_ROOT/profile"
 mkdir -p "$PRIMARY_HOME" "$PROFILE_HOME" "$TMP_ROOT/accounts" "$TMP_ROOT/app-data"
 touch "$TMP_ROOT/accounts/.deleted-account2"
+export SHARED_HISTORY_ROOT="$TMP_ROOT/shared-history"
+export SHARED_MEMORY_DIR="$TMP_ROOT/shared-memory"
 
 python3 - "$PROFILE_HOME" <<'PY'
 import json
@@ -77,6 +79,367 @@ PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
 ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
 APP_DATA_ROOT="$TMP_ROOT/app-data" \
 "$HELPER" restore-thread-models-home "$PROFILE_HOME" no-backup
+
+# Private history is a persisted per-profile boundary. Exercise the real helper
+# against only temporary roots: a hostile inherited shared-history environment
+# must not re-link it during launch preparation, synchronization, or link-all.
+PRIVATE_HISTORY_NAME="private-history"
+SHARED_HISTORY_NAME="shared-history"
+FAILED_HISTORY_NAME="failed-history"
+CATALOG_ONLY_HISTORY_NAME="catalog-only-history"
+ROLLBACK_HISTORY_NAME="rollback-history"
+PRIVATE_HISTORY_HOME="$TMP_ROOT/accounts/$PRIVATE_HISTORY_NAME"
+SHARED_HISTORY_HOME="$TMP_ROOT/accounts/$SHARED_HISTORY_NAME"
+FAILED_HISTORY_HOME="$TMP_ROOT/accounts/$FAILED_HISTORY_NAME"
+CATALOG_ONLY_HISTORY_HOME="$TMP_ROOT/accounts/$CATALOG_ONLY_HISTORY_NAME"
+ROLLBACK_HISTORY_HOME="$TMP_ROOT/accounts/$ROLLBACK_HISTORY_NAME"
+
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_SHARED_SESSIONS=1 \
+"$HELPER" init-account "$PRIVATE_HISTORY_NAME" >/dev/null
+
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$PRIVATE_HISTORY_NAME")" == "private" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/session_index.jsonl" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/sessions" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/shell_snapshots" ]]
+printf 'PRIVATE-ONLY\n' > "$PRIVATE_HISTORY_HOME/session_index.jsonl"
+printf 'PRIVATE-ONLY\n' > "$PRIVATE_HISTORY_HOME/sessions/private-thread.jsonl"
+mkdir -p "$PRIMARY_HOME/memories" "$PRIVATE_HISTORY_HOME/memories"
+printf 'SHARED-MEMORY\n' > "$PRIMARY_HOME/memories/shared-memory.txt"
+printf 'PRIVATE-MEMORY\n' > "$PRIVATE_HISTORY_HOME/memories/private-memory.txt"
+
+mkdir -p "$SHARED_HISTORY_HOME"
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" link-history "$SHARED_HISTORY_NAME" >/dev/null
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$SHARED_HISTORY_NAME")" == "shared" ]]
+
+# A failed private transition must restore the shared links and leave memories
+# untouched; the test hook models a metadata cleanup failure without touching
+# a real Codex database.
+mkdir -p "$FAILED_HISTORY_HOME/memories"
+printf 'keep until success\n' > "$FAILED_HISTORY_HOME/memories/keep.txt"
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" link-history "$FAILED_HISTORY_NAME" >/dev/null
+if PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  CODEX_PRIVATE_HISTORY_CLEANUP_FORCE_FAIL=1 \
+  "$HELPER" separate-history "$FAILED_HISTORY_NAME" >/dev/null 2>&1; then
+  echo "Forced private history cleanup failure unexpectedly succeeded." >&2
+  exit 1
+fi
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$FAILED_HISTORY_NAME")" == "shared" ]]
+[[ -L "$FAILED_HISTORY_HOME/session_index.jsonl" ]]
+[[ -L "$FAILED_HISTORY_HOME/sessions" ]]
+[[ -L "$FAILED_HISTORY_HOME/shell_snapshots" ]]
+[[ -e "$FAILED_HISTORY_HOME/memories/keep.txt" ]]
+
+# A late memories quarantine failure must roll back the already-cleaned local
+# metadata and keep the profile shared instead of reporting a false success.
+if PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  CODEX_PRIVATE_HISTORY_QUARANTINE_FORCE_FAIL=1 \
+  "$HELPER" separate-history "$FAILED_HISTORY_NAME" >/dev/null 2>&1; then
+  echo "Forced private memory quarantine failure unexpectedly succeeded." >&2
+  exit 1
+fi
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$FAILED_HISTORY_NAME")" == "shared" ]]
+[[ -L "$FAILED_HISTORY_HOME/session_index.jsonl" ]]
+[[ -L "$FAILED_HISTORY_HOME/sessions" ]]
+[[ -L "$FAILED_HISTORY_HOME/shell_snapshots" ]]
+[[ -e "$FAILED_HISTORY_HOME/memories/keep.txt" ]]
+
+# If SQLite cannot make a consistent online snapshot, abort before detaching.
+mkdir -p "$FAILED_HISTORY_HOME/sqlite"
+printf 'not a sqlite database\n' > "$FAILED_HISTORY_HOME/sqlite/codex-dev.db"
+if PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  "$HELPER" separate-history "$FAILED_HISTORY_NAME" >/dev/null 2>&1; then
+  echo "Invalid SQLite snapshot unexpectedly allowed a private transition." >&2
+  exit 1
+fi
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$FAILED_HISTORY_NAME")" == "shared" ]]
+[[ -L "$FAILED_HISTORY_HOME/session_index.jsonl" ]]
+[[ -L "$FAILED_HISTORY_HOME/sessions" ]]
+[[ -L "$FAILED_HISTORY_HOME/shell_snapshots" ]]
+[[ -e "$FAILED_HISTORY_HOME/memories/keep.txt" ]]
+rm -f "$FAILED_HISTORY_HOME/sqlite/codex-dev.db"
+
+# A live lock with no waits must reject the transition before it changes mode,
+# links, or memories.
+LOCK_DIR="$TMP_ROOT/private-history-mode.lock"
+mkdir -p "$LOCK_DIR"
+sleep 5 &
+LOCK_PID=$!
+printf '%s\n' "$LOCK_PID" > "$LOCK_DIR/pid"
+printf '%s\n' 'private-history-test' > "$LOCK_DIR/command"
+if PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  SYNC_LOCK_DIR="$LOCK_DIR" \
+  CODEX_HISTORY_MODE_LOCK_MAX_WAITS=0 \
+  CODEX_SYNC_STALE_LOCK_SECONDS=9999 \
+  "$HELPER" separate-history "$FAILED_HISTORY_NAME" >/dev/null 2>&1; then
+  echo "Private history lock timeout unexpectedly succeeded." >&2
+  kill "$LOCK_PID" 2>/dev/null || true
+  exit 1
+fi
+kill "$LOCK_PID" 2>/dev/null || true
+wait "$LOCK_PID" 2>/dev/null || true
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$FAILED_HISTORY_NAME")" == "shared" ]]
+[[ -L "$FAILED_HISTORY_HOME/session_index.jsonl" ]]
+[[ -L "$FAILED_HISTORY_HOME/sessions" ]]
+[[ -L "$FAILED_HISTORY_HOME/shell_snapshots" ]]
+[[ -e "$FAILED_HISTORY_HOME/memories/keep.txt" ]]
+
+# A profile can have only a local catalog/session index (for example when its
+# state database was reset). Those IDs still have to be captured and removed
+# before this profile becomes private.
+mkdir -p "$CATALOG_ONLY_HISTORY_HOME/sqlite" "$SHARED_HISTORY_ROOT/sessions"
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" link-history "$CATALOG_ONLY_HISTORY_NAME" >/dev/null
+printf '{"id":"catalog-only-thread","title":"shared catalog only"}\n' > "$SHARED_HISTORY_ROOT/session_index.jsonl"
+printf 'catalog-only source\n' > "$SHARED_HISTORY_ROOT/sessions/catalog-only-thread.jsonl"
+python3 - "$CATALOG_ONLY_HISTORY_HOME" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+assert not (home / "state_5.sqlite").exists()
+catalog = sqlite3.connect(home / "sqlite" / "codex-dev.db")
+catalog.execute("CREATE TABLE local_thread_catalog (host_id TEXT, thread_id TEXT, display_title TEXT, source_created_at REAL, source_updated_at REAL, cwd TEXT, source_kind TEXT, source_detail TEXT, model_provider TEXT, git_branch TEXT, observation_sequence INTEGER, missing_candidate INTEGER)")
+catalog.execute("INSERT INTO local_thread_catalog VALUES ('local', 'catalog-only-thread', 'shared catalog only', 0, 0, '', 'vscode', '', '', '', 0, 0)")
+catalog.commit()
+catalog.close()
+PY
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" separate-history "$CATALOG_ONLY_HISTORY_NAME" >/dev/null
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$CATALOG_ONLY_HISTORY_NAME")" == "private" ]]
+[[ ! -e "$CATALOG_ONLY_HISTORY_HOME/state_5.sqlite" ]]
+[[ ! -L "$CATALOG_ONLY_HISTORY_HOME/session_index.jsonl" ]]
+[[ "$(cat "$CATALOG_ONLY_HISTORY_HOME/session_index.jsonl")" != *"catalog-only-thread"* ]]
+python3 - "$CATALOG_ONLY_HISTORY_HOME" "$SHARED_HISTORY_ROOT" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+home, shared = map(Path, sys.argv[1:])
+catalog = sqlite3.connect(home / "sqlite" / "codex-dev.db")
+assert catalog.execute("SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='catalog-only-thread'").fetchone()[0] == 0
+catalog.close()
+assert (shared / "sessions" / "catalog-only-thread.jsonl").exists()
+PY
+mkdir -p "$SHARED_HISTORY_ROOT/sessions" "$SHARED_HISTORY_HOME/memories" "$SHARED_HISTORY_HOME/sqlite"
+printf 'shared rollout\n' > "$SHARED_HISTORY_ROOT/sessions/shared-thread.jsonl"
+printf 'direct shared rollout\n' > "$SHARED_HISTORY_ROOT/sessions/direct-shared-thread.jsonl"
+printf 'synchronized summary\n' > "$SHARED_HISTORY_HOME/memories/shared-era.txt"
+python3 - "$SHARED_HISTORY_HOME" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+rollout = home / "sessions" / "shared-thread.jsonl"
+direct_rollout = home.parent.parent / "shared-history" / "sessions" / "direct-shared-thread.jsonl"
+con = sqlite3.connect(home / "state_5.sqlite")
+con.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, archived INTEGER DEFAULT 0)")
+con.execute("INSERT INTO threads VALUES (?, ?, 0)", ("shared-thread", str(rollout)))
+con.execute("INSERT INTO threads VALUES (?, ?, 0)", ("direct-shared-thread", str(direct_rollout)))
+con.commit()
+con.close()
+
+catalog = sqlite3.connect(home / "sqlite" / "codex-dev.db")
+catalog.execute(
+    "CREATE TABLE local_thread_catalog (host_id TEXT, thread_id TEXT, display_title TEXT, source_created_at REAL, source_updated_at REAL, cwd TEXT, source_kind TEXT, source_detail TEXT, model_provider TEXT, git_branch TEXT, observation_sequence INTEGER, missing_candidate INTEGER)"
+)
+catalog.execute(
+    "INSERT INTO local_thread_catalog VALUES (?, ?, ?, 0, 0, '', 'vscode', '', '', '', 0, 0)",
+    ("local", "shared-thread", "shared title"),
+)
+catalog.execute(
+    "INSERT INTO local_thread_catalog VALUES (?, ?, ?, 0, 0, '', 'vscode', '', '', '', 0, 0)",
+    ("local", "direct-shared-thread", "direct shared title"),
+)
+catalog.execute("CREATE TABLE local_thread_catalog_metadata (id INTEGER PRIMARY KEY, catalog_revision INTEGER)")
+catalog.execute("INSERT INTO local_thread_catalog_metadata VALUES (1, 0)")
+catalog.commit()
+catalog.close()
+
+(home / ".codex-global-state.json").write_text(
+    json.dumps({
+        "pinned-thread-ids": ["shared-thread", "direct-shared-thread"],
+        "projectless-thread-ids": ["shared-thread", "direct-shared-thread"],
+        "thread-projectless-output-directories": {"shared-thread": "/tmp", "direct-shared-thread": "/tmp"},
+    }),
+    encoding="utf-8",
+)
+PY
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" separate-history "$SHARED_HISTORY_NAME" >/dev/null
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$SHARED_HISTORY_NAME")" == "private" ]]
+[[ ! -L "$SHARED_HISTORY_HOME/session_index.jsonl" ]]
+[[ ! -L "$SHARED_HISTORY_HOME/sessions" ]]
+[[ ! -L "$SHARED_HISTORY_HOME/shell_snapshots" ]]
+python3 - "$SHARED_HISTORY_HOME" "$SHARED_HISTORY_ROOT" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+shared_root = Path(sys.argv[2])
+con = sqlite3.connect(home / "state_5.sqlite")
+assert con.execute("SELECT COUNT(*) FROM threads WHERE id='shared-thread'").fetchone()[0] == 0
+assert con.execute("SELECT COUNT(*) FROM threads WHERE id='direct-shared-thread'").fetchone()[0] == 0
+con.close()
+catalog = sqlite3.connect(home / "sqlite" / "codex-dev.db")
+assert catalog.execute("SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='shared-thread'").fetchone()[0] == 0
+assert catalog.execute("SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='direct-shared-thread'").fetchone()[0] == 0
+catalog.close()
+state = json.loads((home / ".codex-global-state.json").read_text(encoding="utf-8"))
+assert "shared-thread" not in state.get("pinned-thread-ids", [])
+assert "shared-thread" not in state.get("projectless-thread-ids", [])
+assert "shared-thread" not in state.get("thread-projectless-output-directories", {})
+assert "direct-shared-thread" not in state.get("pinned-thread-ids", [])
+assert "direct-shared-thread" not in state.get("projectless-thread-ids", [])
+assert "direct-shared-thread" not in state.get("thread-projectless-output-directories", {})
+assert (shared_root / "sessions" / "shared-thread.jsonl").exists()
+assert (shared_root / "sessions" / "direct-shared-thread.jsonl").exists()
+assert not (home / "memories" / "shared-era.txt").exists()
+assert any((home / "backups").glob("history-private-*/memories/shared-era.txt"))
+PY
+
+# If cleanup/pruning completed but a later transition step fails, restore the
+# exact metadata snapshot before re-attaching the shared history links.
+mkdir -p "$ROLLBACK_HISTORY_HOME/memories" "$ROLLBACK_HISTORY_HOME/sqlite" "$SHARED_HISTORY_ROOT/sessions"
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" link-history "$ROLLBACK_HISTORY_NAME" >/dev/null
+printf 'rollback source\n' > "$SHARED_HISTORY_ROOT/sessions/rollback-thread.jsonl"
+printf '{"id":"rollback-thread","title":"rollback shared"}\n' > "$SHARED_HISTORY_ROOT/session_index.jsonl"
+printf 'retain memory through rollback\n' > "$ROLLBACK_HISTORY_HOME/memories/retain.txt"
+python3 - "$ROLLBACK_HISTORY_HOME" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+rollout = home / "sessions" / "rollback-thread.jsonl"
+state = sqlite3.connect(home / "state_5.sqlite")
+state.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, archived INTEGER DEFAULT 0)")
+state.execute("INSERT INTO threads VALUES (?, ?, 0)", ("rollback-thread", str(rollout)))
+state.commit()
+state.close()
+catalog = sqlite3.connect(home / "sqlite" / "codex-dev.db")
+catalog.execute("CREATE TABLE local_thread_catalog (host_id TEXT, thread_id TEXT, display_title TEXT, source_created_at REAL, source_updated_at REAL, cwd TEXT, source_kind TEXT, source_detail TEXT, model_provider TEXT, git_branch TEXT, observation_sequence INTEGER, missing_candidate INTEGER)")
+catalog.execute("INSERT INTO local_thread_catalog VALUES ('local', 'rollback-thread', 'rollback title', 0, 0, '', 'vscode', '', '', '', 0, 0)")
+catalog.commit()
+catalog.close()
+(home / ".codex-global-state.json").write_text(json.dumps({
+    "pinned-thread-ids": ["rollback-thread"],
+    "projectless-thread-ids": ["rollback-thread"],
+    "thread-projectless-output-directories": {"rollback-thread": "/tmp"},
+}), encoding="utf-8")
+PY
+if PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  CODEX_PRIVATE_HISTORY_POST_CLEANUP_FORCE_FAIL=1 \
+  "$HELPER" separate-history "$ROLLBACK_HISTORY_NAME" >/dev/null 2>&1; then
+  echo "Post-cleanup private history failure unexpectedly succeeded." >&2
+  exit 1
+fi
+[[ "$(PRIMARY_CODEX_HOME="$PRIMARY_HOME" ACCOUNTS_ROOT="$TMP_ROOT/accounts" APP_DATA_ROOT="$TMP_ROOT/app-data" "$HELPER" history-mode "$ROLLBACK_HISTORY_NAME")" == "shared" ]]
+[[ -L "$ROLLBACK_HISTORY_HOME/session_index.jsonl" ]]
+[[ -L "$ROLLBACK_HISTORY_HOME/sessions" ]]
+[[ -L "$ROLLBACK_HISTORY_HOME/shell_snapshots" ]]
+[[ -e "$ROLLBACK_HISTORY_HOME/memories/retain.txt" ]]
+python3 - "$ROLLBACK_HISTORY_HOME" "$SHARED_HISTORY_ROOT" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+home, shared = map(Path, sys.argv[1:])
+state = sqlite3.connect(home / "state_5.sqlite")
+assert state.execute("SELECT rollout_path FROM threads WHERE id='rollback-thread'").fetchone()[0] == str(home / "sessions" / "rollback-thread.jsonl")
+state.close()
+catalog = sqlite3.connect(home / "sqlite" / "codex-dev.db")
+assert catalog.execute("SELECT display_title FROM local_thread_catalog WHERE thread_id='rollback-thread'").fetchone()[0] == "rollback title"
+catalog.close()
+global_state = json.loads((home / ".codex-global-state.json").read_text(encoding="utf-8"))
+assert global_state["pinned-thread-ids"] == ["rollback-thread"]
+assert global_state["projectless-thread-ids"] == ["rollback-thread"]
+assert global_state["thread-projectless-output-directories"] == {"rollback-thread": "/tmp"}
+assert (shared / "sessions" / "rollback-thread.jsonl").exists()
+PY
+
+MOCK_OPEN_BIN="$TMP_ROOT/mock-open-bin"
+mkdir -p "$MOCK_OPEN_BIN" "$TMP_ROOT/FakeCodex.app"
+printf '%s\n' '#!/bin/zsh' 'exit 0' > "$MOCK_OPEN_BIN/open"
+chmod +x "$MOCK_OPEN_BIN/open"
+if PATH="$MOCK_OPEN_BIN:$PATH" \
+  PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+  ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+  APP_DATA_ROOT="$TMP_ROOT/app-data" \
+  CODEX_APP="$TMP_ROOT/FakeCodex.app" \
+  CODEX_PRELAUNCH_SYNC=0 \
+  CODEX_SHARED_SESSIONS=1 \
+  CODEX_SYNC_THREAD_HISTORY=1 \
+  CODEX_LAUNCH_VERIFY_MAX_WAITS=0 \
+  "$HELPER" launch-account-nosync "$PRIVATE_HISTORY_NAME" >/dev/null 2>&1; then
+  echo "Private launch test unexpectedly reported a running fake Codex process." >&2
+  exit 1
+fi
+[[ ! -L "$PRIVATE_HISTORY_HOME/session_index.jsonl" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/sessions" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/shell_snapshots" ]]
+[[ "$(cat "$PRIVATE_HISTORY_HOME/session_index.jsonl")" == "PRIVATE-ONLY" ]]
+
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_SYNC_THREAD_HISTORY=1 \
+"$HELPER" sync-history-once >/dev/null
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_SYNC_THREAD_HISTORY=1 \
+"$HELPER" sync-once >/dev/null
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+CODEX_SYNC_THREAD_HISTORY=1 \
+"$HELPER" sync-account-for-launch "$PRIVATE_HISTORY_NAME" >/dev/null
+PRIMARY_CODEX_HOME="$PRIMARY_HOME" \
+ACCOUNTS_ROOT="$TMP_ROOT/accounts" \
+APP_DATA_ROOT="$TMP_ROOT/app-data" \
+"$HELPER" link-all-history >/dev/null
+[[ ! -L "$PRIVATE_HISTORY_HOME/session_index.jsonl" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/sessions" ]]
+[[ ! -L "$PRIVATE_HISTORY_HOME/shell_snapshots" ]]
+[[ "$(cat "$PRIVATE_HISTORY_HOME/session_index.jsonl")" == "PRIVATE-ONLY" ]]
+[[ ! -e "$SHARED_HISTORY_ROOT/sessions/private-thread.jsonl" ]]
+[[ ! -e "$SHARED_MEMORY_DIR/memories/private-memory.txt" ]]
+[[ ! -e "$PRIVATE_HISTORY_HOME/memories/shared-memory.txt" ]]
 
 python3 - "$PROFILE_HOME" "$HELPER" "$SWIFT_SOURCE" <<'PY'
 import re
@@ -172,9 +535,86 @@ assert 'if proxy_injection_enabled; then' in launch_match.group(1)
 assert 'launch_args+=(--proxy-server="$CODEX_PROXY_URL")' in launch_match.group(1)
 assert '--args "${launch_args[@]}"' in launch_match.group(1)
 assert helper.count('$CODEX_APP/Contents/MacOS/ChatGPT') >= 2
+assert 'CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"' in helper
+assert 'CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"' in helper
+assert helper.count('CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH=1 \\\n    repair_compacted_image_payloads_for_home') >= 2
+assert 'prepare_profile_login_storage_for_launch "$home_dir"' in launch_match.group(1)
+assert 'history_mode="$(history_mode_for_home "$home_dir")"' in launch_match.group(1)
+assert 'CODEX_SHARED_SESSIONS=0' in launch_match.group(1)
+assert 'CODEX_SYNC_THREAD_HISTORY=0' in launch_match.group(1)
+assert launch_match.group(1).count('stop_codex_windows_for_app_data "$app_data"') == 1
+assert launch_match.group(1).count('stop_codex_servers_for_home "$home_dir"') == 1
+assert 'wait_for_codex_window_exit "$app_data"' in launch_match.group(1)
+assert 'wait_for_codex_window_start "$app_data"' in launch_match.group(1)
+assert 'open -na "$CODEX_APP"' in launch_match.group(1)
+assert launch_match.group(1).index('wait_for_codex_window_start "$app_data"') > launch_match.group(1).index('open -na "$CODEX_APP"')
+heavy_launch_match = re.search(
+    r'if \[\[ "\$CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH" == "1" \]\]; then(.*?)\n  fi',
+    launch_match.group(1),
+    flags=re.DOTALL,
+)
+assert heavy_launch_match
+for heavy_call in (
+    'refresh_shared_history_for_home "$home_dir"',
+    'repair_compacted_image_payloads_for_home "$home_dir"',
+    'cleanup_thread_index_for_home "$home_dir"',
+    'normalize_thread_sources_for_home "$home_dir"',
+    'restore_default_thread_model_providers_for_home "$home_dir"',
+    'restore_account1_visible_thread_model_providers_for_home "$home_dir"',
+):
+    assert heavy_call in heavy_launch_match.group(1)
+    assert launch_match.group(1).count(heavy_call) == 1
 
-assert "syncBeforeLaunch: Bool = true" in swift
+link_ready_match = re.search(r"shared_history_links_ready\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert link_ready_match
+for item in ("session_index.jsonl", "sessions", "shell_snapshots"):
+    assert item in link_ready_match.group(1)
+assert "seed_shared_history_from_home" not in link_ready_match.group(1)
+assert "recover_shared_history_backups_from_home" not in link_ready_match.group(1)
+assert "rsync" not in link_ready_match.group(1)
+transition_match = re.search(r"profile_transition_is_busy\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert transition_match
+assert 'profile_window_is_running "$name"' in transition_match.group(1)
+assert '"codex app-server"' in transition_match.group(1)
+assert 'process_env_contains "$pid" "CODEX_HOME=$home_dir"' in transition_match.group(1)
+assert 'active_sqlite_homes_payload "$home_dir"' in transition_match.group(1)
+private_transition_match = re.search(r"separate_history_for_unlocked\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert private_transition_match
+assert 'profile_transition_is_busy "$name" "$account_home"' in private_transition_match.group(1)
+assert 'backup_private_history_transaction_metadata "$account_home" "$transaction_backup_dir"' in private_transition_match.group(1)
+assert 'CODEX_PRIVATE_HISTORY_POST_CLEANUP_FORCE_FAIL' in private_transition_match.group(1)
+assert 'restore_shared_history_after_private_failure "$account_home" "$transaction_backup_dir"' in private_transition_match.group(1)
+assert private_transition_match.group(1).index('quarantine_memories_for_private_history') < private_transition_match.group(1).index('set_history_mode_for_home "$account_home" private')
+link_history_match = re.search(r"link_history_for_unlocked\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert link_history_match
+assert 'profile_transition_is_busy "$name" "$account_home"' in link_history_match.group(1)
+restore_transaction_match = re.search(r"restore_private_history_transaction_metadata\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert restore_transaction_match
+assert "target.name + '-wal'" in restore_transaction_match.group(1)
+assert "target.name + '-shm'" in restore_transaction_match.group(1)
+launch_prepare_match = re.search(r"prepare_profile_login_storage_for_launch\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
+assert launch_prepare_match
+assert 'shared_history_links_ready "$account_home" && return 0' in launch_prepare_match.group(1)
+assert 'prepare_profile_login_storage "$account_home"' in launch_prepare_match.group(1)
+
+assert "syncBeforeLaunch: Bool = false" in swift
 assert 'let launchCommand = syncBeforeLaunch ? "launch-account" : "launch-account-nosync"' in swift
+assert '.codex-accounts-history-mode' in swift
+assert 'Private local chats (this profile only)' in swift
+assert 'Share local chats (visible to other profiles)' in swift
+assert 'OpenAI cloud processing stays on' in swift
+assert 'launchEnvironment["CODEX_SHARED_SESSIONS"] = sharesLocalHistory ? "1" : "0"' in swift
+assert 'launchEnvironment["CODEX_SYNC_THREAD_HISTORY"] = syncBeforeLaunch && sharesLocalHistory ? "1" : "0"' in swift
+assert 'private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)' in swift
+assert 'queue: DispatchQueue = codexAccountsWorkQueue' in swift
+assert 'runBackground(loadingText, queue: codexAccountsLaunchQueue)' in swift
+assert 'runBackground(tr("關閉 \\(profile.displayName)...", "Closing \\(profile.displayName)..."), queue: codexAccountsLaunchQueue)' in swift
+assert 'busyProfiles.isDisjoint(with: busyIDs)' in swift
+assert '.disabled(busyProfiles.contains(profile.id) || isClosingAllAccounts)' in swift
+assert 'alertMessage(failureText, detail.isEmpty ? fallback : detail)' in swift
+assert 'var arguments = ["launch-account-nosync", routed.name]' in swift
+assert '.repeatForever(' not in swift
+assert 'environment["CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH"] = "1"' in swift
 assert "startSidebarPruneLoop()" not in swift
 assert "if silent {\n            lastAutoSyncAt = Date()" in swift
 assert "private let liveUsageParallelism = 10" in swift
@@ -213,7 +653,7 @@ assert 'private func quotaAuthenticationStatus(_ profile: CodexProfile, compact:
 assert 'tr("打開重新登入", "Open to sign in again")' in swift
 assert 'private func quotaUnavailableStatus(compact: Bool) -> some View' in swift
 assert 'tr("暫時未能取得用量", "Usage is temporarily unavailable")' in swift
-assert '"version":"2.6.0"' in helper
+assert '"version":"2.6.1"' in helper
 
 theme_match = re.search(
     r'private var themeOptions: \[AppThemeOption\] \{(.*?)\n    \}\n\n    private func canonicalThemeID',
@@ -509,8 +949,8 @@ while IFS= read -r private_header_file; do
   [[ ! -e "$private_header_file" ]]
 done < "$HEADER_PATH_LOG"
 
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.0" ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "60" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.6.1" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "61" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "14.0" ]]
 
 echo "✅ Codex Accounts regression checks passed"
