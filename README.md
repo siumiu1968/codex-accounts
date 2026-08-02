@@ -16,6 +16,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.7.1 更新介紹
+
+V2.7.1 修復部分網絡環境下無法檢查更新嘅問題。App 會先讀取 GitHub Releases API；如果 API 被限流、攔截或暫時失效，會自動改用正常 GitHub Releases 網頁取得最新版本。下載更新檔亦會驗證 HTTP 狀態並設有逾時，避免錯誤頁面被當成 ZIP。舊版如果正受呢個問題影響，需要手動安裝 V2.7.1 一次，之後就可以使用新後備路徑。
+
 ### V2.7.0 更新介紹
 
 V2.7.0 將 OpenCodex 2.7.33 arm64 runtime 同香港繁體介面直接放入安裝包，更新後唔需要再由 npm 下載。打開受管理 Profile 時，App 會先啟動本機 loopback 代理並驗證共用模型目錄；已驗證目錄會即時沿用，供應商／模型設定有變或驗證超過 24 小時先重新同步。網絡同步設有 20 秒上限，逾時只有設定指紋同目錄 SHA-256 完全吻合先會沿用舊目錄，避免開 Profile 無限轉圈。同一套已登入嘅第三方模型可以喺未有自訂模型路由嘅不同 Profile 選用；自訂模型路由／provider 會原樣保留，OpenAI 請求仍然使用各 Profile 自己嘅登入，對話分享／私人模式亦保持不變。安裝包唔會包含任何使用者 token、OAuth credential 或對話資料。
@@ -135,7 +139,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
 
-安裝 V2.7.0 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release。
+安裝 V2.7.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release；GitHub API 暫時失效時會自動使用網頁後備路徑。
 
 ### 從源碼構建
 
@@ -188,6 +192,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.7.1 更新介绍
+
+V2.7.1 修复部分网络环境下无法检查更新的问题。应用会先读取 GitHub Releases API；如果 API 被限流、拦截或暂时失效，会自动改用普通 GitHub Releases 网页取得最新版本。下载更新文件时也会验证 HTTP 状态并设置超时，避免把错误页面当成 ZIP。旧版如果正受此问题影响，需要手动安装 V2.7.1 一次，之后即可使用新的备用路径。
 
 ### V2.7.0 更新介绍
 
@@ -308,7 +316,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
 
-安装 V2.7.0 之后，可以直接在 app 里检查并安装下一个 GitHub release。
+安装 V2.7.1 之后，可以直接在 app 里检查并安装下一个 GitHub release；GitHub API 暂时失效时会自动使用网页备用路径。
 
 ### 从源码构建
 
@@ -361,6 +369,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.7.1 Update
+
+V2.7.1 fixes update checks that could fail on networks where the GitHub Releases API is rate-limited, filtered, or temporarily unavailable. The app now falls back to the standard GitHub Releases web endpoint, validates HTTP status codes, and applies a download timeout so an error page cannot be mistaken for the release ZIP. Affected older installations need one manual update to V2.7.1; later checks can use the fallback automatically.
 
 ### V2.7.0 Update
 
@@ -481,7 +493,7 @@ System requirement: macOS 14 or later.
 
 If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
 
-After installing V2.7.0, future GitHub releases can be checked and installed directly inside the app.
+After installing V2.7.1, future GitHub releases can be checked and installed directly inside the app, with the web fallback used when the GitHub API is temporarily unavailable.
 
 ### Build From Source
 
