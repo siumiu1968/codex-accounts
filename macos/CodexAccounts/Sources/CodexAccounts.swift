@@ -142,6 +142,160 @@ private struct ExportableThread: Identifiable {
     let sizeBytes: Int64
 }
 
+private struct ColdArchiveEntry: Identifiable {
+    let id: String
+    let title: String
+    let updatedAt: String
+    let archivedAt: String
+    let rolloutSizeBytes: Int64
+    let packageSizeBytes: Int64
+    let packagePath: String
+    let isAvailable: Bool
+}
+
+private final class BulkColdTaskTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    let threads: [ExportableThread]
+    private var selectedIDs: Set<String>
+    weak var tableView: NSTableView?
+
+    init(threads: [ExportableThread]) {
+        self.threads = threads
+        self.selectedIDs = []
+        super.init()
+        selectOlderThan(days: 7)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { threads.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row >= 0, row < threads.count else { return nil }
+        let thread = threads[row]
+        switch tableColumn?.identifier.rawValue {
+        case "selected":
+            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSelection(_:)))
+            button.tag = row
+            button.state = selectedIDs.contains(thread.id) ? .on : .off
+            return button
+        case "updated":
+            return label(thread.updatedAt, alignment: .left)
+        case "size":
+            return label(ByteCountFormatter.string(fromByteCount: thread.sizeBytes, countStyle: .file), alignment: .right)
+        default:
+            let field = label(thread.title, alignment: .left)
+            field.lineBreakMode = .byTruncatingTail
+            field.toolTip = thread.title
+            return field
+        }
+    }
+
+    private func label(_ value: String, alignment: NSTextAlignment) -> NSTextField {
+        let field = NSTextField(labelWithString: value)
+        field.alignment = alignment
+        field.font = NSFont.systemFont(ofSize: 11)
+        field.textColor = .labelColor
+        return field
+    }
+
+    @objc private func toggleSelection(_ sender: NSButton) {
+        guard sender.tag >= 0, sender.tag < threads.count else { return }
+        let id = threads[sender.tag].id
+        if sender.state == .on { selectedIDs.insert(id) } else { selectedIDs.remove(id) }
+    }
+
+    @objc func selectAll(_ sender: Any?) {
+        selectedIDs = Set(threads.map(\.id))
+        tableView?.reloadData()
+    }
+
+    @objc func selectOlderThanWeek(_ sender: Any?) {
+        selectOlderThan(days: 7)
+        tableView?.reloadData()
+    }
+
+    @objc func clearSelection(_ sender: Any?) {
+        selectedIDs.removeAll()
+        tableView?.reloadData()
+    }
+
+    func selectedThreads() -> [ExportableThread] {
+        threads.filter { selectedIDs.contains($0.id) }
+    }
+
+    private func selectOlderThan(days: Double) {
+        let cutoff = Date().addingTimeInterval(-days * 86_400)
+        let formatter = ISO8601DateFormatter()
+        selectedIDs = Set(threads.compactMap { thread in
+            guard let date = formatter.date(from: thread.updatedAt), date <= cutoff else { return nil }
+            return thread.id
+        })
+    }
+}
+
+private final class BulkColdArchiveTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    let entries: [ColdArchiveEntry]
+    private var selectedIDs: Set<String>
+    weak var tableView: NSTableView?
+
+    init(entries: [ColdArchiveEntry]) {
+        self.entries = entries
+        self.selectedIDs = Set(entries.first(where: \.isAvailable).map { [$0.id] } ?? [])
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row >= 0, row < entries.count else { return nil }
+        let entry = entries[row]
+        switch tableColumn?.identifier.rawValue {
+        case "selected":
+            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSelection(_:)))
+            button.tag = row
+            button.state = selectedIDs.contains(entry.id) ? .on : .off
+            button.isEnabled = entry.isAvailable
+            return button
+        case "archived":
+            return label(entry.archivedAt, alignment: .left)
+        case "size":
+            return label(ByteCountFormatter.string(fromByteCount: entry.rolloutSizeBytes, countStyle: .file), alignment: .right)
+        case "status":
+            return label(entry.isAvailable ? "Online" : "Offline", alignment: .center)
+        default:
+            let field = label(entry.title, alignment: .left)
+            field.lineBreakMode = .byTruncatingTail
+            field.toolTip = entry.title
+            return field
+        }
+    }
+
+    private func label(_ value: String, alignment: NSTextAlignment) -> NSTextField {
+        let field = NSTextField(labelWithString: value)
+        field.alignment = alignment
+        field.font = NSFont.systemFont(ofSize: 11)
+        field.textColor = .labelColor
+        return field
+    }
+
+    @objc private func toggleSelection(_ sender: NSButton) {
+        guard sender.tag >= 0, sender.tag < entries.count, entries[sender.tag].isAvailable else { return }
+        let id = entries[sender.tag].id
+        if sender.state == .on { selectedIDs.insert(id) } else { selectedIDs.remove(id) }
+    }
+
+    @objc func selectAllAvailable(_ sender: Any?) {
+        selectedIDs = Set(entries.filter(\.isAvailable).map(\.id))
+        tableView?.reloadData()
+    }
+
+    @objc func clearSelection(_ sender: Any?) {
+        selectedIDs.removeAll()
+        tableView?.reloadData()
+    }
+
+    func selectedEntries() -> [ColdArchiveEntry] {
+        entries.filter { $0.isAvailable && selectedIDs.contains($0.id) }
+    }
+}
+
 private final class FlippedAccessoryView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -714,7 +868,26 @@ private func runProcess(
     let lock = NSLock()
     let finished = DispatchSemaphore(value: 0)
     let finishState = ProcessFinishState()
+    let outputLimitBytes = 8 * 1024 * 1024
     var output = Data()
+
+    func appendBoundedOutput(_ data: Data) {
+        guard !data.isEmpty else { return }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        if data.count >= outputLimitBytes {
+            output = Data(data.suffix(outputLimitBytes))
+            return
+        }
+
+        let overflow = output.count + data.count - outputLimitBytes
+        if overflow > 0 {
+            output.removeFirst(overflow)
+        }
+        output.append(data)
+    }
     var timedOut = false
 
     process.executableURL = URL(fileURLWithPath: executable)
@@ -736,9 +909,7 @@ private func runProcess(
     outputPipe.fileHandleForReading.readabilityHandler = { handle in
         let data = handle.availableData
         guard !data.isEmpty else { return }
-        lock.lock()
-        output.append(data)
-        lock.unlock()
+        appendBoundedOutput(data)
     }
 
     do {
@@ -772,7 +943,7 @@ private func runProcess(
         let remaining = outputPipe.fileHandleForReading.readDataToEndOfFile()
         if !remaining.isEmpty {
             lock.lock()
-            output.append(remaining)
+    appendBoundedOutput(remaining)
             lock.unlock()
         }
     }
@@ -2447,6 +2618,7 @@ struct AccountsRootView: View {
     @State private var isSyncing = false
     @State private var isCleaningSidebarState = false
     @State private var isRepairingHistoryPayloads = false
+    @State private var isManagingColdStorage = false
     @State private var hasEntered = true
     @State private var showKeepAwakeHelp = false
     @State private var showKeyboardCleanHelp = false
@@ -2492,6 +2664,7 @@ struct AccountsRootView: View {
     @AppStorage("codexUsageDayKey") private var legacyCodexUsageDayKey = ""
     @AppStorage("codexUsageSecondsToday") private var legacyCodexUsageSecondsToday = 0.0
     @AppStorage("appTheme") private var appTheme = "graphite"
+    @AppStorage("coldStorageRoot") private var coldStorageRoot = "/Volumes/ORICO/Agent Data/Codex/Cold Storage"
     @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
@@ -3798,6 +3971,14 @@ struct AccountsRootView: View {
                     }
                     miniButton(isCleaningSidebarState ? tr("整理中", "Cleaning") : tr("整理側欄", "Clean sidebar")) {
                         cleanupSidebarProjects()
+                    }
+                }
+                HStack(spacing: scaled(8)) {
+                    miniButton(isManagingColdStorage ? tr("處理中", "Working") : tr("冷藏 task", "Archive task")) {
+                        archiveConversationToColdStorage()
+                    }
+                    miniButton(isManagingColdStorage ? tr("處理中", "Working") : tr("還原 task", "Restore task")) {
+                        restoreConversationFromColdStorage()
                     }
                 }
             }
@@ -7625,6 +7806,404 @@ struct AccountsRootView: View {
         }
     }
 
+    private func preferredColdStorageProfile() -> CodexProfile? {
+        profiles.first(where: { $0.id == "account1" })
+            ?? profiles.first(where: { $0.id != "opencodex-lab" })
+    }
+
+    private func archiveConversationToColdStorage() {
+        guard !isManagingColdStorage else { return }
+        guard let profile = preferredColdStorageProfile() else {
+            alertMessage(tr("未搵到共享 Profile", "No Shared Profile"), tr("請先建立或重新整理 Codex profile。", "Create or refresh a Codex profile first."))
+            return
+        }
+        isManagingColdStorage = true
+        runBackground(tr("讀取可冷藏 task...", "Loading tasks for cold storage...")) {
+            runCodexScript(scriptPath, ["list-exportable-threads", profile.id, "200"], wait: true, timeout: 60)
+        } completion: { result in
+            guard result.0 == 0 else {
+                isManagingColdStorage = false
+                alertMessage(tr("讀取 task 失敗", "Could Not Load Tasks"), result.1)
+                return
+            }
+            let threads = parsedExportableThreads(result.1).sorted { $0.sizeBytes > $1.sizeBytes }
+            guard !threads.isEmpty else {
+                isManagingColdStorage = false
+                alertMessage(tr("未搵到可冷藏 task", "No Tasks to Archive"), tr("目前冇可安全匯出嘅本機 rollout。", "No local rollout is currently available for safe export."))
+                return
+            }
+            presentBulkColdArchivePicker(profile: profile, threads: threads)
+        }
+    }
+
+    private func presentColdArchivePicker(profile: CodexProfile, threads: [ExportableThread]) {
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 680, height: 30), pullsDown: false)
+        for thread in threads {
+            let compactTitle = String(thread.title.prefix(72))
+            popup.addItem(withTitle: "\(humanFileSize(thread.sizeBytes))  ·  \(compactTitle)")
+        }
+        let note = NSTextField(wrappingLabelWithString: tr(
+            "已按 rollout 大小排列。只會冷藏你揀嘅一條 task；外置包完成 checksum 後先移除內置 rollout。所有 Codex profile 視窗必須先關閉。",
+            "Sorted by rollout size. Only the selected task is archived; the local rollout is removed only after the external package passes checksum verification. Close every Codex profile window first."
+        ))
+        note.frame = NSRect(x: 0, y: 76, width: 680, height: 64)
+        note.maximumNumberOfLines = 5
+        note.textColor = .secondaryLabelColor
+        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 680, height: 145))
+        accessory.addSubview(popup)
+        accessory.addSubview(note)
+
+        let alert = NSAlert()
+        alert.messageText = tr("冷藏一條 task", "Archive One Task")
+        alert.informativeText = tr("第一版係手動模式，唔會自動搬任何 task。", "The first release is manual and never moves tasks automatically.")
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: tr("選擇外置位置", "Choose External Location"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+        let selectedIndex = max(popup.indexOfSelectedItem, 0)
+        guard selectedIndex < threads.count else {
+            isManagingColdStorage = false
+            return
+        }
+        let thread = threads[selectedIndex]
+
+        let panel = NSOpenPanel()
+        panel.title = tr("選擇 ORICO 冷藏資料夾", "Choose ORICO Cold Storage Folder")
+        panel.prompt = tr("使用此資料夾", "Use This Folder")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        let configuredURL = URL(fileURLWithPath: coldStorageRoot)
+        let oricoURL = URL(fileURLWithPath: "/Volumes/ORICO")
+        if FileManager.default.fileExists(atPath: configuredURL.path) {
+            panel.directoryURL = configuredURL
+        } else if FileManager.default.fileExists(atPath: oricoURL.path) {
+            panel.directoryURL = oricoURL
+        }
+        guard panel.runModal() == .OK, let rootURL = panel.url else {
+            isManagingColdStorage = false
+            return
+        }
+        coldStorageRoot = rootURL.path
+
+        let confirmation = NSAlert()
+        confirmation.messageText = tr("確認冷藏？", "Confirm Cold Archive?")
+        confirmation.informativeText = tr(
+            "\(thread.title)\n\n內置可釋放約 \(humanFileSize(thread.sizeBytes))。外置封存包及 recovery 會保留；登入、Token、設定、task 索引同 Codex Accounts 核心資料唔會搬。",
+            "\(thread.title)\n\nAbout \(humanFileSize(thread.sizeBytes)) can be released internally. The external package and recovery data remain; login, tokens, settings, task index, and Codex Accounts core data stay internal."
+        )
+        confirmation.addButton(withTitle: tr("開始冷藏", "Archive"))
+        confirmation.addButton(withTitle: tr("取消", "Cancel"))
+        guard confirmation.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+
+        runBackground(tr("驗證並冷藏 task...", "Verifying and archiving task...")) {
+            runCodexScript(
+                scriptPath,
+                ["archive-thread-cold", profile.id, thread.id, rootURL.path, "--include-generated-images", "--include-local-assets"],
+                wait: true,
+                timeout: 1800
+            )
+        } completion: { result in
+            isManagingColdStorage = false
+            if result.0 == 0 {
+                statusText = tr("task 已冷藏到 ORICO", "Task archived to cold storage")
+                refreshProfiles(showLoading: false)
+                alertMessage(tr("冷藏完成", "Archive Complete"), trimmedToolOutput(result.1, maxLength: 1800))
+            } else {
+                alertMessage(tr("冷藏未完成", "Archive Not Completed"), trimmedToolOutput(result.1, maxLength: 1800))
+            }
+        }
+    }
+
+    private func restoreConversationFromColdStorage() {
+        guard !isManagingColdStorage else { return }
+        isManagingColdStorage = true
+        runBackground(tr("讀取冷藏索引...", "Loading cold storage index...")) {
+            runCodexScript(scriptPath, ["list-cold-archives"], wait: true, timeout: 45)
+        } completion: { result in
+            guard result.0 == 0 else {
+                isManagingColdStorage = false
+                alertMessage(tr("讀取冷藏索引失敗", "Could Not Load Cold Storage"), result.1)
+                return
+            }
+            let entries = parsedColdArchives(result.1)
+            guard !entries.isEmpty else {
+                isManagingColdStorage = false
+                alertMessage(tr("未有冷藏 task", "No Archived Tasks"), tr("目前冷藏索引入面冇待還原 task。", "The cold storage index has no task waiting to be restored."))
+                return
+            }
+            presentBulkColdRestorePicker(entries: entries)
+        }
+    }
+
+    private func presentBulkColdArchivePicker(profile: CodexProfile, threads: [ExportableThread]) {
+        let controller = BulkColdTaskTableController(threads: threads)
+        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 760, height: 310))
+        let columns: [(String, String, CGFloat)] = [
+            ("selected", "", 34),
+            ("task", tr("Task", "Task"), 390),
+            ("updated", tr("最後更新", "Last Updated"), 190),
+            ("size", tr("大小", "Size"), 120),
+        ]
+        for (identifier, title, width) in columns {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.delegate = controller
+        table.dataSource = controller
+        table.rowHeight = 28
+        table.usesAlternatingRowBackgroundColors = true
+        controller.tableView = table
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 42, width: 760, height: 310))
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let olderButton = NSButton(title: tr("選擇超過 7 日", "Select Older Than 7 Days"), target: controller, action: #selector(BulkColdTaskTableController.selectOlderThanWeek(_:)))
+        olderButton.frame = NSRect(x: 0, y: 0, width: 150, height: 30)
+        let allButton = NSButton(title: tr("全選", "Select All"), target: controller, action: #selector(BulkColdTaskTableController.selectAll(_:)))
+        allButton.frame = NSRect(x: 158, y: 0, width: 90, height: 30)
+        let clearButton = NSButton(title: tr("全部取消", "Clear"), target: controller, action: #selector(BulkColdTaskTableController.clearSelection(_:)))
+        clearButton.frame = NSRect(x: 256, y: 0, width: 100, height: 30)
+        let note = NSTextField(wrappingLabelWithString: tr(
+            "預設已勾選超過 7 日冇更新嘅 task。批量冷藏仍然逐條 checksum；Pinned、未完成 goal 同 automation 會由自動模式排除。",
+            "Tasks older than 7 days are selected by default. Batch archiving still checksums each task; automatic mode excludes pinned tasks, unfinished goals, and automations."
+        ))
+        note.frame = NSRect(x: 0, y: 362, width: 760, height: 48)
+        note.maximumNumberOfLines = 4
+        note.textColor = .secondaryLabelColor
+        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 760, height: 415))
+        accessory.addSubview(olderButton)
+        accessory.addSubview(allButton)
+        accessory.addSubview(clearButton)
+        accessory.addSubview(scroll)
+        accessory.addSubview(note)
+
+        let alert = NSAlert()
+        alert.messageText = tr("批量冷藏 task", "Batch Archive Tasks")
+        alert.informativeText = tr("可以勾選多條、全選，或者只選超過 7 日嘅 task。", "Select multiple tasks, select all, or keep only tasks older than 7 days.")
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: tr("下一步", "Continue"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+        let selected = controller.selectedThreads()
+        guard !selected.isEmpty else {
+            isManagingColdStorage = false
+            alertMessage(tr("未選擇 task", "No Tasks Selected"), tr("請至少勾選一條 task。", "Select at least one task."))
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = tr("選擇 ORICO 冷藏資料夾", "Choose ORICO Cold Storage Folder")
+        panel.prompt = tr("使用此資料夾", "Use This Folder")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        let configuredURL = URL(fileURLWithPath: coldStorageRoot)
+        let oricoURL = URL(fileURLWithPath: "/Volumes/ORICO")
+        panel.directoryURL = FileManager.default.fileExists(atPath: configuredURL.path) ? configuredURL : oricoURL
+        guard panel.runModal() == .OK, let rootURL = panel.url else {
+            isManagingColdStorage = false
+            return
+        }
+        coldStorageRoot = rootURL.path
+        let totalBytes = selected.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let confirmation = NSAlert()
+        confirmation.messageText = tr("確認批量冷藏？", "Confirm Batch Archive?")
+        confirmation.informativeText = tr(
+            "已選擇 \(selected.count) 條 task，rollout 約 \(humanFileSize(totalBytes))。所有 Codex profile 視窗必須先關閉。",
+            "Selected \(selected.count) tasks totaling about \(humanFileSize(totalBytes)) of rollout data. Close every Codex profile window first."
+        )
+        confirmation.addButton(withTitle: tr("開始冷藏", "Archive"))
+        confirmation.addButton(withTitle: tr("取消", "Cancel"))
+        guard confirmation.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+
+        let arguments = ["archive-threads-cold", profile.id, rootURL.path] + selected.map(\.id)
+        runBackground(tr("批量驗證並冷藏 task...", "Verifying and archiving tasks...")) {
+            runCodexScript(scriptPath, arguments, wait: true, timeout: 14_400)
+        } completion: { result in
+            isManagingColdStorage = false
+            refreshProfiles(showLoading: false)
+            if result.0 == 0 {
+                statusText = tr("批量冷藏完成", "Batch archive complete")
+                alertMessage(tr("冷藏完成", "Archive Complete"), trimmedToolOutput(result.1, maxLength: 2400))
+            } else {
+                alertMessage(tr("部分 task 未完成", "Some Tasks Were Not Archived"), trimmedToolOutput(result.1, maxLength: 2400))
+            }
+        }
+    }
+
+    private func presentBulkColdRestorePicker(entries: [ColdArchiveEntry]) {
+        let controller = BulkColdArchiveTableController(entries: entries)
+        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 760, height: 310))
+        let columns: [(String, String, CGFloat)] = [
+            ("selected", "", 34),
+            ("task", tr("Task", "Task"), 350),
+            ("archived", tr("冷藏日期", "Archived"), 180),
+            ("size", tr("大小", "Size"), 110),
+            ("status", tr("狀態", "Status"), 80),
+        ]
+        for (identifier, title, width) in columns {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.delegate = controller
+        table.dataSource = controller
+        table.rowHeight = 28
+        table.usesAlternatingRowBackgroundColors = true
+        controller.tableView = table
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 42, width: 760, height: 310))
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let allButton = NSButton(title: tr("全選可用項目", "Select All Online"), target: controller, action: #selector(BulkColdArchiveTableController.selectAllAvailable(_:)))
+        allButton.frame = NSRect(x: 0, y: 0, width: 140, height: 30)
+        let clearButton = NSButton(title: tr("全部取消", "Clear"), target: controller, action: #selector(BulkColdArchiveTableController.clearSelection(_:)))
+        clearButton.frame = NSRect(x: 148, y: 0, width: 100, height: 30)
+        let note = NSTextField(wrappingLabelWithString: tr(
+            "可以批量還原或全選；ORICO 離線嘅項目唔可以勾選。外置封存包還原後仍會保留。",
+            "Restore multiple tasks or select all. Offline ORICO entries cannot be selected, and external packages remain after restore."
+        ))
+        note.frame = NSRect(x: 0, y: 362, width: 760, height: 44)
+        note.maximumNumberOfLines = 3
+        note.textColor = .secondaryLabelColor
+        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 760, height: 410))
+        accessory.addSubview(allButton)
+        accessory.addSubview(clearButton)
+        accessory.addSubview(scroll)
+        accessory.addSubview(note)
+        let alert = NSAlert()
+        alert.messageText = tr("批量還原冷藏 task", "Batch Restore Archived Tasks")
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: tr("還原所選", "Restore Selected"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+        let selected = controller.selectedEntries()
+        guard !selected.isEmpty else {
+            isManagingColdStorage = false
+            alertMessage(tr("未選擇 task", "No Tasks Selected"), tr("請至少勾選一條可用 task。", "Select at least one available task."))
+            return
+        }
+        let totalBytes = selected.reduce(Int64(0)) { $0 + $1.rolloutSizeBytes }
+        let confirmation = NSAlert()
+        confirmation.messageText = tr("確認批量還原？", "Confirm Batch Restore?")
+        confirmation.informativeText = tr(
+            "將還原 \(selected.count) 條 task，內置大約需要 \(humanFileSize(totalBytes)) 加安全預留空間。",
+            "Restoring \(selected.count) tasks needs about \(humanFileSize(totalBytes)) internally, plus safety headroom."
+        )
+        confirmation.addButton(withTitle: tr("開始還原", "Restore"))
+        confirmation.addButton(withTitle: tr("取消", "Cancel"))
+        guard confirmation.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+        let arguments = ["restore-threads-cold"] + selected.map(\.id)
+        runBackground(tr("批量驗證並還原 task...", "Verifying and restoring tasks...")) {
+            runCodexScript(scriptPath, arguments, wait: true, timeout: 14_400)
+        } completion: { result in
+            isManagingColdStorage = false
+            refreshProfiles(showLoading: false)
+            if result.0 == 0 {
+                statusText = tr("批量還原完成", "Batch restore complete")
+                alertMessage(tr("還原完成", "Restore Complete"), trimmedToolOutput(result.1, maxLength: 2400))
+            } else {
+                alertMessage(tr("部分 task 未完成", "Some Tasks Were Not Restored"), trimmedToolOutput(result.1, maxLength: 2400))
+            }
+        }
+    }
+
+    private func presentColdRestorePicker(entries: [ColdArchiveEntry]) {
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 28, width: 680, height: 30), pullsDown: false)
+        for entry in entries {
+            let availability = entry.isAvailable ? tr("可用", "Online") : tr("ORICO 離線", "ORICO Offline")
+            popup.addItem(withTitle: "\(humanFileSize(entry.rolloutSizeBytes))  ·  \(availability)  ·  \(String(entry.title.prefix(64)))")
+        }
+        let note = NSTextField(wrappingLabelWithString: tr(
+            "還原前會重新驗證 package checksum；外置封存包唔會刪除。所有 Codex profile 視窗必須先關閉。",
+            "The package checksum is verified again before restore, and the external archive is retained. Close every Codex profile window first."
+        ))
+        note.frame = NSRect(x: 0, y: 68, width: 680, height: 48)
+        note.maximumNumberOfLines = 4
+        note.textColor = .secondaryLabelColor
+        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 680, height: 120))
+        accessory.addSubview(popup)
+        accessory.addSubview(note)
+        let alert = NSAlert()
+        alert.messageText = tr("還原冷藏 task", "Restore Archived Task")
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: tr("還原", "Restore"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            isManagingColdStorage = false
+            return
+        }
+        let selectedIndex = max(popup.indexOfSelectedItem, 0)
+        guard selectedIndex < entries.count else {
+            isManagingColdStorage = false
+            return
+        }
+        let entry = entries[selectedIndex]
+        guard entry.isAvailable else {
+            isManagingColdStorage = false
+            alertMessage(tr("ORICO 未連接", "ORICO Is Offline"), tr("請重新連接外置磁碟，再按還原。\n\n\(entry.packagePath)", "Reconnect the external disk, then restore again.\n\n\(entry.packagePath)"))
+            return
+        }
+        runBackground(tr("驗證並還原 task...", "Verifying and restoring task...")) {
+            runCodexScript(scriptPath, ["restore-thread-cold", entry.id], wait: true, timeout: 1800)
+        } completion: { result in
+            isManagingColdStorage = false
+            if result.0 == 0 {
+                statusText = tr("冷藏 task 已還原", "Archived task restored")
+                refreshProfiles(showLoading: false)
+                alertMessage(tr("還原完成", "Restore Complete"), trimmedToolOutput(result.1, maxLength: 1800))
+            } else {
+                alertMessage(tr("還原未完成", "Restore Not Completed"), trimmedToolOutput(result.1, maxLength: 1800))
+            }
+        }
+    }
+
+    private func parsedColdArchives(_ output: String) -> [ColdArchiveEntry] {
+        output.split(separator: "\n").compactMap { rawLine in
+            let parts = rawLine.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count >= 9, !parts[0].isEmpty else { return nil }
+            return ColdArchiveEntry(
+                id: parts[0],
+                title: parts[1].isEmpty ? tr("未命名 task", "Untitled task") : parts[1],
+                updatedAt: parts[2],
+                archivedAt: parts[3],
+                rolloutSizeBytes: Int64(parts[4]) ?? 0,
+                packageSizeBytes: Int64(parts[5]) ?? 0,
+                packagePath: parts[6],
+                isAvailable: parts[7] == "1"
+            )
+        }
+    }
+
     private func trimmedToolOutput(_ output: String, maxLength: Int) -> String {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count > maxLength else { return trimmed.isEmpty ? tr("完成", "Done") : trimmed }
@@ -7863,7 +8442,6 @@ private final class UpdateController: ObservableObject {
 
         var request = URLRequest(url: release.assetURL)
         request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-
         request.timeoutInterval = 60
 
         URLSession.shared.downloadTask(with: request) { temporaryURL, response, error in
@@ -7909,9 +8487,6 @@ private final class UpdateController: ObservableObject {
                 return
             }
 
-            // The unauthenticated GitHub API can be rate-limited or blocked on
-            // some networks. The normal GitHub release page is an independent
-            // fallback and redirects to the current tag without using the API.
             self.fetchLatestReleaseFromWeb { release, webError in
                 if let release {
                     completion(release, nil)

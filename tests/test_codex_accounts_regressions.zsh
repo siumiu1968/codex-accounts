@@ -1592,13 +1592,15 @@ assert 'private func prepareBundledOpenCodexIfNeeded()' in swift
 assert 'OpenCodex Models' in swift
 assert 'title: isOpenCodex ? "OpenCodex" : "Coding Plan"' in swift
 assert 'OpenCodex Lab uses an isolated local loopback proxy.' in swift
-assert '"version":"2.7.1"' in helper
+assert '"version":"2.7.2"' in helper
 assert 'fetchLatestReleaseFromAPI' in swift
 assert 'fetchLatestReleaseFromWeb' in swift
 assert r'https://api.github.com/repos/\(owner)/\(repo)/releases/latest' in swift
 assert r'https://github.com/\(owner)/\(repo)/releases/latest' in swift
 assert '(200..<300).contains(httpResponse.statusCode)' in swift
 assert 'request.timeoutInterval = 60' in swift
+assert 'let outputLimitBytes = 8 * 1024 * 1024' in swift
+assert 'func appendBoundedOutput' in swift
 
 theme_match = re.search(
     r'private var themeOptions: \[AppThemeOption\] \{(.*?)\n    \}\n\n    private func canonicalThemeID',
@@ -1894,8 +1896,8 @@ while IFS= read -r private_header_file; do
   [[ ! -e "$private_header_file" ]]
 done < "$HEADER_PATH_LOG"
 
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.7.1" ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "71" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.7.2" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "72" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "14.0" ]]
 (cd "$OPENCODEX_HK_OVERLAY" && shasum -a 256 -c manifest.sha256 >/dev/null)
 grep -q 'opencodex-zh-hk' "$BUILD_SCRIPT"

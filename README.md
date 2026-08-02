@@ -16,6 +16,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.7.2 更新介紹
+
+V2.7.2 加入完整冷熱分層儲存：可將舊 task 批量冷藏到 ORICO、批量還原、選擇七日以上或全選，並以 task 活躍狀態、檔案鎖同交易鎖避免搬動使用中資料。正式帳號可回復各自 OpenAI 登入直接連線；子程序輸出亦限制為最多 8 MB，避免 command output、quota refresh 或工具日誌長時間累積令 Codex Accounts 記憶體異常上升。版本同時保留 V2.7.1 嘅 GitHub API／網頁雙路更新檢查。
+
 ### V2.7.1 更新介紹
 
 V2.7.1 修復部分網絡環境下無法檢查更新嘅問題。App 會先讀取 GitHub Releases API；如果 API 被限流、攔截或暫時失效，會自動改用正常 GitHub Releases 網頁取得最新版本。下載更新檔亦會驗證 HTTP 狀態並設有逾時，避免錯誤頁面被當成 ZIP。舊版如果正受呢個問題影響，需要手動安裝 V2.7.1 一次，之後就可以使用新後備路徑。
@@ -193,6 +197,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
+### V2.7.2 更新介绍
+
+V2.7.2 加入完整冷热分层存储：可把旧 task 批量冷藏到 ORICO、批量还原、选择七天以上或全选，并通过 task 活跃状态、文件锁与事务锁避免移动使用中的数据。正式账号可恢复各自 OpenAI 登录直接连接；子进程输出也限制为最多 8 MB，避免 command output、quota refresh 或工具日志长期累积导致 Codex Accounts 内存异常增长。版本同时保留 V2.7.1 的 GitHub API／网页双路径更新检查。
+
 ### V2.7.1 更新介绍
 
 V2.7.1 修复部分网络环境下无法检查更新的问题。应用会先读取 GitHub Releases API；如果 API 被限流、拦截或暂时失效，会自动改用普通 GitHub Releases 网页取得最新版本。下载更新文件时也会验证 HTTP 状态并设置超时，避免把错误页面当成 ZIP。旧版如果正受此问题影响，需要手动安装 V2.7.1 一次，之后即可使用新的备用路径。
@@ -369,6 +377,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.7.2 Update
+
+V2.7.2 adds tiered hot/cold task storage with batch archive and restore, seven-day and select-all filters, plus activity and file-lock guards that keep active tasks in place. Regular profiles can use their own direct OpenAI sign-in, while subprocess output is capped at 8 MB to prevent command, quota-refresh, or tool-log output from growing Codex Accounts memory without bound. The V2.7.1 GitHub API and web fallback update checks remain included.
 
 ### V2.7.1 Update
 

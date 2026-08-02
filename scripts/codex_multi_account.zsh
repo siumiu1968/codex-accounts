@@ -203,6 +203,7 @@ OPENCODEX_HK_GUI_JS_SHA256="c149306ad9aeb9aeaa07f7bd7f117bd02b0c0d261482a0253898
 OPENCODEX_HK_GUI_CSS_NAME="index-D6Fcl4yM.css"
 OPENCODEX_HK_GUI_CSS_SHA256="bfd8420ec02a19a72e07be650f2da8fb256fbc2390af047b75b38ebf1ae3f742"
 CODEX_SHARE_HELPER="${CODEX_SHARE_HELPER:-$SCRIPT_DIR/codex_share_package.py}"
+COLD_STORAGE_INDEX_FILE="${COLD_STORAGE_INDEX_FILE:-$APP_DATA_ROOT/Tiered Storage/cold-index.json}"
 
 SYNC_ITEMS=(
   "AGENTS.md"
@@ -258,6 +259,12 @@ Usage:
   scripts/codex_multi_account.zsh export-thread-package <account-name> <thread-id> <output.codexshare> [--include-generated-images] [--include-local-assets]
   scripts/codex_multi_account.zsh inspect-thread-package <package.codexshare>
   scripts/codex_multi_account.zsh import-thread-package <package.codexshare> <account-name|all> [--mark-latest]
+  scripts/codex_multi_account.zsh archive-thread-cold <account-name> <thread-id> <external-root> [--include-generated-images] [--include-local-assets]
+  scripts/codex_multi_account.zsh archive-threads-cold <account-name> <external-root> <thread-id>...
+  scripts/codex_multi_account.zsh archive-cold-older-than <account-name> <external-root> <days>
+  scripts/codex_multi_account.zsh list-cold-archives
+  scripts/codex_multi_account.zsh restore-thread-cold <thread-id>
+  scripts/codex_multi_account.zsh restore-threads-cold <thread-id>...
   scripts/codex_multi_account.zsh link-all-history
   CODEX_SYNC_PLUGIN_PAYLOADS=1 scripts/codex_multi_account.zsh sync-once
   scripts/codex_multi_account.zsh link-account2-history
@@ -3640,7 +3647,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.7.1"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.7.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -8647,6 +8654,276 @@ import_thread_package() {
       import_thread_package_unlocked "$package_path" "$target" "$mark_latest_arg"
 }
 
+tiered_storage_assert_external_root() {
+  local archive_root="$1"
+  if [[ "$archive_root" != /Volumes/* ]]; then
+    echo "Cold storage must be on a mounted external volume under /Volumes." >&2
+    return 69
+  fi
+
+  local volume_name="${archive_root#/Volumes/}"
+  volume_name="${volume_name%%/*}"
+  local volume_root="/Volumes/$volume_name"
+  if [[ ! -d "$volume_root" || ! -w "$volume_root" ]]; then
+    echo "External cold-storage volume is offline or not writable: $volume_root" >&2
+    return 69
+  fi
+  if [[ "$(stat -f '%d' "$volume_root" 2>/dev/null || true)" == "$(stat -f '%d' / 2>/dev/null || true)" ]]; then
+    echo "Refusing cold storage because $volume_root is not a separately mounted volume." >&2
+    return 69
+  fi
+  mkdir -p "$archive_root"
+}
+
+tiered_storage_assert_idle() {
+  local spec name home
+  for spec in "$@"; do
+    name="${spec%%=*}"
+    home="${spec#*=}"
+    if profile_transition_is_busy "$name" "$home"; then
+      echo "Close all Codex profile windows before archiving or restoring cold storage." >&2
+      return 75
+    fi
+  done
+}
+
+shared_cold_storage_targets() {
+  local raw_name raw_home name home
+  while IFS='|' read -r raw_name raw_home _; do
+    name="$(printf '%s' "$raw_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    home="$(printf '%s' "$raw_home" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -n "$name" && -n "$home" ]] || continue
+    home_uses_opencodex_proxy "$home" && continue
+    [[ "$(history_mode_for_home "$home")" != "private" ]] || continue
+    printf '%s=%s\n' "$name" "$home"
+  done < <(list_accounts)
+}
+
+archive_thread_cold() {
+  local name="${1:-}" thread_id="${2:-}" archive_root="${3:-}"
+  if [[ -z "$name" || -z "$thread_id" || -z "$archive_root" ]]; then
+    echo "archive-thread-cold requires: <account-name> <thread-id> <external-root>" >&2
+    return 2
+  fi
+  shift 3
+  ensure_dirs
+  local account_home
+  account_home="$(account_home_for "$name")"
+  if [[ "$(history_mode_for_home "$account_home")" != "shared" ]]; then
+    echo "Cold storage v1 only archives shared-history tasks; private profile data was not changed." >&2
+    return 2
+  fi
+  tiered_storage_assert_external_root "$archive_root" || return $?
+
+  local -a target_specs target_args
+  local spec
+  target_specs=()
+  target_args=()
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] || continue
+    target_specs+=("$spec")
+    target_args+=(--target "$spec")
+  done < <(shared_cold_storage_targets)
+  (( ${#target_specs[@]} > 0 )) || {
+    echo "No shared-history Codex profiles were found." >&2
+    return 1
+  }
+  tiered_storage_assert_idle "${target_specs[@]}" || return $?
+
+  CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
+      run_codex_share_helper cold-archive \
+        --account-name "$name" \
+        --account-home "$account_home" \
+        --thread-id "$thread_id" \
+        --archive-root "$archive_root" \
+        --index "$COLD_STORAGE_INDEX_FILE" \
+        "${target_args[@]}" \
+        "$@"
+}
+
+list_cold_archives() {
+  run_codex_share_helper cold-list --index "$COLD_STORAGE_INDEX_FILE"
+}
+
+restore_thread_cold() {
+  local thread_id="${1:-}"
+  if [[ -z "$thread_id" ]]; then
+    echo "restore-thread-cold requires: <thread-id>" >&2
+    return 2
+  fi
+  ensure_dirs
+  local -a target_specs target_args
+  local spec
+  target_specs=()
+  target_args=()
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] || continue
+    target_specs+=("$spec")
+    target_args+=(--target "$spec")
+  done < <(shared_cold_storage_targets)
+  (( ${#target_specs[@]} > 0 )) || {
+    echo "No shared-history Codex profiles were found." >&2
+    return 1
+  }
+  tiered_storage_assert_idle "${target_specs[@]}" || return $?
+
+  CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
+      run_codex_share_helper cold-restore \
+        --thread-id "$thread_id" \
+        --index "$COLD_STORAGE_INDEX_FILE" \
+        "${target_args[@]}"
+}
+
+archive_threads_cold() {
+  local name="${1:-}" archive_root="${2:-}"
+  if [[ -z "$name" || -z "$archive_root" || $# -lt 3 ]]; then
+    echo "archive-threads-cold requires: <account-name> <external-root> <thread-id>..." >&2
+    return 2
+  fi
+  shift 2
+  local -a thread_ids
+  thread_ids=("$@")
+  ensure_dirs
+  local account_home
+  account_home="$(account_home_for "$name")"
+  if [[ "$(history_mode_for_home "$account_home")" != "shared" ]]; then
+    echo "Cold storage v1 only archives shared-history tasks; private profile data was not changed." >&2
+    return 2
+  fi
+  tiered_storage_assert_external_root "$archive_root" || return $?
+
+  local -a target_specs target_args thread_args
+  local spec thread_id
+  target_specs=()
+  target_args=()
+  thread_args=()
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] || continue
+    target_specs+=("$spec")
+    target_args+=(--target "$spec")
+  done < <(shared_cold_storage_targets)
+  (( ${#target_specs[@]} > 0 )) || {
+    echo "No shared-history Codex profiles were found." >&2
+    return 1
+  }
+  local archived_count=0 failed_count=0 rc
+  for thread_id in "${thread_ids[@]}"; do
+    [[ -n "$thread_id" ]] || continue
+    tiered_storage_assert_idle "${target_specs[@]}" || {
+      rc=$?
+      echo "Batch cold storage paused before $thread_id; completed items remain archived." >&2
+      return "$rc"
+    }
+    if CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+      CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
+        run_codex_share_helper cold-archive \
+          --account-name "$name" \
+          --account-home "$account_home" \
+          --thread-id "$thread_id" \
+          --archive-root "$archive_root" \
+          --index "$COLD_STORAGE_INDEX_FILE" \
+          --include-generated-images \
+          --include-local-assets \
+          "${target_args[@]}"; then
+      (( archived_count += 1 ))
+      echo "archived=$thread_id"
+    else
+      rc=$?
+      if [[ "$rc" == "75" || "$rc" == "69" ]]; then
+        echo "Batch cold storage paused before $thread_id; completed items remain archived." >&2
+        return "$rc"
+      fi
+      (( failed_count += 1 ))
+      echo "failed=$thread_id" >&2
+    fi
+  done
+  echo "batch_archived=$archived_count"
+  echo "batch_failed=$failed_count"
+  (( failed_count == 0 ))
+}
+
+archive_cold_older_than() {
+  local name="${1:-}" archive_root="${2:-}" days="${3:-7}"
+  if [[ -z "$name" || -z "$archive_root" ]]; then
+    echo "archive-cold-older-than requires: <account-name> <external-root> <days>" >&2
+    return 2
+  fi
+  ensure_dirs
+  local account_home
+  account_home="$(account_home_for "$name")"
+  local -a target_args ids
+  local spec candidates
+  target_args=()
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] || continue
+    target_args+=(--target "$spec")
+  done < <(shared_cold_storage_targets)
+  candidates="$(run_codex_share_helper cold-candidates \
+    --account-home "$account_home" \
+    --older-than-days "$days" \
+    --ids-only \
+    "${target_args[@]}")"
+  ids=("${(@f)candidates}")
+  if (( ${#ids[@]} == 0 )); then
+    echo "No safe cold-storage candidates older than $days day(s)."
+    return 0
+  fi
+  archive_threads_cold "$name" "$archive_root" "${ids[@]}"
+}
+
+restore_threads_cold() {
+  if (( $# == 0 )); then
+    echo "restore-threads-cold requires: <thread-id>..." >&2
+    return 2
+  fi
+  ensure_dirs
+  local -a target_specs target_args thread_args
+  local spec thread_id
+  target_specs=()
+  target_args=()
+  thread_args=()
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] || continue
+    target_specs+=("$spec")
+    target_args+=(--target "$spec")
+  done < <(shared_cold_storage_targets)
+  (( ${#target_specs[@]} > 0 )) || {
+    echo "No shared-history Codex profiles were found." >&2
+    return 1
+  }
+  local restored_count=0 failed_count=0 rc
+  for thread_id in "$@"; do
+    [[ -n "$thread_id" ]] || continue
+    tiered_storage_assert_idle "${target_specs[@]}" || {
+      rc=$?
+      echo "Batch restore paused before $thread_id; completed items remain restored." >&2
+      return "$rc"
+    }
+    if CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
+      CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
+        run_codex_share_helper cold-restore \
+          --thread-id "$thread_id" \
+          --index "$COLD_STORAGE_INDEX_FILE" \
+          "${target_args[@]}"; then
+      (( restored_count += 1 ))
+      echo "restored=$thread_id"
+    else
+      rc=$?
+      if [[ "$rc" == "75" || "$rc" == "69" ]]; then
+        echo "Batch restore paused before $thread_id; completed items remain restored." >&2
+        return "$rc"
+      fi
+      (( failed_count += 1 ))
+      echo "failed=$thread_id" >&2
+    fi
+  done
+  echo "batch_restored=$restored_count"
+  echo "batch_failed=$failed_count"
+  (( failed_count == 0 ))
+}
+
 main() {
   local command="${1:-}"
   case "$command" in
@@ -8692,6 +8969,12 @@ main() {
     export-thread-package) export_thread_package "${@:2}" ;;
     inspect-thread-package) inspect_thread_package "${2:-}" ;;
     import-thread-package) import_thread_package "${2:-}" "${3:-all}" "${4:---mark-latest}" ;;
+    archive-thread-cold) archive_thread_cold "${@:2}" ;;
+    archive-threads-cold) archive_threads_cold "${@:2}" ;;
+    archive-cold-older-than) archive_cold_older_than "${2:-}" "${3:-}" "${4:-7}" ;;
+    list-cold-archives) list_cold_archives ;;
+    restore-thread-cold) restore_thread_cold "${2:-}" ;;
+    restore-threads-cold) restore_threads_cold "${@:2}" ;;
     prune-global-state-home) prune_global_state_for_home "${2:-}" ;;
     prune-loop) prune_global_state_loop ;;
     link-all-history) link_all_history ;;

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -15,6 +18,7 @@ from pathlib import Path
 
 FORMAT_VERSION = 1
 PACKAGE_TYPE = "codex_conversation_share"
+COLD_INDEX_VERSION = 1
 STATE_DB_NAMES = ("state_5.sqlite", "sqlite/state_5.sqlite")
 
 SECRET_RE = re.compile(
@@ -423,7 +427,8 @@ def export_package(args):
     if attachments:
         manifest["attachments"] = attachments
 
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+    compression_level = max(0, min(int(getattr(args, "compression_level", 6)), 9))
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=compression_level) as archive:
         archive.writestr("manifest.json", json_dumps(manifest))
         archive.writestr("state/thread.json", json_dumps(state))
         archive.write(rollout, f"sessions/{rollout_rel}")
@@ -583,6 +588,8 @@ def insert_related_rows(con, related_rows):
 
 def update_session_index(home, thread_id, title, updated_iso):
     index_path = home / "session_index.jsonl"
+    if index_path.is_symlink():
+        index_path = index_path.resolve()
     records = []
     if index_path.exists():
         try:
@@ -664,7 +671,17 @@ def extract_attachments(archive, manifest, home, thread_id):
     return count
 
 
-def import_into_home(archive, manifest, state, home, account_name, mark_latest):
+def import_into_home(
+    archive,
+    manifest,
+    state,
+    home,
+    account_name,
+    mark_latest,
+    backup_base=None,
+    restore_attachments=True,
+    verified_rollouts=None,
+):
     home.mkdir(parents=True, exist_ok=True)
     db_path = state_db_path(home)
     if not db_path.exists():
@@ -673,7 +690,12 @@ def import_into_home(archive, manifest, state, home, account_name, mark_latest):
     thread = manifest["thread"]
     thread_id = thread["id"]
     title = thread.get("title") or "Untitled"
-    backup_root = home / "backups" / f"codexshare-import-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{thread_id[:8]}"
+    backup_name = f"codexshare-import-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{thread_id[:8]}"
+    if backup_base:
+        safe_account = re.sub(r"[^A-Za-z0-9._-]+", "_", account_name) or "account"
+        backup_root = Path(backup_base).expanduser() / safe_account / backup_name
+    else:
+        backup_root = home / "backups" / backup_name
     backup_sqlite(db_path, backup_root, home)
     backup_file(home / "session_index.jsonl", backup_root, "session_index.jsonl")
     backup_file(home / ".codex-global-state.json", backup_root, ".codex-global-state.json")
@@ -682,15 +704,34 @@ def import_into_home(archive, manifest, state, home, account_name, mark_latest):
     rollout_member = f"sessions/{rollout_rel}"
     target_rollout = home / "sessions" / rollout_rel
     target_rollout.parent.mkdir(parents=True, exist_ok=True)
-    if target_rollout.exists():
-        backup_file(target_rollout, backup_root, f"existing-rollouts/{target_rollout.name}")
-    with archive.open(rollout_member) as source, target_rollout.open("wb") as dest:
-        shutil.copyfileobj(source, dest)
     expected_hash = thread.get("rollout_sha256")
-    if expected_hash and sha256_file(target_rollout) != expected_hash:
-        raise SystemExit(f"Checksum failed after extracting rollout for {account_name}")
+    rollout_key = str(target_rollout.resolve(strict=False))
+    verified_rollouts = verified_rollouts if verified_rollouts is not None else set()
+    rollout_ready = rollout_key in verified_rollouts
+    if not rollout_ready and target_rollout.exists() and expected_hash:
+        rollout_ready = sha256_file(target_rollout) == expected_hash
+    if not rollout_ready:
+        if target_rollout.exists():
+            backup_file(target_rollout, backup_root, f"existing-rollouts/{target_rollout.name}")
+        tmp_rollout = target_rollout.with_name(f".{target_rollout.name}.tmp-import-{os.getpid()}")
+        try:
+            with archive.open(rollout_member) as source, tmp_rollout.open("wb") as dest:
+                shutil.copyfileobj(source, dest)
+                dest.flush()
+                os.fsync(dest.fileno())
+            if expected_hash and sha256_file(tmp_rollout) != expected_hash:
+                raise SystemExit(f"Checksum failed after extracting rollout for {account_name}")
+            os.replace(tmp_rollout, target_rollout)
+        finally:
+            try:
+                tmp_rollout.unlink()
+            except FileNotFoundError:
+                pass
+        rollout_ready = True
+    if rollout_ready:
+        verified_rollouts.add(rollout_key)
 
-    imported_assets = extract_attachments(archive, manifest, home, thread_id)
+    imported_assets = extract_attachments(archive, manifest, home, thread_id) if restore_attachments else 0
     now = utc_now()
     now_ms = int(now.timestamp() * 1000)
     now_s = now_ms // 1000
@@ -761,28 +802,30 @@ def import_package(args):
     try:
         thread = manifest.get("thread", {})
         rollout_member = f"sessions/{thread.get('rollout_relative_path', '')}"
-        tmp_path = None
-        try:
-            with archive.open(rollout_member) as source, tempfile.NamedTemporaryFile(delete=False) as tmp:
-                shutil.copyfileobj(source, tmp)
-                tmp_path = Path(tmp.name)
-            expected_hash = thread.get("rollout_sha256")
-            if expected_hash and sha256_file(tmp_path) != expected_hash:
-                raise SystemExit("Package rollout checksum does not match manifest.")
-        finally:
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink()
-                except Exception:
-                    pass
-            else:
-                pass
+        expected_hash = thread.get("rollout_sha256")
+        digest = hashlib.sha256()
+        with archive.open(rollout_member) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if expected_hash and digest.hexdigest() != expected_hash:
+            raise SystemExit("Package rollout checksum does not match manifest.")
 
+        verified_rollouts = set()
         for target in args.target:
             if "=" not in target:
                 raise SystemExit(f"Invalid target argument: {target}")
             name, raw_home = target.split("=", 1)
-            result = import_into_home(archive, manifest, state, Path(raw_home).expanduser(), name, args.mark_latest)
+            result = import_into_home(
+                archive,
+                manifest,
+                state,
+                Path(raw_home).expanduser(),
+                name,
+                args.mark_latest,
+                backup_base=getattr(args, "backup_root", None),
+                restore_attachments=not getattr(args, "skip_attachments", False),
+                verified_rollouts=verified_rollouts,
+            )
             results.append(result)
     finally:
         archive.close()
@@ -794,6 +837,734 @@ def import_package(args):
     for result in results:
         print(compact_json_line(result))
     return 0 if imported else 1
+
+
+def fsync_directory(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def atomic_write_bytes(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+    tmp_path = Path(raw_tmp)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        fsync_directory(path.parent)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_json(path, value):
+    atomic_write_bytes(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def load_cold_index(path):
+    if not path.exists():
+        return {"format_version": COLD_INDEX_VERSION, "entries": {}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cold storage index is unreadable; refusing to overwrite it: {exc}")
+    if not isinstance(value, dict) or int(value.get("format_version") or 0) != COLD_INDEX_VERSION:
+        raise SystemExit("Unsupported cold storage index format.")
+    if not isinstance(value.get("entries"), dict):
+        raise SystemExit("Cold storage index entries are invalid.")
+    return value
+
+
+def save_cold_index(path, value):
+    value["format_version"] = COLD_INDEX_VERSION
+    atomic_write_json(path, value)
+
+
+def parsed_targets(values):
+    targets = []
+    seen = set()
+    for value in values:
+        if "=" not in value:
+            raise SystemExit(f"Invalid target argument: {value}")
+        name, raw_home = value.split("=", 1)
+        home = Path(raw_home).expanduser()
+        key = str(home.resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append((name, home))
+    if not targets:
+        raise SystemExit("At least one target profile is required.")
+    return targets
+
+
+def cold_storage_paths_are_open(targets, rollout=None):
+    paths = set()
+    if rollout is not None:
+        paths.add(str(Path(rollout).resolve(strict=False)))
+    for _, home in targets:
+        db_path = state_db_path(home)
+        for path in (
+            db_path,
+            Path(str(db_path) + "-wal"),
+            Path(str(db_path) + "-shm"),
+            home / "goals_1.sqlite",
+            home / "goals_1.sqlite-wal",
+            home / "goals_1.sqlite-shm",
+            home / "session_index.jsonl",
+            home / ".codex-global-state.json",
+        ):
+            try:
+                resolved = path.resolve() if path.is_symlink() else path
+            except OSError:
+                resolved = path
+            if resolved.exists():
+                paths.add(str(resolved))
+    if not paths:
+        return False
+    lsof = Path("/usr/sbin/lsof")
+    if not lsof.is_file():
+        return True
+    try:
+        result = subprocess.run(
+            [str(lsof), "-t", *sorted(paths)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    if result.stdout.strip():
+        return True
+    if result.returncode in (0, 1):
+        return False
+    return True
+
+
+def require_cold_targets_offline(targets, rollout=None):
+    if cold_storage_paths_are_open(targets, rollout):
+        print("Codex reopened or a protected history database is in use; cold storage paused before local mutation.", file=sys.stderr)
+        raise SystemExit(75)
+
+
+def resolved_file(path):
+    return path.resolve() if path.is_symlink() else path
+
+
+def required_backup(path, backup_root, label):
+    path = resolved_file(path)
+    if not path.exists():
+        return None
+    target = backup_root / label
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, target)
+    with target.open("rb") as handle:
+        os.fsync(handle.fileno())
+    return path, target
+
+
+def restore_required_backup(target, backup):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp-cold-rollback-{os.getpid()}")
+    try:
+        shutil.copy2(backup, tmp)
+        with tmp.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        fsync_directory(target.parent)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def thread_row_optional(home, thread_id):
+    db_path = state_db_path(home)
+    if not db_path.exists():
+        return None
+    con = connect_ro(db_path)
+    try:
+        row, _ = read_row(con, "threads", "id = ?", (thread_id,))
+        return row
+    finally:
+        con.close()
+
+
+def mark_thread_cold(home, thread_id):
+    db_path = state_db_path(home)
+    if not db_path.exists():
+        return False
+    con = sqlite3.connect(db_path, timeout=8)
+    con.execute("PRAGMA busy_timeout=8000")
+    try:
+        columns = table_columns(con, "threads")
+        if "archived" not in columns or "rollout_path" not in columns:
+            raise sqlite3.Error(f"threads table cannot represent cold storage in {db_path}")
+        present = con.execute("SELECT 1 FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if not present:
+            return False
+        con.execute("UPDATE threads SET archived = 1, rollout_path = '' WHERE id = ?", (thread_id,))
+        con.commit()
+        return True
+    except sqlite3.Error:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def restore_thread_row(home, row):
+    if not row:
+        return
+    db_path = state_db_path(home)
+    con = sqlite3.connect(db_path, timeout=8)
+    con.execute("PRAGMA busy_timeout=8000")
+    try:
+        upsert_row(con, "threads", row, ("id",))
+        con.commit()
+    except sqlite3.Error:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def remove_session_index_entry(path, thread_id):
+    path = resolved_file(path)
+    if not path.exists():
+        return False
+    output = []
+    removed = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            output.append(line)
+            continue
+        if str(value.get("id") or "") == thread_id:
+            removed = True
+            continue
+        output.append(compact_json_line(value))
+    if removed:
+        payload = (("\n".join(output) + "\n") if output else "").encode("utf-8")
+        atomic_write_bytes(path, payload)
+    return removed
+
+
+def remove_global_state_entry(path, thread_id):
+    if not path.exists():
+        return False
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not safely update {path}: {exc}")
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Could not safely update {path}: root is not an object")
+    changed = False
+    metadata = state.get("sidebar-thread-metadata")
+    if isinstance(metadata, dict) and thread_id in metadata:
+        metadata.pop(thread_id, None)
+        changed = True
+    ids = state.get("projectless-thread-ids")
+    if isinstance(ids, list):
+        filtered = [item for item in ids if str(item) != thread_id]
+        if len(filtered) != len(ids):
+            state["projectless-thread-ids"] = filtered
+            changed = True
+    if changed:
+        atomic_write_json(path, state)
+    return changed
+
+
+def verify_package_rollout(package_path):
+    archive, manifest, state = read_package(package_path)
+    try:
+        thread = manifest.get("thread") or {}
+        member = f"sessions/{thread.get('rollout_relative_path', '')}"
+        digest = hashlib.sha256()
+        with archive.open(member) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        expected = str(thread.get("rollout_sha256") or "")
+        if not expected or digest.hexdigest() != expected:
+            raise SystemExit("Cold archive rollout checksum does not match its manifest.")
+        return manifest, state
+    finally:
+        archive.close()
+
+
+def restore_rollout_from_package(package_path, manifest, target):
+    archive, _, _ = read_package(package_path)
+    thread = manifest["thread"]
+    member = f"sessions/{thread['rollout_relative_path']}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp-cold-rollback-{os.getpid()}")
+    try:
+        with archive.open(member) as source, tmp.open("wb") as dest:
+            shutil.copyfileobj(source, dest)
+            dest.flush()
+            os.fsync(dest.fileno())
+        if sha256_file(tmp) != thread["rollout_sha256"]:
+            raise RuntimeError("Rollback rollout checksum failed")
+        os.replace(tmp, target)
+        fsync_directory(target.parent)
+    finally:
+        archive.close()
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def cold_archive(args):
+    source_home = Path(args.account_home).expanduser()
+    thread_id = args.thread_id.strip()
+    state = read_thread_package_state(source_home, thread_id)
+    source_row = state["thread_row"]
+    rollout = Path(str(source_row.get("rollout_path") or "")).expanduser()
+    if not rollout.exists() or not rollout.is_file():
+        raise SystemExit(f"Rollout file not found: {rollout}")
+    targets = parsed_targets(args.target)
+    require_cold_targets_offline(targets, rollout)
+
+    archive_root = Path(args.archive_root).expanduser()
+    archive_root.mkdir(parents=True, exist_ok=True)
+    if not os.access(archive_root, os.W_OK):
+        raise SystemExit(f"Cold storage is not writable: {archive_root}")
+    initial = rollout.stat()
+    required = initial.st_size + max(int(args.max_attachment_bytes), 0) + 512 * 1024 * 1024
+    free = shutil.disk_usage(archive_root).free
+    if free < required:
+        raise SystemExit(f"Cold storage needs at least {required} free bytes; only {free} are available.")
+
+    index_path = Path(args.index).expanduser()
+    cold_index = load_cold_index(index_path)
+    old_entry = cold_index["entries"].get(thread_id)
+    if old_entry and old_entry.get("status") == "archived" and old_entry.get("local_removed"):
+        raise SystemExit(f"Thread is already in cold storage: {thread_id}")
+
+    timestamp = utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+    archive_dir = archive_root / "archives" / thread_id
+    staging_dir = archive_root / ".staging"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staging_package = staging_dir / f".{thread_id}-{timestamp}-{os.getpid()}.codexshare.part"
+    final_package = archive_dir / f"{thread_id}-{timestamp}.codexshare"
+
+    export_args = argparse.Namespace(
+        account_name=args.account_name,
+        account_home=str(source_home),
+        thread_id=thread_id,
+        output=str(staging_package),
+        include_generated_images=args.include_generated_images,
+        include_local_assets=args.include_local_assets,
+        max_attachment_bytes=args.max_attachment_bytes,
+        compression_level=args.compression_level,
+    )
+    try:
+        export_package(export_args)
+        with staging_package.open("rb") as handle:
+            os.fsync(handle.fileno())
+        manifest, _ = verify_package_rollout(staging_package)
+        current = rollout.stat()
+        identity = (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns)
+        current_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        if current_identity != identity:
+            raise RuntimeError("Rollout changed while the cold archive was being created")
+        require_cold_targets_offline(targets, rollout)
+        os.replace(staging_package, final_package)
+        fsync_directory(final_package.parent)
+    finally:
+        try:
+            staging_package.unlink()
+        except FileNotFoundError:
+            pass
+
+    package_hash = sha256_file(final_package)
+    package_size = final_package.stat().st_size
+    try:
+        require_cold_targets_offline(targets, rollout)
+    except SystemExit:
+        try:
+            final_package.unlink()
+            fsync_directory(final_package.parent)
+        except FileNotFoundError:
+            pass
+        raise
+    snapshots = []
+    for name, home in targets:
+        row = thread_row_optional(home, thread_id)
+        if row is not None:
+            snapshots.append({"name": name, "home": str(home), "row": row})
+    if not snapshots:
+        raise SystemExit("Thread was not found in any target profile; local data was not changed.")
+
+    recovery_root = archive_dir / "recovery" / timestamp
+    recovery_root.mkdir(parents=True, exist_ok=True)
+    file_backups = []
+    seen_files = set()
+    for snapshot in snapshots:
+        home = Path(snapshot["home"])
+        for source_path, label in (
+            (home / "session_index.jsonl", "session-index"),
+            (home / ".codex-global-state.json", f"global-state-{re.sub(r'[^A-Za-z0-9._-]+', '_', snapshot['name'])}"),
+        ):
+            resolved = resolved_file(source_path)
+            key = str(resolved)
+            if key in seen_files or not resolved.exists():
+                continue
+            seen_files.add(key)
+            suffix = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+            backup = required_backup(resolved, recovery_root, f"files/{label}-{suffix}")
+            if backup:
+                file_backups.append(backup)
+
+    journal = {
+        "format_version": COLD_INDEX_VERSION,
+        "thread_id": thread_id,
+        "created_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "rollout_path": str(rollout),
+        "rollout_identity": list((initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns)),
+        "package_path": str(final_package),
+        "package_sha256": package_hash,
+        "targets": snapshots,
+        "file_backups": [{"target": str(target), "backup": str(backup)} for target, backup in file_backups],
+    }
+    atomic_write_json(recovery_root / "archive-journal.json", journal)
+
+    entry = {
+        "thread_id": thread_id,
+        "title": manifest["thread"].get("title") or "Untitled",
+        "updated_at": manifest["thread"].get("updated_at") or "",
+        "archived_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "source_account": args.account_name,
+        "package_path": str(final_package),
+        "package_sha256": package_hash,
+        "package_size_bytes": package_size,
+        "rollout_size_bytes": initial.st_size,
+        "recovery_path": str(recovery_root),
+        "status": "prepared",
+        "local_removed": False,
+    }
+    cold_index["entries"][thread_id] = entry
+    save_cold_index(index_path, cold_index)
+
+    try:
+        for snapshot in snapshots:
+            mark_thread_cold(Path(snapshot["home"]), thread_id)
+        for target, _ in file_backups:
+            if target.name == "session_index.jsonl":
+                remove_session_index_entry(target, thread_id)
+        for snapshot in snapshots:
+            remove_global_state_entry(Path(snapshot["home"]) / ".codex-global-state.json", thread_id)
+
+        current = rollout.stat()
+        current_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        if current_identity != tuple(journal["rollout_identity"]):
+            raise RuntimeError("Rollout changed before local removal")
+        rollout.unlink()
+        fsync_directory(rollout.parent)
+
+        entry["status"] = "archived"
+        entry["local_removed"] = True
+        entry["completed_at"] = utc_now().isoformat(timespec="seconds").replace("+00:00", "Z")
+        save_cold_index(index_path, cold_index)
+    except Exception as exc:
+        rollback_errors = []
+        try:
+            if not rollout.exists():
+                restore_rollout_from_package(final_package, manifest, rollout)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"rollout={rollback_exc}")
+        for snapshot in snapshots:
+            try:
+                restore_thread_row(Path(snapshot["home"]), snapshot["row"])
+            except Exception as rollback_exc:
+                rollback_errors.append(f"sqlite:{snapshot['name']}={rollback_exc}")
+        for target, backup in file_backups:
+            try:
+                restore_required_backup(target, backup)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"file:{target}={rollback_exc}")
+        entry["status"] = "failed"
+        entry["local_removed"] = not rollout.exists()
+        entry["error"] = str(exc)[:500]
+        try:
+            save_cold_index(index_path, cold_index)
+        except Exception as index_exc:
+            rollback_errors.append(f"index={index_exc}")
+        detail = f"; rollback issues: {', '.join(rollback_errors)}" if rollback_errors else ""
+        raise SystemExit(f"Cold archive failed and local state was rolled back: {exc}{detail}")
+
+    print(f"cold_archive={final_package}")
+    print(f"thread_id={thread_id}")
+    print(f"freed_bytes={initial.st_size}")
+    print(f"package_size_bytes={package_size}")
+    print(f"package_sha256={package_hash}")
+    return 0
+
+
+def list_cold_archives(args):
+    index_path = Path(args.index).expanduser()
+    cold_index = load_cold_index(index_path)
+    entries = [
+        value for value in cold_index["entries"].values()
+        if value.get("status") == "archived" and value.get("local_removed")
+    ]
+    entries.sort(key=lambda value: str(value.get("archived_at") or ""), reverse=True)
+    for entry in entries:
+        package_path = Path(str(entry.get("package_path") or "")).expanduser()
+        fields = [
+            str(entry.get("thread_id") or ""),
+            compact_text(entry.get("title")).replace("\t", " "),
+            str(entry.get("updated_at") or ""),
+            str(entry.get("archived_at") or ""),
+            str(entry.get("rollout_size_bytes") or 0),
+            str(entry.get("package_size_bytes") or 0),
+            str(package_path).replace("\t", " "),
+            "1" if package_path.is_file() else "0",
+            str(entry.get("status") or ""),
+        ]
+        print("\t".join(fields))
+    return 0
+
+
+def cold_restore(args):
+    index_path = Path(args.index).expanduser()
+    cold_index = load_cold_index(index_path)
+    entry = cold_index["entries"].get(args.thread_id)
+    if not entry or entry.get("status") != "archived" or not entry.get("local_removed"):
+        raise SystemExit(f"Thread is not currently in cold storage: {args.thread_id}")
+    package_path = Path(str(entry.get("package_path") or "")).expanduser()
+    if not package_path.is_file():
+        raise SystemExit(f"Cold archive is offline or missing: {package_path}")
+    actual_hash = sha256_file(package_path)
+    if actual_hash != entry.get("package_sha256"):
+        raise SystemExit("Cold archive package checksum failed; local state was not changed.")
+    manifest, _ = verify_package_rollout(package_path)
+    if str(manifest.get("thread", {}).get("id") or "") != args.thread_id:
+        raise SystemExit("Cold archive thread ID does not match the index.")
+
+    targets = parsed_targets(args.target)
+    require_cold_targets_offline(targets)
+    first_home = targets[0][1]
+    sessions_parent = first_home / "sessions"
+    sessions_parent.mkdir(parents=True, exist_ok=True)
+    required = int(manifest["thread"].get("rollout_size_bytes") or 0) + 512 * 1024 * 1024
+    free = shutil.disk_usage(sessions_parent.resolve()).free
+    if free < required:
+        raise SystemExit(f"Restore needs at least {required} free bytes internally; only {free} are available.")
+
+    timestamp = utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+    backup_root = package_path.parent / "restore-recovery" / timestamp
+    import_args = argparse.Namespace(
+        package=str(package_path),
+        target=args.target,
+        mark_latest=args.mark_latest,
+        backup_root=str(backup_root),
+        skip_attachments=True,
+    )
+    require_cold_targets_offline(targets)
+    result = import_package(import_args)
+    if result != 0:
+        return result
+    entry["status"] = "restored"
+    entry["local_removed"] = False
+    entry["restored_at"] = utc_now().isoformat(timespec="seconds").replace("+00:00", "Z")
+    entry["restore_recovery_path"] = str(backup_root)
+    save_cold_index(index_path, cold_index)
+    print(f"cold_restored={package_path}")
+    print("external_archive_retained=1")
+    return 0
+
+
+def protected_cold_thread_ids(targets):
+    protected = set()
+    uuid_re = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+    completed_statuses = {"complete", "completed", "achieved", "cancelled", "canceled"}
+    for _, home in targets:
+        db_path = state_db_path(home)
+        if db_path.exists():
+            try:
+                con = connect_ro(db_path)
+                columns = table_columns(con, "threads")
+                if "is_pinned" in columns:
+                    protected.update(
+                        str(row[0]) for row in con.execute(
+                            "SELECT id FROM threads WHERE COALESCE(is_pinned, 0) != 0"
+                        )
+                    )
+                con.close()
+            except sqlite3.Error:
+                pass
+
+        goals_db = home / "goals_1.sqlite"
+        if goals_db.exists():
+            try:
+                con = connect_ro(goals_db)
+                columns = table_columns(con, "thread_goals")
+                if "thread_id" in columns:
+                    if "status" in columns:
+                        for thread_id, status in con.execute("SELECT thread_id, status FROM thread_goals"):
+                            if str(status or "").strip().lower() not in completed_statuses:
+                                protected.add(str(thread_id))
+                    else:
+                        protected.update(str(row[0]) for row in con.execute("SELECT thread_id FROM thread_goals"))
+                con.close()
+            except sqlite3.Error:
+                pass
+
+        automation_root = home / "automations"
+        if automation_root.is_dir():
+            for config_path in automation_root.glob("*/automation.toml"):
+                try:
+                    text = config_path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                status_match = re.search(r'(?mi)^status\s*=\s*"([^"]+)"', text)
+                status = status_match.group(1).strip().lower() if status_match else "active"
+                if status not in {"disabled", "inactive", "deleted"}:
+                    protected.update(uuid_re.findall(text))
+    return protected
+
+
+def cold_candidates(args):
+    home = Path(args.account_home).expanduser()
+    targets = parsed_targets(args.target)
+    protected = protected_cold_thread_ids(targets)
+    db_path = state_db_path(home)
+    if not db_path.exists():
+        return 0
+    con = connect_ro(db_path)
+    columns = table_columns(con, "threads")
+    if not columns:
+        con.close()
+        return 0
+    query_columns = ", ".join(f'"{column}"' for column in columns)
+    cutoff_ms = int((time.time() - max(float(args.older_than_days), 0) * 86400) * 1000)
+    rows = []
+    for values in con.execute(f"SELECT {query_columns} FROM threads"):
+        row = dict(zip(columns, values))
+        thread_id = str(row.get("id") or "")
+        if not thread_id or thread_id in protected:
+            continue
+        try:
+            if int(row.get("archived") or 0) != 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        rollout = Path(str(row.get("rollout_path") or "")).expanduser()
+        if not rollout.is_file():
+            continue
+        updated_ms = marker_ms(row)
+        try:
+            updated_ms = max(updated_ms, int(rollout.stat().st_mtime * 1000))
+        except OSError:
+            continue
+        if updated_ms <= 0 or updated_ms > cutoff_ms:
+            continue
+        row["_cold_updated_ms"] = updated_ms
+        row["_cold_size"] = rollout.stat().st_size
+        rows.append(row)
+    con.close()
+    rows.sort(key=lambda row: int(row.get("_cold_updated_ms") or 0))
+    for row in rows:
+        thread_id = str(row.get("id") or "")
+        if args.ids_only:
+            print(thread_id)
+            continue
+        fields = [
+            thread_id,
+            best_thread_title(row).replace("\t", " "),
+            iso_from_ms(row.get("_cold_updated_ms")),
+            str(row.get("cwd") or "").replace("\t", " "),
+            str(row.get("_cold_size") or 0),
+        ]
+        print("\t".join(fields))
+    return 0
+
+
+def cold_archive_many(args):
+    archived = []
+    failed = []
+    for thread_id in args.thread_id:
+        child = argparse.Namespace(
+            account_name=args.account_name,
+            account_home=args.account_home,
+            thread_id=thread_id,
+            archive_root=args.archive_root,
+            index=args.index,
+            target=args.target,
+            include_generated_images=args.include_generated_images,
+            include_local_assets=args.include_local_assets,
+            max_attachment_bytes=args.max_attachment_bytes,
+            compression_level=args.compression_level,
+        )
+        details = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(details):
+                cold_archive(child)
+            archived.append(thread_id)
+            print(f"archived={thread_id}")
+        except SystemExit as exc:
+            if exc.code == 75:
+                print(f"paused={thread_id}\tCodex is open")
+                return 75
+            failed.append((thread_id, str(exc) or exc.__class__.__name__))
+            print(f"failed={thread_id}\t{compact_text(str(exc))}")
+        except Exception as exc:
+            failed.append((thread_id, str(exc) or exc.__class__.__name__))
+            print(f"failed={thread_id}\t{compact_text(str(exc))}")
+    print(f"batch_archived={len(archived)}")
+    print(f"batch_failed={len(failed)}")
+    return 0 if not failed else 1
+
+
+def cold_restore_many(args):
+    restored = []
+    failed = []
+    for thread_id in args.thread_id:
+        child = argparse.Namespace(
+            thread_id=thread_id,
+            index=args.index,
+            target=args.target,
+            mark_latest=args.mark_latest,
+        )
+        details = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(details):
+                result = cold_restore(child)
+            if result != 0:
+                raise RuntimeError(f"restore returned {result}")
+            restored.append(thread_id)
+            print(f"restored={thread_id}")
+        except SystemExit as exc:
+            if exc.code == 75:
+                print(f"paused={thread_id}\tCodex is open")
+                return 75
+            failed.append((thread_id, str(exc) or exc.__class__.__name__))
+            print(f"failed={thread_id}\t{compact_text(str(exc))}")
+        except Exception as exc:
+            failed.append((thread_id, str(exc) or exc.__class__.__name__))
+            print(f"failed={thread_id}\t{compact_text(str(exc))}")
+    print(f"batch_restored={len(restored)}")
+    print(f"batch_failed={len(failed)}")
+    return 0 if not failed else 1
 
 
 def main(argv):
@@ -814,6 +1585,7 @@ def main(argv):
     p.add_argument("--include-generated-images", action="store_true")
     p.add_argument("--include-local-assets", action="store_true")
     p.add_argument("--max-attachment-bytes", type=int, default=50 * 1024 * 1024)
+    p.add_argument("--compression-level", type=int, default=6)
     p.set_defaults(func=export_package)
 
     p = sub.add_parser("inspect")
@@ -824,7 +1596,60 @@ def main(argv):
     p.add_argument("--package", required=True)
     p.add_argument("--target", action="append", required=True, help="account=home")
     p.add_argument("--mark-latest", action="store_true")
+    p.add_argument("--backup-root")
+    p.add_argument("--skip-attachments", action="store_true")
     p.set_defaults(func=import_package)
+
+    p = sub.add_parser("cold-archive")
+    p.add_argument("--account-name", required=True)
+    p.add_argument("--account-home", required=True)
+    p.add_argument("--thread-id", required=True)
+    p.add_argument("--archive-root", required=True)
+    p.add_argument("--index", required=True)
+    p.add_argument("--target", action="append", required=True, help="account=home")
+    p.add_argument("--include-generated-images", action="store_true")
+    p.add_argument("--include-local-assets", action="store_true")
+    p.add_argument("--max-attachment-bytes", type=int, default=2 * 1024 * 1024 * 1024)
+    p.add_argument("--compression-level", type=int, default=1)
+    p.set_defaults(func=cold_archive)
+
+    p = sub.add_parser("cold-list")
+    p.add_argument("--index", required=True)
+    p.set_defaults(func=list_cold_archives)
+
+    p = sub.add_parser("cold-restore")
+    p.add_argument("--thread-id", required=True)
+    p.add_argument("--index", required=True)
+    p.add_argument("--target", action="append", required=True, help="account=home")
+    p.add_argument("--mark-latest", action="store_true")
+    p.set_defaults(func=cold_restore)
+
+    p = sub.add_parser("cold-candidates")
+    p.add_argument("--account-home", required=True)
+    p.add_argument("--target", action="append", required=True, help="account=home")
+    p.add_argument("--older-than-days", type=float, default=7)
+    p.add_argument("--ids-only", action="store_true")
+    p.set_defaults(func=cold_candidates)
+
+    p = sub.add_parser("cold-archive-many")
+    p.add_argument("--account-name", required=True)
+    p.add_argument("--account-home", required=True)
+    p.add_argument("--thread-id", action="append", required=True)
+    p.add_argument("--archive-root", required=True)
+    p.add_argument("--index", required=True)
+    p.add_argument("--target", action="append", required=True, help="account=home")
+    p.add_argument("--include-generated-images", action="store_true")
+    p.add_argument("--include-local-assets", action="store_true")
+    p.add_argument("--max-attachment-bytes", type=int, default=2 * 1024 * 1024 * 1024)
+    p.add_argument("--compression-level", type=int, default=1)
+    p.set_defaults(func=cold_archive_many)
+
+    p = sub.add_parser("cold-restore-many")
+    p.add_argument("--thread-id", action="append", required=True)
+    p.add_argument("--index", required=True)
+    p.add_argument("--target", action="append", required=True, help="account=home")
+    p.add_argument("--mark-latest", action="store_true")
+    p.set_defaults(func=cold_restore_many)
 
     args = parser.parse_args(argv)
     return args.func(args)
