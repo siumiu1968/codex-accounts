@@ -7819,21 +7819,15 @@ private final class UpdateController: ObservableObject {
         statusText = localized("正在檢查更新...", "Checking for updates...")
         notifyChanged()
 
-        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest")!
-        var request = URLRequest(url: url)
-        request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            if let error {
-                self.finishCheck(errorMessage: error.localizedDescription, presentNoUpdate: presentNoUpdate)
-                return
-            }
-
-            guard let data,
-                  let release = self.parseRelease(from: data)
-            else {
-                self.finishCheck(errorMessage: self.localized("未能讀取 GitHub Release。", "Could not read the GitHub release."), presentNoUpdate: presentNoUpdate)
+        fetchLatestRelease { release, errorMessage in
+            guard let release else {
+                self.finishCheck(
+                    errorMessage: errorMessage ?? self.localized(
+                        "GitHub 暫時無法連線。",
+                        "GitHub is temporarily unavailable."
+                    ),
+                    presentNoUpdate: presentNoUpdate
+                )
                 return
             }
 
@@ -7853,7 +7847,7 @@ private final class UpdateController: ObservableObject {
                 }
                 self.notifyChanged()
             }
-        }.resume()
+        }
     }
 
     func installAvailableUpdate() {
@@ -7870,9 +7864,18 @@ private final class UpdateController: ObservableObject {
         var request = URLRequest(url: release.assetURL)
         request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
-        URLSession.shared.downloadTask(with: request) { temporaryURL, _, error in
+        request.timeoutInterval = 60
+
+        URLSession.shared.downloadTask(with: request) { temporaryURL, response, error in
             if let error {
                 self.finishInstall(errorMessage: error.localizedDescription)
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode)
+            else {
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                self.finishInstall(errorMessage: "GitHub HTTP \(statusCode)")
                 return
             }
             guard let temporaryURL else {
@@ -7897,6 +7900,119 @@ private final class UpdateController: ObservableObject {
                 self.finishInstall(errorMessage: error.localizedDescription)
             }
         }.resume()
+    }
+
+    private func fetchLatestRelease(completion: @escaping (AppReleaseInfo?, String?) -> Void) {
+        fetchLatestReleaseFromAPI { release, apiError in
+            if let release {
+                completion(release, nil)
+                return
+            }
+
+            // The unauthenticated GitHub API can be rate-limited or blocked on
+            // some networks. The normal GitHub release page is an independent
+            // fallback and redirects to the current tag without using the API.
+            self.fetchLatestReleaseFromWeb { release, webError in
+                if let release {
+                    completion(release, nil)
+                    return
+                }
+                let details = [apiError, webError]
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " / ")
+                completion(
+                    nil,
+                    details.isEmpty
+                        ? self.localized("未能讀取 GitHub Release。", "Could not read the GitHub release.")
+                        : details
+                )
+            }
+        }
+    }
+
+    private func fetchLatestReleaseFromAPI(completion: @escaping (AppReleaseInfo?, String?) -> Void) {
+        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest")!
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                completion(nil, "GitHub API: \(error.localizedDescription)")
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(nil, self.localized("GitHub API 冇回應。", "GitHub API returned no response."))
+                return
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                completion(nil, "GitHub API HTTP \(httpResponse.statusCode)")
+                return
+            }
+            guard let data, let release = self.parseRelease(from: data) else {
+                completion(nil, self.localized("GitHub API 回傳資料格式不正確。", "GitHub API returned an invalid release."))
+                return
+            }
+            completion(release, nil)
+        }.resume()
+    }
+
+    private func fetchLatestReleaseFromWeb(completion: @escaping (AppReleaseInfo?, String?) -> Void) {
+        let url = URL(string: "https://github.com/\(owner)/\(repo)/releases/latest")!
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+        request.setValue("Codex-Accounts/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error {
+                completion(nil, "GitHub Web: \(error.localizedDescription)")
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(nil, self.localized("GitHub 網頁冇回應。", "GitHub Web returned no response."))
+                return
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                completion(nil, "GitHub Web HTTP \(httpResponse.statusCode)")
+                return
+            }
+            guard let htmlURL = httpResponse.url,
+                  let tagName = self.releaseTag(from: htmlURL)
+            else {
+                completion(nil, self.localized("GitHub 網頁冇提供最新版本標籤。", "GitHub Web did not provide a release tag."))
+                return
+            }
+
+            let assetURL = URL(string: "https://github.com")!
+                .appendingPathComponent(self.owner)
+                .appendingPathComponent(self.repo)
+                .appendingPathComponent("releases")
+                .appendingPathComponent("download")
+                .appendingPathComponent(tagName)
+                .appendingPathComponent(self.assetName)
+            completion(
+                AppReleaseInfo(
+                    tagName: tagName,
+                    version: Self.normalizedVersion(tagName),
+                    assetURL: assetURL,
+                    htmlURL: htmlURL
+                ),
+                nil
+            )
+        }.resume()
+    }
+
+    private func releaseTag(from url: URL) -> String? {
+        let components = url.pathComponents
+        guard let tagIndex = components.lastIndex(of: "tag"),
+              components.indices.contains(tagIndex + 1)
+        else {
+            return nil
+        }
+        let tagName = components[tagIndex + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return tagName.isEmpty ? nil : tagName
     }
 
     private func parseRelease(from data: Data) -> AppReleaseInfo? {

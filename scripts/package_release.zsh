@@ -64,7 +64,7 @@ cleanup() { rm -rf "$VERIFY_DIR"; }
 trap cleanup EXIT
 ditto -x -k "$ZIP_PATH" "$VERIFY_DIR"
 codesign --verify --deep --strict "$VERIFY_DIR/Codex Accounts.app"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VERIFY_DIR/Codex Accounts.app/Contents/Info.plist")" == "2.7.0" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VERIFY_DIR/Codex Accounts.app/Contents/Info.plist")" == "2.7.1" ]]
 [[ -f "$VERIFY_DIR/Codex Accounts.app/Contents/Resources/opencodex-runtime/2.7.33/arm64/manifest.json" ]]
 
 echo "Release package:"

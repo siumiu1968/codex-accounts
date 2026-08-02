@@ -10,6 +10,13 @@ Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / Open
 
 > 两张图片都只使用虚构 profile 名称、`/tmp/demo-profiles/...` 演示路径和模拟用量，不包含真实账号、姓名、电脑用户名、token 或对话内容。
 
+## 2.7.1 更新
+
+- 修复部分网络环境下无法检查更新的问题。
+- GitHub Releases API 被限流、拦截或暂时失效时，会自动改用普通 GitHub Releases 网页取得最新版本。
+- 下载更新文件时会验证 HTTP 状态并设置超时，避免把错误页面当成 ZIP。
+- 受影响的旧版需要手动安装 V2.7.1 一次；之后即可使用新的备用检查路径。
+
 ## 2.7.0 更新
 
 - 安装包内置 arm64 OpenCodex 2.7.33 runtime 与香港繁体 Dashboard，更新后无需通过 npm 下载。
