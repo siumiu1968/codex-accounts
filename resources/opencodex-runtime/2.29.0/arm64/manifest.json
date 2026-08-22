@@ -1,0 +1,36 @@
+{
+  "arch": "arm64",
+  "archive": "opencodex-node_modules-2.29.0-arm64.tar.gz",
+  "archive_sha256": "5562be7d30852c52f3451b8cf6009e9d93f4463805fe3d8c4b9773117300bbc3",
+  "archive_size_bytes": 36153853,
+  "archive_uncompressed_size_bytes": 100050475,
+  "critical_files": {
+    "node_modules/@bitkyc08/opencodex/bin/ocx.mjs": "bed70427583cc18248227b74ddd05eec13adaf410367809b7584e606851b0979",
+    "node_modules/@bitkyc08/opencodex/gui/dist/index.html": "81130d91271b902d01dd2d162418237d46c3c2dccb56e080d7120f33e04710d7",
+    "node_modules/@bitkyc08/opencodex/package.json": "fd4c288d8c09df6271ed0e94759eba0c897c31a3a66431ba5c658225046c3745",
+    "node_modules/bun/bin/bun.exe": "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
+  },
+  "package": "@bitkyc08/opencodex",
+  "package_inventory_count": 101,
+  "runtime_tree_sha256": "ba815b176bb0cd80d984431fd6d9ea7b676ad5ae64b07645f74763e6293d4b7c",
+  "schema_version": 1,
+  "source_package": {
+    "dependencies": {
+      "@bufbuild/protobuf": "^2.14.0",
+      "@modelcontextprotocol/sdk": "^1.30.0",
+      "@napi-rs/keyring": "1.3.0",
+      "bun": "1.3.14",
+      "zod": "4.4.3"
+    },
+    "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
+    "homepage": "https://lidge-jun.github.io/opencodex/",
+    "license": "MIT",
+    "name": "@bitkyc08/opencodex",
+    "package_json_sha256": "fd4c288d8c09df6271ed0e94759eba0c897c31a3a66431ba5c658225046c3745",
+    "repository": "git+https://github.com/lidge-jun/opencodex.git",
+    "version": "2.29.0"
+  },
+  "third_party_notices": "THIRD_PARTY_NOTICES.txt",
+  "third_party_notices_sha256": "4cb4d103ca1bf14a0acdd73265e8e567727baf80d4d5e4095ceb4017a983ecee",
+  "version": "2.29.0"
+}

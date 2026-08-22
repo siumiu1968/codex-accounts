@@ -5,7 +5,6 @@ ROOT="${0:A:h:h}"
 HELPER="$ROOT/scripts/codex_multi_account.zsh"
 SWIFT_SOURCE="$ROOT/macos/CodexAccounts/Sources/CodexAccounts.swift"
 BUILD_SCRIPT="$ROOT/scripts/build_codex_accounts_app.zsh"
-OPENCODEX_HK_OVERLAY="$ROOT/resources/opencodex-zh-hk/2.7.33"
 TMP_ROOT="$(mktemp -d /tmp/codex-accounts-regression.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -191,7 +190,7 @@ opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_uninstalled_rc=$?
 
 mkdir -p "${OPENCODEX_TEST_BIN:h}" "${OPENCODEX_TEST_PACKAGE_JSON:h}"
 cat > "$OPENCODEX_TEST_PACKAGE_JSON" <<'JSON'
-{"name":"@bitkyc08/opencodex","version":"2.7.33"}
+{"name":"@bitkyc08/opencodex","version":"2.29.0"}
 JSON
 cat > "$OPENCODEX_TEST_BIN" <<'MOCK_OCX'
 #!/bin/zsh
@@ -206,6 +205,8 @@ set -euo pipefail
 
 case "${1:-}" in
   start)
+    [[ "${2:-}" == "--port" ]]
+    [[ "${3:-}" == "10100" ]]
     python3 - "$OPENCODEX_HOME/config.json" <<'PY'
 import json
 import sys
@@ -215,12 +216,14 @@ config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert config["hostname"] == "127.0.0.1"
 assert config["syncResumeHistory"] is False
 assert config["codexAutoStart"] is False
+assert config["codexShimAutoRestore"] is False
+assert config["port"] == 10100
 assert config["providers"]["openai"]["codexAccountMode"] == "direct"
 assert config["claudeCode"]["systemEnv"] is False
 PY
     mkdir -p "$OPENCODEX_HOME"
     printf '%s\n' "$$" > "$OPENCODEX_HOME/ocx.pid"
-    printf '{"pid":%s,"port":10123,"hostname":"127.0.0.1"}\n' "$$" > "$OPENCODEX_HOME/runtime-port.json"
+    printf '{"pid":%s,"port":10100,"hostname":"127.0.0.1"}\n' "$$" > "$OPENCODEX_HOME/runtime-port.json"
     printf '%s\n' 'start' >> "$OPENCODEX_HOME/order.log"
     printf '%s\t%s\t%s\n' "$HOME" "$CODEX_HOME" "$OPENCODEX_HOME" > "$OPENCODEX_HOME/start-env.tsv"
     trap 'rm -f "$OPENCODEX_HOME/ocx.pid" "$OPENCODEX_HOME/runtime-port.json"; exit 0' TERM INT HUP
@@ -253,7 +256,7 @@ JSON
 JSON
     fi
     cat > "$CODEX_HOME/config.toml" <<EOF
-openai_base_url = "http://127.0.0.1:10123/v1"
+openai_base_url = "http://127.0.0.1:10100/v1"
 model_catalog_json = "$CODEX_HOME/opencodex-catalog.json"
 
 [features]
@@ -292,7 +295,7 @@ cat > "$OPENCODEX_MOCK_BIN/curl" <<'MOCK_CURL'
 set -euo pipefail
 runtime="$MOCK_EXPECTED_STATE/runtime-port.json"
 [[ -r "$runtime" ]] || exit 7
-python3 - "$runtime" "${MOCK_HEALTH_VERSION:-2.7.33}" <<'PY'
+python3 - "$runtime" "${MOCK_HEALTH_VERSION:-2.29.0}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -354,6 +357,7 @@ PY
 # verified overlay could write outside the managed OpenCodex runtime.
 OPENCODEX_ASSETS_ESCAPE="$TMP_ROOT/opencodex-assets-escape"
 mkdir -p "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist" "$OPENCODEX_ASSETS_ESCAPE"
+printf '%s\n' '<!doctype html><html lang="zh-TW"><body>OpenCodex</body></html>' > "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist/index.html"
 printf '%s\n' 'outside-sentinel' > "$OPENCODEX_ASSETS_ESCAPE/sentinel"
 OPENCODEX_ASSETS_SENTINEL_HASH="$(shasum -a 256 "$OPENCODEX_ASSETS_ESCAPE/sentinel" | awk '{print $1}')"
 ln -s "$OPENCODEX_ASSETS_ESCAPE" "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist/assets"
@@ -361,22 +365,15 @@ opencodex_assets_symlink_rc=0
 opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_assets_symlink_rc=$?
 [[ "$opencodex_assets_symlink_rc" != "0" ]]
 [[ "$(shasum -a 256 "$OPENCODEX_ASSETS_ESCAPE/sentinel" | awk '{print $1}')" == "$OPENCODEX_ASSETS_SENTINEL_HASH" ]]
-[[ ! -e "$OPENCODEX_ASSETS_ESCAPE/index-Cgt7VoIY.js" ]]
+[[ ! -e "$OPENCODEX_ASSETS_ESCAPE/index.html" ]]
 unlink "$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist/assets"
 
-[[ "$(opencodex_helper account-status opencodex-lab)" == "opencodex-lab | signed_in_local | external | local-proxy | external | opencodex:2.7.33 | none" ]]
-[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+[[ "$(opencodex_helper account-status opencodex-lab)" == "opencodex-lab | signed_in_local | external | local-proxy | external | opencodex:2.29.0 | none" ]]
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10100/" ]]
 OPENCODEX_TEST_GUI="$OPENCODEX_TEST_PACKAGE_JSON:h/gui/dist"
-[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/index.html" | awk '{print $1}')" == "6378a09aedf2ee6e884e1eddc40620c335a0039bdc9ab59c7348b26a3c39b29c" ]]
-[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js" | awk '{print $1}')" == "c149306ad9aeb9aeaa07f7bd7f117bd02b0c0d261482a025389859196f771c08" ]]
-grep -q 'index-Cgt7VoIY.js' "$OPENCODEX_TEST_GUI/index.html"
-grep -q '繁體中文（香港）' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
-grep -q '"nav.dashboard":`總覽`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
-grep -q '"nav.providers":`供應商`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
-grep -q '"nav.logs":`記錄及偵錯`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
-grep -q '"storage.title":`儲存空間`' "$OPENCODEX_TEST_GUI/assets/index-Cgt7VoIY.js"
-[[ "$(opencodex_helper opencodex-status)" == $'1\t1\t2.7.33\thttp://127.0.0.1:10123/' ]]
-[[ "$(MOCK_HEALTH_VERSION=2.7.32 opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+grep -q 'lang="zh-TW"' "$OPENCODEX_TEST_GUI/index.html"
+[[ "$(opencodex_helper opencodex-status)" == $'1\t1\t2.29.0\thttp://127.0.0.1:10100/' ]]
+[[ "$(MOCK_HEALTH_VERSION=2.28.0 opencodex_helper opencodex-status)" == $'1\t0\t2.29.0\t' ]]
 [[ "$(cat "$OPENCODEX_TEST_STATE/start-env.tsv")" == "${OPENCODEX_TEST_HOME}"$'\t'"${OPENCODEX_TEST_CODEX_HOME}"$'\t'"${OPENCODEX_TEST_STATE}" ]]
 python3 - "$OPENCODEX_TEST_STATE/config.json" <<'PY'
 import json
@@ -390,6 +387,8 @@ assert stat.S_IMODE(path.stat().st_mode) == 0o600
 assert config["hostname"] == "127.0.0.1"
 assert config["syncResumeHistory"] is False
 assert config["codexAutoStart"] is False
+assert config["codexShimAutoRestore"] is False
+assert config["port"] == 10100
 assert config["providers"]["openai"]["codexAccountMode"] == "direct"
 assert config["providers"]["openai"]["authMode"] == "forward"
 assert config["claudeCode"] == {"enabled": False, "systemEnv": False}
@@ -410,23 +409,21 @@ from pathlib import Path
 value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert value["schema"] == 1
 assert value["owner"] == "managed-by-codex-accounts-opencodex-catalog-v1"
-assert value["opencodex_version"] == "2.7.33"
+assert value["opencodex_version"] == "2.29.0"
 assert len(value["catalog_inputs_sha256"]) == 64
 assert len(value["catalog_sha256"]) == 64
 assert "mock-opencodex-secret" not in json.dumps(value)
 PY
 
-# Every ordinary managed profile may consume the one verified shared catalog,
-# without copying auth/history or overwriting an existing user-owned route.
+# Ordinary profiles must never be routed through OpenCodex. The compatibility
+# command removes only old Codex Accounts-owned markers and leaves user routes.
 ROUTE_CLEAN_NAME="route-clean"
-ROUTE_CHANGED_NAME="route-changed"
 ROUTE_USER_NAME="route-user"
 ROUTE_PROVIDER_NAME="route-provider"
 ROUTE_CLEAN_HOME="$TMP_ROOT/accounts/$ROUTE_CLEAN_NAME"
-ROUTE_CHANGED_HOME="$TMP_ROOT/accounts/$ROUTE_CHANGED_NAME"
 ROUTE_USER_HOME="$TMP_ROOT/accounts/$ROUTE_USER_NAME"
 ROUTE_PROVIDER_HOME="$TMP_ROOT/accounts/$ROUTE_PROVIDER_NAME"
-for route_name in "$ROUTE_CLEAN_NAME" "$ROUTE_CHANGED_NAME" "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
+for route_name in "$ROUTE_CLEAN_NAME" "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
   opencodex_helper init-account "$route_name" >/dev/null
 done
 cat > "$ROUTE_CLEAN_HOME/config.toml" <<'TOML'
@@ -445,7 +442,6 @@ name = "User Proxy"
 base_url = "http://127.0.0.1:45680/v1"
 wire_api = "responses"
 TOML
-cp "$ROUTE_CLEAN_HOME/config.toml" "$ROUTE_CHANGED_HOME/config.toml"
 cat > "$ROUTE_USER_HOME/config.toml" <<'TOML'
 model = "gpt-user"
 model_provider = "openai"
@@ -462,50 +458,10 @@ ROUTE_HISTORY_MARKER_HASH="$(shasum -a 256 "$ROUTE_CLEAN_HOME/.codex-accounts-hi
 ROUTE_USER_CONFIG_HASH="$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')"
 ROUTE_PROVIDER_CONFIG_HASH="$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')"
 
-# The shared CLI wrapper must stay inside the owned OpenCodex root. A linked
-# bin directory must fail before any profile route is changed or an external
-# target can be overwritten.
-OPENCODEX_WRAPPER_ESCAPE="$TMP_ROOT/opencodex-wrapper-escape"
-mkdir -p "$OPENCODEX_WRAPPER_ESCAPE"
-printf '%s\n' 'outside-wrapper-sentinel' > "$OPENCODEX_WRAPPER_ESCAPE/sentinel"
-OPENCODEX_WRAPPER_SENTINEL_HASH="$(shasum -a 256 "$OPENCODEX_WRAPPER_ESCAPE/sentinel" | awk '{print $1}')"
-ln -s "$OPENCODEX_WRAPPER_ESCAPE" "$OPENCODEX_TEST_ROOT/bin"
-opencodex_wrapper_symlink_rc=0
-opencodex_helper opencodex-enable-all-profiles >/dev/null 2>&1 || opencodex_wrapper_symlink_rc=$?
-[[ "$opencodex_wrapper_symlink_rc" != "0" ]]
-[[ "$(shasum -a 256 "$OPENCODEX_WRAPPER_ESCAPE/sentinel" | awk '{print $1}')" == "$OPENCODEX_WRAPPER_SENTINEL_HASH" ]]
-[[ ! -e "$OPENCODEX_WRAPPER_ESCAPE/codex-opencodex-router" ]]
-[[ ! -e "$ROUTE_CLEAN_HOME/.codex-accounts-opencodex-route.json" ]]
-unlink "$OPENCODEX_TEST_ROOT/bin"
-
 opencodex_helper opencodex-enable-all-profiles >/dev/null
-OPENCODEX_TEST_WRAPPER="$OPENCODEX_TEST_ROOT/bin/codex-opencodex-router"
-[[ -x "$OPENCODEX_TEST_WRAPPER" && ! -L "$OPENCODEX_TEST_WRAPPER" ]]
-[[ "$(stat -f '%Lp' "$OPENCODEX_TEST_WRAPPER")" == "700" ]]
-grep -Fq '# managed-by-codex-accounts-opencodex-cli-route-v1' "$OPENCODEX_TEST_WRAPPER"
-! grep -Eq 'AI_API_KEY|DASHSCOPE_API_KEY|sk-[[:alnum:]]' "$OPENCODEX_TEST_WRAPPER"
-"$OPENCODEX_TEST_WRAPPER" app-server --listen stdio://
-python3 - "$OPENCODEX_TEST_CLI_ARGS" "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json" <<'PY'
-import sys
-from pathlib import Path
-
-args = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-catalog = sys.argv[2]
-assert args == [
-    "-c", 'model="gpt-5.6-sol"',
-    "-c", 'model_provider="openai"',
-    "-c", 'model_reasoning_effort="xhigh"',
-    "-c", 'openai_base_url="http://127.0.0.1:10123/v1"',
-    "-c", f'model_catalog_json="{catalog}"',
-    "app-server", "--listen", "stdio://",
-]
-PY
-for routed_home in "$ROUTE_CLEAN_HOME" "$ROUTE_CHANGED_HOME"; do
-  grep -Fq 'openai_base_url = "http://127.0.0.1:10123/v1"' "$routed_home/config.toml"
-  grep -Fq "model_catalog_json = \"$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json\"" "$routed_home/config.toml"
-  [[ -f "$routed_home/.codex-accounts-opencodex-route.json" ]]
-  [[ ! -e "$routed_home/models_cache.json" ]]
-done
+! grep -q '^openai_base_url[[:space:]]*=' "$ROUTE_CLEAN_HOME/config.toml"
+! grep -q '^model_catalog_json[[:space:]]*=' "$ROUTE_CLEAN_HOME/config.toml"
+[[ ! -e "$ROUTE_CLEAN_HOME/.codex-accounts-opencodex-route.json" ]]
 [[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/auth.json" | awk '{print $1}')" == "$ROUTE_AUTH_HASH" ]]
 [[ "$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")" == "$ROUTE_HISTORY_MODE" ]]
 [[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/.codex-accounts-history-mode" | awk '{print $1}')" == "$ROUTE_HISTORY_MARKER_HASH" ]]
@@ -514,10 +470,9 @@ done
 [[ "$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_PROVIDER_CONFIG_HASH" ]]
 [[ ! -e "$ROUTE_PROVIDER_HOME/.codex-accounts-opencodex-route.json" ]]
 
-# A real launch reaches the fake-window verification failure only after model
-# routing decisions. User-owned URL/catalog and custom-provider profiles must
-# remain byte-for-byte unchanged through that path.
-for custom_route_name in "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
+# A real launch reaches the fake-window verification failure only after route
+# decisions. Direct and user-owned routes must not become OpenCodex routes.
+for custom_route_name in "$ROUTE_CLEAN_NAME" "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
   custom_route_launch_rc=0
   PATH="$OPENCODEX_MOCK_BIN:$PATH" \
   CODEX_PRELAUNCH_SYNC=0 \
@@ -525,6 +480,7 @@ for custom_route_name in "$ROUTE_USER_NAME" "$ROUTE_PROVIDER_NAME"; do
   opencodex_helper launch-account-nosync "$custom_route_name" >/dev/null 2>&1 || custom_route_launch_rc=$?
   [[ "$custom_route_launch_rc" != "0" ]]
 done
+! grep -q '10100/v1' "$ROUTE_CLEAN_HOME/config.toml"
 [[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
 [[ "$(shasum -a 256 "$ROUTE_PROVIDER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_PROVIDER_CONFIG_HASH" ]]
 [[ ! -e "$ROUTE_USER_HOME/.codex-accounts-opencodex-route.json" ]]
@@ -535,11 +491,11 @@ done
 # must be bounded and may reuse only that same verified catalog.
 OPENCODEX_SYNC_COUNT_WITHOUT_FINGERPRINT="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
 mv "$OPENCODEX_TEST_FINGERPRINT" "$TMP_ROOT/removed-catalog-verification.json"
-[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10100/" ]]
 [[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "$(( OPENCODEX_SYNC_COUNT_WITHOUT_FINGERPRINT + 1 ))" ]]
 [[ -f "$OPENCODEX_TEST_FINGERPRINT" ]]
 OPENCODEX_SYNC_COUNT_BEFORE="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
-[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10123/" ]]
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10100/" ]]
 [[ -e "$OPENCODEX_TEST_STATE/sync-called" ]]
 [[ "$(cat "$OPENCODEX_TEST_STATE/sync-count")" == "$OPENCODEX_SYNC_COUNT_BEFORE" ]]
 [[ "$(
@@ -548,34 +504,22 @@ OPENCODEX_SYNC_COUNT_BEFORE="$(cat "$OPENCODEX_TEST_STATE/sync-count")"
   OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
   MOCK_SYNC_MODE=hang \
   opencodex_helper opencodex-start
-)" == "http://127.0.0.1:10123/" ]]
+)" == "http://127.0.0.1:10100/" ]]
 [[ ! -e "$OPENCODEX_TEST_STATE/sync-hang.pid" ]]
-[[ "$(opencodex_helper opencodex-status)" == $'1\t1\t2.7.33\thttp://127.0.0.1:10123/' ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t1\t2.29.0\thttp://127.0.0.1:10100/' ]]
 
 # Dashboard opens only the verified loopback URL and never delegates to `ocx gui`.
 opencodex_helper opencodex-dashboard
-[[ "$(cat "$MOCK_OPEN_LOG")" == "http://127.0.0.1:10123/" ]]
+OPENCODEX_DASHBOARD_URL="$(cat "$MOCK_OPEN_LOG")"
+printf '%s\n' "$OPENCODEX_DASHBOARD_URL" | grep -Eq '^http://localhost:10100/[?]codex_accounts=[0-9]+-[0-9]+#dashboard$'
+! printf '%s\n' "$OPENCODEX_DASHBOARD_URL" | grep -Eq 'ocx_admin_|OPENCODEX_ADMIN_AUTH_TOKEN'
 opencodex_helper opencodex-restore >/dev/null
 [[ -e "$OPENCODEX_TEST_STATE/restore-called" ]]
-python3 - "$ROUTE_CHANGED_HOME/config.toml" <<'PY'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-path.write_text(text.replace(
-    'openai_base_url = "http://127.0.0.1:10123/v1"',
-    'openai_base_url = "http://127.0.0.1:45679/v1"',
-), encoding="utf-8")
-PY
 opencodex_helper opencodex-stop >/dev/null
-[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.29.0\t' ]]
 ! grep -q '^openai_base_url[[:space:]]*=' "$ROUTE_CLEAN_HOME/config.toml"
 ! grep -q '^model_catalog_json[[:space:]]*=' "$ROUTE_CLEAN_HOME/config.toml"
-grep -Fq 'openai_base_url = "http://127.0.0.1:45679/v1"' "$ROUTE_CHANGED_HOME/config.toml"
-! grep -q '^model_catalog_json[[:space:]]*=' "$ROUTE_CHANGED_HOME/config.toml"
 [[ ! -e "$ROUTE_CLEAN_HOME/.codex-accounts-opencodex-route.json" ]]
-[[ ! -e "$ROUTE_CHANGED_HOME/.codex-accounts-opencodex-route.json" ]]
 [[ "$(shasum -a 256 "$ROUTE_CLEAN_HOME/auth.json" | awk '{print $1}')" == "$ROUTE_AUTH_HASH" ]]
 [[ "$(opencodex_helper history-mode "$ROUTE_CLEAN_NAME")" == "$ROUTE_HISTORY_MODE" ]]
 [[ "$(shasum -a 256 "$ROUTE_USER_HOME/config.toml" | awk '{print $1}')" == "$ROUTE_USER_CONFIG_HASH" ]]
@@ -601,7 +545,7 @@ OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
 MOCK_SYNC_MODE=hang \
 opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_timeout_changed_settings_rc=$?
 [[ "$opencodex_timeout_changed_settings_rc" != "0" ]]
-[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.29.0\t' ]]
 cp "$TMP_ROOT/verified-opencodex-state-config.json" "$OPENCODEX_TEST_STATE/config.json"
 chmod 600 "$OPENCODEX_TEST_STATE/config.json"
 
@@ -616,7 +560,7 @@ OPENCODEX_SYNC_WAIT_SECONDS=0.05 \
 MOCK_SYNC_MODE=hang \
 opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_timeout_invalid_rc=$?
 [[ "$opencodex_timeout_invalid_rc" != "0" ]]
-[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.7.33\t' ]]
+[[ "$(opencodex_helper opencodex-status)" == $'1\t0\t2.29.0\t' ]]
 [[ ! -e "$OPENCODEX_TEST_STATE/sync-hang.pid" ]]
 cp "$TMP_ROOT/verified-opencodex-catalog.json" "$OPENCODEX_TEST_CODEX_HOME/opencodex-catalog.json"
 
@@ -635,13 +579,69 @@ opencodex_helper opencodex-start >/dev/null 2>&1 || opencodex_fingerprint_symlin
 unlink "$OPENCODEX_TEST_FINGERPRINT"
 mv "$TMP_ROOT/verified-catalog-fingerprint.json" "$OPENCODEX_TEST_FINGERPRINT"
 
-printf 'tampered\n' > "$OPENCODEX_TEST_GUI/index.html"
+OPENCODEX_GUI_HASH="$(shasum -a 256 "$OPENCODEX_TEST_GUI/index.html" | awk '{print $1}')"
 opencodex_helper opencodex-install >/dev/null
-[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/index.html" | awk '{print $1}')" == "6378a09aedf2ee6e884e1eddc40620c335a0039bdc9ab59c7348b26a3c39b29c" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_GUI/index.html" | awk '{print $1}')" == "$OPENCODEX_GUI_HASH" ]]
 [[ "$(opencodex_helper history-mode opencodex-lab)" == "private" ]]
+
+# Sharing the Lab is guarded by the same active-writer check as every other
+# profile. A matching app-server process must make the transition fail closed.
+/bin/zsh -c 'while true; do sleep 1; done' \
+  "codex app-server --codex-home $OPENCODEX_TEST_CODEX_HOME" &
+OPENCODEX_BUSY_PID=$!
+sleep 0.1
 opencodex_share_rc=0
 opencodex_helper link-history opencodex-lab >/dev/null 2>&1 || opencodex_share_rc=$?
-[[ "$opencodex_share_rc" == "2" ]]
+kill "$OPENCODEX_BUSY_PID" >/dev/null 2>&1 || true
+wait "$OPENCODEX_BUSY_PID" >/dev/null 2>&1 || true
+[[ "$opencodex_share_rc" == "1" ]]
+[[ "$(opencodex_helper history-mode opencodex-lab)" == "private" ]]
+sleep 1.1
+
+# Only portable chats join the shared store. Lab auth, SQLite/log files,
+# settings, local memory/plugin payloads, and Electron App Data stay separate.
+printf '%s\n' 'lab-auth-sentinel' > "$OPENCODEX_TEST_CODEX_HOME/auth.json"
+printf '%s\n' 'lab-log-sentinel' > "$OPENCODEX_TEST_CODEX_HOME/logs_2.sqlite"
+printf '%s\n' 'lab-app-data-sentinel' > "$TMP_ROOT/app-data/opencodex-lab/app-data-sentinel"
+mkdir -p "$OPENCODEX_TEST_CODEX_HOME/memories" "$OPENCODEX_TEST_CODEX_HOME/skills"
+printf '%s\n' 'lab-memory-sentinel' > "$OPENCODEX_TEST_CODEX_HOME/memories/lab-only.txt"
+printf '%s\n' 'lab-skill-sentinel' > "$OPENCODEX_TEST_CODEX_HOME/skills/lab-only.txt"
+OPENCODEX_AUTH_HASH="$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/auth.json" | awk '{print $1}')"
+OPENCODEX_LOG_HASH="$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/logs_2.sqlite" | awk '{print $1}')"
+OPENCODEX_CONFIG_HASH="$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/config.toml" | awk '{print $1}')"
+OPENCODEX_MEMORY_HASH="$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/memories/lab-only.txt" | awk '{print $1}')"
+OPENCODEX_SKILL_HASH="$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/skills/lab-only.txt" | awk '{print $1}')"
+OPENCODEX_APP_DATA_HASH="$(shasum -a 256 "$TMP_ROOT/app-data/opencodex-lab/app-data-sentinel" | awk '{print $1}')"
+
+opencodex_helper link-history opencodex-lab >/dev/null
+[[ "$(opencodex_helper history-mode opencodex-lab)" == "shared" ]]
+[[ -L "$OPENCODEX_TEST_CODEX_HOME/session_index.jsonl" ]]
+[[ -L "$OPENCODEX_TEST_CODEX_HOME/sessions" ]]
+[[ -L "$OPENCODEX_TEST_CODEX_HOME/shell_snapshots" ]]
+[[ "$(readlink "$OPENCODEX_TEST_CODEX_HOME/session_index.jsonl")" == "$SHARED_HISTORY_ROOT/session_index.jsonl" ]]
+[[ "$(readlink "$OPENCODEX_TEST_CODEX_HOME/sessions")" == "$SHARED_HISTORY_ROOT/sessions" ]]
+[[ "$(readlink "$OPENCODEX_TEST_CODEX_HOME/shell_snapshots")" == "$SHARED_HISTORY_ROOT/shell_snapshots" ]]
+[[ -f "$OPENCODEX_TEST_CODEX_HOME/auth.json" && ! -L "$OPENCODEX_TEST_CODEX_HOME/auth.json" ]]
+[[ -f "$OPENCODEX_TEST_CODEX_HOME/logs_2.sqlite" && ! -L "$OPENCODEX_TEST_CODEX_HOME/logs_2.sqlite" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/auth.json" | awk '{print $1}')" == "$OPENCODEX_AUTH_HASH" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/logs_2.sqlite" | awk '{print $1}')" == "$OPENCODEX_LOG_HASH" ]]
+[[ "$(shasum -a 256 "$TMP_ROOT/app-data/opencodex-lab/app-data-sentinel" | awk '{print $1}')" == "$OPENCODEX_APP_DATA_HASH" ]]
+
+CODEX_SYNC_PLUGIN_PAYLOADS=1 CODEX_FAST_SYNC_PLUGIN_PAYLOADS=0 \
+  opencodex_helper sync-account opencodex-lab >/dev/null
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/config.toml" | awk '{print $1}')" == "$OPENCODEX_CONFIG_HASH" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/memories/lab-only.txt" | awk '{print $1}')" == "$OPENCODEX_MEMORY_HASH" ]]
+[[ "$(shasum -a 256 "$OPENCODEX_TEST_CODEX_HOME/skills/lab-only.txt" | awk '{print $1}')" == "$OPENCODEX_SKILL_HASH" ]]
+printf '%s\n' 'lab-state-sentinel' > "$OPENCODEX_TEST_CODEX_HOME/state_5.sqlite"
+OPENCODEX_STATE_INODE="$(stat -f '%i' "$OPENCODEX_TEST_CODEX_HOME/state_5.sqlite")"
+[[ -f "$OPENCODEX_TEST_CODEX_HOME/state_5.sqlite" && ! -L "$OPENCODEX_TEST_CODEX_HOME/state_5.sqlite" ]]
+[[ "$(stat -f '%i' "$OPENCODEX_TEST_CODEX_HOME/state_5.sqlite")" == "$OPENCODEX_STATE_INODE" ]]
+
+# Preparing/restarting OpenCodex must preserve the explicit shared mode.
+[[ "$(opencodex_helper opencodex-start)" == "http://127.0.0.1:10100/" ]]
+[[ "$(opencodex_helper history-mode opencodex-lab)" == "shared" ]]
+[[ -L "$OPENCODEX_TEST_CODEX_HOME/session_index.jsonl" ]]
+opencodex_helper opencodex-stop >/dev/null
 opencodex_delete_rc=0
 opencodex_helper delete-account opencodex-lab >/dev/null 2>&1 || opencodex_delete_rc=$?
 [[ "$opencodex_delete_rc" == "2" ]]
@@ -1373,7 +1373,8 @@ assert '"$app_path/Contents/MacOS/ChatGPT"' in codex_process_match.group(1)
 assert '"$app_path/Contents/MacOS/Codex"' in codex_process_match.group(1)
 assert 'CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"' in helper
 assert 'CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"' in helper
-assert 'OPENCODEX_VERSION="2.7.33"' in helper
+assert 'OPENCODEX_VERSION="2.29.0"' in helper
+assert 'OPENCODEX_PORT="${OPENCODEX_PORT:-10100}"' in helper
 assert 'OPENCODEX_PACKAGE="@bitkyc08/opencodex"' in helper
 assert 'OPENCODEX_LAB_CODEX_HOME="${OPENCODEX_LAB_CODEX_HOME:-$ACCOUNTS_ROOT/$OPENCODEX_LAB_ACCOUNT}"' in helper
 assert 'OPENCODEX_LAB_APP_DATA="${OPENCODEX_LAB_APP_DATA:-$APP_DATA_ROOT/$OPENCODEX_LAB_ACCOUNT}"' in helper
@@ -1391,14 +1392,14 @@ assert 'prepare_opencodex_cli_wrapper() {' in helper
 assert 'remove_all_opencodex_profile_routes() {' in helper
 assert 'OPENCODEX_LAB_LAUNCH_VERIFIED=1' in helper
 assert '[[ "${OPENCODEX_LAB_LAUNCH_VERIFIED:-0}" != "1" ]]' in launch_match.group(1)
-assert 'set_history_mode_for_home "$home_dir" private' in launch_match.group(1)
+assert 'set_history_mode_for_home "$home_dir" private' not in launch_match.group(1)
 assert 'elif home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
 assert 'if ! home_uses_opencodex_proxy "$home_dir" && (( preserve_user_model_route == 0 )); then' in launch_match.group(1)
 assert '&& ! home_uses_opencodex_proxy "$home_dir"; then' in launch_match.group(1)
 assert 'profile_has_user_owned_model_routing() {' in helper
-assert launch_match.group(1).index('profile_has_user_owned_model_routing "$home_dir"') < launch_match.group(1).index('ensure_opencodex_available_for_profiles')
-assert launch_match.group(1).index('ensure_opencodex_available_for_profiles') < launch_match.group(1).index('configure_opencodex_routing_for_home "$home_dir"')
-assert launch_match.group(1).index('configure_opencodex_routing_for_home "$home_dir"') < launch_match.group(1).index('restore_non_account1_openai_config_for_home "$home_dir"')
+assert 'ensure_opencodex_available_for_profiles' not in launch_match.group(1)
+assert 'configure_opencodex_routing_for_home' not in launch_match.group(1)
+assert launch_match.group(1).index('profile_has_user_owned_model_routing "$home_dir"') < launch_match.group(1).index('restore_non_account1_openai_config_for_home "$home_dir"')
 assert '--env "CODEX_CLI_PATH=$opencodex_cli_wrapper"' in launch_match.group(1)
 assert '--env "CODEX_APP_SERVER_FORCE_CLI=1"' in launch_match.group(1)
 assert 'model_provider", "openai"' in helper
@@ -1410,7 +1411,8 @@ assert "/usr/bin/nohup /usr/bin/env" in opencodex_start_match.group(1)
 assert 'HOME="$OPENCODEX_FAKE_HOME"' in opencodex_start_match.group(1)
 assert 'CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME"' in opencodex_start_match.group(1)
 assert 'OPENCODEX_HOME="$OPENCODEX_STATE_DIR"' in opencodex_start_match.group(1)
-assert '"$OPENCODEX_BIN" start' in opencodex_start_match.group(1)
+assert '"$OPENCODEX_BIN" start --port "$OPENCODEX_PORT"' in opencodex_start_match.group(1)
+assert 'opencodex_port_is_busy' in opencodex_start_match.group(1)
 assert 'opencodex_sync_and_verify_lab "$url"' in opencodex_start_match.group(1)
 assert opencodex_start_match.group(1).index('url="$(opencodex_running_url') < opencodex_start_match.group(1).index('opencodex_sync_and_verify_lab "$url"')
 assert 'local attempt=1 max_attempts=3' in helper
@@ -1430,14 +1432,20 @@ assert "codex-shim install" not in opencodex_start_match.group(1)
 opencodex_dashboard_match = re.search(r"opencodex_dashboard\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
 assert opencodex_dashboard_match
 assert "127[.]0[.]0[.]1|localhost" in opencodex_dashboard_match.group(1)
-assert '"$OPENCODEX_OPEN_BIN" "$url"' in opencodex_dashboard_match.group(1)
+assert 'dashboard_base_url="${url/127.0.0.1/localhost}"' in opencodex_dashboard_match.group(1)
+assert 'dashboard_url="${dashboard_base_url}?codex_accounts=${dashboard_nonce}#dashboard"' in opencodex_dashboard_match.group(1)
+assert '"$OPENCODEX_OPEN_BIN" "$dashboard_url"' in opencodex_dashboard_match.group(1)
+assert "OPENCODEX_ADMIN_AUTH_TOKEN" not in opencodex_dashboard_match.group(1)
 assert '"$OPENCODEX_BIN" gui' not in opencodex_dashboard_match.group(1)
 opencodex_status_match = re.search(r"opencodex_status\(\) \{(.*?)\n\}", helper, flags=re.DOTALL)
 assert opencodex_status_match
 assert "printf '%s\\t%s\\t%s\\t%s\\n'" in opencodex_status_match.group(1)
 assert 'config["hostname"] = "127.0.0.1"' in helper
+assert 'config["port"] = port' in helper
 assert 'config["syncResumeHistory"] = False' in helper
 assert 'config["codexAutoStart"] = False' in helper
+assert 'config["codexShimAutoRestore"] = False' in helper
+assert 'OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0' in helper
 assert '"codexAccountMode": "direct"' in helper
 assert 'value.get("version") == expected_version' in helper
 assert "import fcntl" in helper
@@ -1568,6 +1576,12 @@ assert 'case clamshell = 2' in swift
 assert '/usr/bin/pmset -a disablesleep \\(value)' in swift
 assert 'keep-awake-clamshell-owned' in swift
 assert 'var ownsSystemSleepOverride: Bool' in swift
+assert 'ProcessInfo.processInfo.beginActivity(' in swift
+assert '.idleDisplaySleepDisabled' in swift
+assert '.idleSystemSleepDisabled' in swift
+assert 'ProcessInfo.processInfo.endActivity(' in swift
+assert 'process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")' not in swift
+assert 'process.arguments = ["-d", "-i", "-m", "-s"]' not in swift
 assert 'private struct KeepAwakeLevelSlider: View' in swift
 assert 'Slider(' in swift
 assert 'onEditingChanged:' in swift
@@ -1584,15 +1598,16 @@ assert 'tr("打開重新登入", "Open to sign in again")' in swift
 assert 'private func quotaUnavailableStatus(compact: Bool) -> some View' in swift
 assert 'tr("暫時未能取得用量", "Usage is temporarily unavailable")' in swift
 assert 'let isOpenCodexLab = profile.id == "opencodex-lab"' in swift
-assert 'enabled: !isOpenCodexLab && historyMode != .shared' in swift
+assert 'enabled: historyMode != .shared' in swift
+assert 'enabled: !isHistoryAnchor(profile) && historyMode != .privateOnly' in swift
 assert 'profile.id != "account1" && !isOpenCodexLab' in swift
 assert 'openCodexStatusRefreshPending = true' in swift
-assert 'Repair bundled 2.7.33' in swift
+assert 'Repair bundled 2.29.0' in swift
 assert 'private func prepareBundledOpenCodexIfNeeded()' in swift
 assert 'OpenCodex Models' in swift
 assert 'title: isOpenCodex ? "OpenCodex" : "Coding Plan"' in swift
-assert 'OpenCodex Lab uses an isolated local loopback proxy.' in swift
-assert '"version":"2.7.2"' in helper
+assert 'OpenCodex Lab uses an isolated local loopback proxy; local chats may be shared separately.' in swift
+assert '"version":"2.7.4"' in helper
 assert 'fetchLatestReleaseFromAPI' in swift
 assert 'fetchLatestReleaseFromWeb' in swift
 assert r'https://api.github.com/repos/\(owner)/\(repo)/releases/latest' in swift
@@ -1896,11 +1911,10 @@ while IFS= read -r private_header_file; do
   [[ ! -e "$private_header_file" ]]
 done < "$HEADER_PATH_LOG"
 
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.7.2" ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "72" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/macos/CodexAccounts/Info.plist")" == "2.7.4" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "74" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/macos/CodexAccounts/Info.plist")" == "14.0" ]]
-(cd "$OPENCODEX_HK_OVERLAY" && shasum -a 256 -c manifest.sha256 >/dev/null)
-grep -q 'opencodex-zh-hk' "$BUILD_SCRIPT"
+! grep -q 'opencodex-zh-hk' "$BUILD_SCRIPT"
 zsh "$ROOT/tests/test_opencodex_runtime_seed.zsh"
 
 echo "✅ Codex Accounts regression checks passed"

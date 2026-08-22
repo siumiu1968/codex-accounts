@@ -29,8 +29,6 @@ REQUIRED_CRITICAL_FILES = {
     "node_modules/@bitkyc08/opencodex/bin/ocx.mjs",
     "node_modules/bun/bin/bun.exe",
     "node_modules/@bitkyc08/opencodex/gui/dist/index.html",
-    "node_modules/@bitkyc08/opencodex/gui/dist/assets/index-Cgt7VoIY.js",
-    "node_modules/@bitkyc08/opencodex/gui/dist/assets/index-D6Fcl4yM.css",
 }
 
 
@@ -182,7 +180,7 @@ def load_seed(seed_dir: Path, version: str, arch: str, *, verify_archive: bool) 
         raise SeedError("OpenCodex third-party notice verification failed")
 
     critical = manifest.get("critical_files")
-    if not isinstance(critical, dict) or not REQUIRED_CRITICAL_FILES.issubset(critical):
+    if not isinstance(critical, dict) or set(critical) != REQUIRED_CRITICAL_FILES:
         raise SeedError("OpenCodex seed critical file list is incomplete")
     for relative, expected_hash in critical.items():
         if not isinstance(relative, str) or not isinstance(expected_hash, str) or not HEX_SHA256.fullmatch(expected_hash):
@@ -401,7 +399,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-dir", required=True, type=Path)
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--managed-root", type=Path)
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--version", default="2.29.0")
     parser.add_argument("--arch", required=True)
     return parser.parse_args()
 

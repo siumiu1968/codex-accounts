@@ -16,6 +16,14 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V2.7.4 更新介紹
+
+V2.7.4 內置 OpenCodex 2.29.0，並只限獨立 `opencodex-lab` Profile 使用固定本機 port `10100`；port 被佔用時會安全停止，普通 Profile 會保持 OpenAI 直連或原有自訂路由。Lab 可以明確選擇加入同一套本機共享對話，但登入、設定、本機記憶同代理路由仍然獨立。Dashboard 每次會取得新嘅短期本機 session，毋須輸入自動產生嘅管理員金鑰。新版 OpenCodex 已內置繁體中文介面，安裝包不再套用舊版香港繁體 overlay。
+
+### V2.7.3 更新介紹
+
+V2.7.3 加入低空間自動清理子 task：每分鐘以低成本檢查內置空間，少過 10 GB 先啟動，回升至約 20 GB 即停止。清理只會處理 agent 建立、已完成或已停止更新嘅舊子 task，保留主 task、每組最新子 task、用戶建立 task、仍被程序使用嘅資料，以及所有登入、Token 同設定；操作會寫入有限大小嘅本機記錄，避免再次無聲增長至爆滿。
+
 ### V2.7.2 更新介紹
 
 V2.7.2 加入完整冷熱分層儲存：可將舊 task 批量冷藏到 ORICO、批量還原、選擇七日以上或全選，並以 task 活躍狀態、檔案鎖同交易鎖避免搬動使用中資料。正式帳號可回復各自 OpenAI 登入直接連線；子程序輸出亦限制為最多 8 MB，避免 command output、quota refresh 或工具日誌長時間累積令 Codex Accounts 記憶體異常上升。版本同時保留 V2.7.1 嘅 GitHub API／網頁雙路更新檢查。
@@ -112,7 +120,7 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
 - 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
-- 內置 OpenCodex：受管理 Profile 可共用本機第三方模型供應商；OpenAI 仍保持逐 Profile 登入身份。
+- 內置 OpenCodex：只限獨立 `opencodex-lab` Profile；可選擇共享本機對話，登入、設定同代理路由保持獨立，普通 Profile 保持直連或原有自訂路由。
 - 輕量啟動與獨立同步：打開 profile 唔會被重型同步阻塞；本機記憶、rules、AGENTS 同外掛設定可用自動或手動同步。
 - 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間；「今日使用」只計 Codex 實際運行時間，睡眠同關機時間唔會計算。
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
@@ -196,6 +204,14 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V2.7.4 更新介绍
+
+V2.7.4 内置 OpenCodex 2.29.0，并只允许独立的 `opencodex-lab` Profile 使用固定本地端口 `10100`；端口被占用时会安全停止，普通 Profile 保持 OpenAI 直连或原有自定义路由。Lab 可明确加入同一套本地共享对话，但登录、设置、本地记忆和代理路由仍保持独立。Dashboard 每次都会取得新的短期本地 session，无需输入自动生成的管理员令牌。新版 OpenCodex 已内置繁体中文界面，安装包不再套用旧版香港繁体 overlay。
+
+### V2.7.3 更新介绍
+
+V2.7.3 加入低空间自动清理子 task：每分钟低成本检查内置空间，少于 10 GB 时启动，恢复至约 20 GB 后停止。清理只处理 agent 创建、已完成或已停止更新的旧子 task，保留主 task、每组最新子 task、用户创建的 task、仍被进程使用的数据，以及所有登录、Token 和设置；操作会写入限制大小的本地日志，避免存储空间再次无声增长至爆满。
 
 ### V2.7.2 更新介绍
 
@@ -293,7 +309,7 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
 - 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
-- 内置 OpenCodex：受管理 Profile 可共用本地第三方模型提供商；OpenAI 仍保持逐 Profile 登录身份。
+- 内置 OpenCodex：仅限独立的 `opencodex-lab` Profile；可选择共享本地对话，登录、设置和代理路由保持独立，普通 Profile 保持直连或原有自定义路由。
 - 轻量启动与独立同步：打开 profile 不会被重型同步阻塞；本地记忆、rules、AGENTS 和插件设置可自动或手动同步。
 - 用量显示：显示 5H / 1W 额度、百分比和恢复时间；“今日使用”只计算 Codex 实际运行时间，睡眠和关机时间不会计入。
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
@@ -377,6 +393,14 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V2.7.4 Update
+
+V2.7.4 bundles OpenCodex 2.29.0 for the isolated `opencodex-lab` profile only, using fixed loopback port `10100`. It fails closed when the port is busy, while regular profiles keep direct OpenAI access or their existing custom routes. The Lab may explicitly join shared local chats while sign-in, settings, local memory, and proxy routing remain isolated. Each Dashboard launch obtains a fresh short-lived loopback session, so the auto-generated raw admin token is not requested. OpenCodex now provides its own Traditional Chinese UI, so the legacy Hong Kong Chinese overlay is no longer packaged.
+
+### V2.7.3 Update
+
+V2.7.3 adds automatic low-disk child-task cleanup. The app performs a lightweight check every minute, starts only below 10 GB free, and stops after available space recovers to about 20 GB. Cleanup is limited to completed or stale agent-created child tasks while preserving main tasks, the newest child in each group, user-created tasks, files still in use, and all sign-in, token, and settings data. A size-limited local log records each cleanup without creating another unbounded storage source.
 
 ### V2.7.2 Update
 
@@ -474,7 +498,7 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
 - Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
-- Bundled OpenCodex: managed profiles can share locally configured third-party model providers while retaining per-profile OpenAI identity.
+- Bundled OpenCodex: available only in the isolated `opencodex-lab` profile; local chats may be shared while sign-in, settings, and proxy routing remain isolated, and regular profiles keep direct or existing custom routes.
 - Lightweight launch with independent sync: opening a profile is not blocked by heavy sync; local memory, rules, AGENTS, and plugin settings can sync automatically or on demand.
 - Usage meters: show 5H / 1W quota, percentage, and reset time; Today counts only actual Codex runtime and excludes sleep and offline time.
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.

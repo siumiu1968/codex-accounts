@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${OPENCODEX_VERSION:-2.7.33}"
+VERSION="${OPENCODEX_VERSION:-2.29.0}"
 ARCH="${OPENCODEX_SEED_ARCH:-$(uname -m)}"
 RUNTIME_PREFIX="${OPENCODEX_SOURCE_RUNTIME:-$HOME/Library/Application Support/Codex Accounts/OpenCodex/runtime}"
 NODE_MODULES="$RUNTIME_PREFIX/node_modules"
@@ -81,8 +81,6 @@ critical_paths = [
     "node_modules/@bitkyc08/opencodex/bin/ocx.mjs",
     "node_modules/bun/bin/bun.exe",
     "node_modules/@bitkyc08/opencodex/gui/dist/index.html",
-    "node_modules/@bitkyc08/opencodex/gui/dist/assets/index-Cgt7VoIY.js",
-    "node_modules/@bitkyc08/opencodex/gui/dist/assets/index-D6Fcl4yM.css",
 ]
 for relative in critical_paths:
     candidate = node_modules.parent / relative

@@ -263,11 +263,6 @@ def list_threads(args):
     rows = []
     for values in con.execute(f'SELECT {query_cols} FROM threads'):
         row = dict(zip(cols, values))
-        try:
-            if int(row.get("archived") or 0) != 0:
-                continue
-        except (TypeError, ValueError):
-            continue
         rollout = str(row.get("rollout_path") or "")
         if not rollout or not Path(rollout).exists():
             continue
@@ -1026,6 +1021,29 @@ def mark_thread_cold(home, thread_id):
         con.close()
 
 
+def mark_thread_hot(home, thread_id):
+    db_path = state_db_path(home)
+    if not db_path.exists():
+        return False
+    con = sqlite3.connect(db_path, timeout=8)
+    con.execute("PRAGMA busy_timeout=8000")
+    try:
+        columns = table_columns(con, "threads")
+        if "archived" not in columns:
+            raise sqlite3.Error(f"threads table cannot restore archived state in {db_path}")
+        present = con.execute("SELECT 1 FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if not present:
+            return False
+        con.execute("UPDATE threads SET archived = 0 WHERE id = ?", (thread_id,))
+        con.commit()
+        return True
+    except sqlite3.Error:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def restore_thread_row(home, row):
     if not row:
         return
@@ -1383,6 +1401,8 @@ def cold_restore(args):
     result = import_package(import_args)
     if result != 0:
         return result
+    for _, home in targets:
+        mark_thread_hot(home, args.thread_id)
     entry["status"] = "restored"
     entry["local_removed"] = False
     entry["restored_at"] = utc_now().isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1462,11 +1482,6 @@ def cold_candidates(args):
         row = dict(zip(columns, values))
         thread_id = str(row.get("id") or "")
         if not thread_id or thread_id in protected:
-            continue
-        try:
-            if int(row.get("archived") or 0) != 0:
-                continue
-        except (TypeError, ValueError):
             continue
         rollout = Path(str(row.get("rollout_path") or "")).expanduser()
         if not rollout.is_file():

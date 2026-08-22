@@ -162,7 +162,8 @@ ALIYUN_CODING_PLAN_BASE_URL="${ALIYUN_CODING_PLAN_BASE_URL:-https://coding.dashs
 CODEX_BUNDLED_NODE_BIN="${CODEX_BUNDLED_NODE_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
 CODEX_BUNDLED_NPM_BIN="${CODEX_BUNDLED_NPM_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/npm}"
 OPENCODEX_PACKAGE="@bitkyc08/opencodex"
-OPENCODEX_VERSION="2.7.33"
+OPENCODEX_VERSION="2.29.0"
+OPENCODEX_PORT="${OPENCODEX_PORT:-10100}"
 OPENCODEX_LAB_ACCOUNT="opencodex-lab"
 OPENCODEX_LAB_CODEX_HOME="${OPENCODEX_LAB_CODEX_HOME:-$ACCOUNTS_ROOT/$OPENCODEX_LAB_ACCOUNT}"
 OPENCODEX_LAB_APP_DATA="${OPENCODEX_LAB_APP_DATA:-$APP_DATA_ROOT/$OPENCODEX_LAB_ACCOUNT}"
@@ -196,13 +197,8 @@ SCRIPT_DIR="${0:A:h}"
 OPENCODEX_RUNTIME_SEED_DIR="${OPENCODEX_RUNTIME_SEED_DIR:-}"
 OPENCODEX_RUNTIME_SEED_HELPER="${OPENCODEX_RUNTIME_SEED_HELPER:-$SCRIPT_DIR/opencodex_runtime_seed.py}"
 OPENCODEX_RUNTIME_ARCH="${OPENCODEX_RUNTIME_ARCH:-$(uname -m)}"
-OPENCODEX_HK_GUI_OVERLAY_DIR="${OPENCODEX_HK_GUI_OVERLAY_DIR:-}"
-OPENCODEX_HK_GUI_INDEX_SHA256="6378a09aedf2ee6e884e1eddc40620c335a0039bdc9ab59c7348b26a3c39b29c"
-OPENCODEX_HK_GUI_JS_NAME="index-Cgt7VoIY.js"
-OPENCODEX_HK_GUI_JS_SHA256="c149306ad9aeb9aeaa07f7bd7f117bd02b0c0d261482a025389859196f771c08"
-OPENCODEX_HK_GUI_CSS_NAME="index-D6Fcl4yM.css"
-OPENCODEX_HK_GUI_CSS_SHA256="bfd8420ec02a19a72e07be650f2da8fb256fbc2390af047b75b38ebf1ae3f742"
 CODEX_SHARE_HELPER="${CODEX_SHARE_HELPER:-$SCRIPT_DIR/codex_share_package.py}"
+CODEX_AUTO_CHILD_PRUNE_HELPER="${CODEX_AUTO_CHILD_PRUNE_HELPER:-$SCRIPT_DIR/auto_prune_child_tasks.py}"
 COLD_STORAGE_INDEX_FILE="${COLD_STORAGE_INDEX_FILE:-$APP_DATA_ROOT/Tiered Storage/cold-index.json}"
 
 SYNC_ITEMS=(
@@ -248,6 +244,7 @@ Usage:
   scripts/codex_multi_account.zsh opencodex-dashboard
   scripts/codex_multi_account.zsh opencodex-launch
   scripts/codex_multi_account.zsh opencodex-enable-all-profiles
+  scripts/codex_multi_account.zsh opencodex-disable-profile-routes
   scripts/codex_multi_account.zsh delete-account <account-name>
   scripts/codex_multi_account.zsh link-history <account-name>
   scripts/codex_multi_account.zsh unlink-history <account-name>
@@ -265,6 +262,7 @@ Usage:
   scripts/codex_multi_account.zsh list-cold-archives
   scripts/codex_multi_account.zsh restore-thread-cold <thread-id>
   scripts/codex_multi_account.zsh restore-threads-cold <thread-id>...
+  scripts/codex_multi_account.zsh auto-prune-child-tasks
   scripts/codex_multi_account.zsh link-all-history
   CODEX_SYNC_PLUGIN_PAYLOADS=1 scripts/codex_multi_account.zsh sync-once
   scripts/codex_multi_account.zsh link-account2-history
@@ -287,7 +285,8 @@ OpenCodex Lab:
   - Uses only $HOME/.codex-accounts/opencodex-lab for Codex data.
   - Uses only "$HOME/Library/Application Support/Codex Accounts/OpenCodex/state"
     for OpenCodex state, with a managed npm runtime and fake HOME beside it.
-  - Version is pinned to @bitkyc08/opencodex@2.7.33.
+  - Version is pinned to @bitkyc08/opencodex@2.29.0.
+  - The loopback port is fixed at 10100 by default (override with OPENCODEX_PORT).
   - It never installs an OpenCodex service or Codex shim.
   - The dashboard is loopback-only; no remote management token is created.
 
@@ -359,15 +358,19 @@ require_rsync() {
 lsof_quick() {
   command -v lsof >/dev/null 2>&1 || return 1
 
-  local pid waited max_waits wait_interval command_rc
-  max_waits="${CODEX_ACTIVE_DB_LSOF_MAX_WAITS:-10}"
+  local pid waited max_waits wait_interval command_rc process_state
+  # Loaded Macs can take slightly over 0.5s to answer lsof for SQLite sidecars.
+  # Keep the check bounded, but avoid treating a routine probe as an active writer.
+  max_waits="${CODEX_ACTIVE_DB_LSOF_MAX_WAITS:-40}"
   wait_interval="${CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS:-0.05}"
 
-  lsof "$@" >/dev/null 2>&1 &
+  lsof -t "$@" >/dev/null 2>&1 &
   pid=$!
   waited=0
 
   while kill -0 "$pid" 2>/dev/null; do
+    process_state="$(ps -p "$pid" -o state= 2>/dev/null | tr -d '[:space:]')"
+    [[ -z "$process_state" || "$process_state" == Z* ]] && break
     if (( waited >= max_waits )); then
       pkill -TERM -P "$pid" 2>/dev/null || true
       kill -TERM "$pid" 2>/dev/null || true
@@ -387,14 +390,19 @@ lsof_quick() {
 }
 
 active_sqlite_homes_payload() {
-  local home_dir db_name db_path lsof_status
+  local home_dir db_name db_path candidate lsof_status
+  local -a db_candidates
   local -A seen
   for home_dir in "$@"; do
     [[ -n "$home_dir" && -z "${seen[$home_dir]:-}" ]] || continue
     for db_name in "state_5.sqlite" "sqlite/state_5.sqlite" "goals_1.sqlite"; do
       db_path="$home_dir/$db_name"
-      [[ -e "$db_path" || -e "$db_path-wal" || -e "$db_path-shm" ]] || continue
-      if lsof_quick "$db_path" "$db_path-wal" "$db_path-shm"; then
+      db_candidates=()
+      for candidate in "$db_path" "$db_path-wal" "$db_path-shm"; do
+        [[ -e "$candidate" ]] && db_candidates+=("$candidate")
+      done
+      (( ${#db_candidates[@]} > 0 )) || continue
+      if lsof_quick "${db_candidates[@]}"; then
         lsof_status=0
       else
         lsof_status=$?
@@ -533,6 +541,7 @@ run_opencodex_lab() {
     HOME="$OPENCODEX_FAKE_HOME" \
     CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME" \
     OPENCODEX_HOME="$OPENCODEX_STATE_DIR" \
+    OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0 \
     NPM_CONFIG_PREFIX="$OPENCODEX_NPM_PREFIX" \
     npm_config_prefix="$OPENCODEX_NPM_PREFIX" \
     npm_config_cache="$OPENCODEX_ROOT/npm-cache" \
@@ -668,13 +677,16 @@ PY
 }
 
 write_safe_opencodex_lab_config() {
-  OPENCODEX_CONFIG_PATH="$OPENCODEX_STATE_DIR/config.json" python3 - <<'PY'
+  validate_opencodex_port || return 1
+  OPENCODEX_CONFIG_PATH="$OPENCODEX_STATE_DIR/config.json" \
+  OPENCODEX_CONFIG_PORT="$OPENCODEX_PORT" python3 - <<'PY'
 import json
 import os
 import tempfile
 from pathlib import Path
 
 path = Path(os.environ["OPENCODEX_CONFIG_PATH"])
+port = int(os.environ["OPENCODEX_CONFIG_PORT"])
 path.parent.mkdir(parents=True, exist_ok=True)
 if path.is_symlink():
     raise SystemExit(f"Refusing OpenCodex config symlink: {path}")
@@ -705,13 +717,12 @@ providers["openai"] = openai
 config["providers"] = providers
 if not isinstance(config.get("defaultProvider"), str) or config["defaultProvider"] not in providers:
     config["defaultProvider"] = "openai"
-port = config.get("port")
-if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-    config["port"] = 10100
+config["port"] = port
 config["hostname"] = "127.0.0.1"
 config["openaiProviderTierVersion"] = 2
 config["syncResumeHistory"] = False
 config["codexAutoStart"] = False
+config["codexShimAutoRestore"] = False
 config.setdefault("websockets", False)
 claude = config.get("claudeCode")
 if not isinstance(claude, dict):
@@ -742,6 +753,13 @@ finally:
 PY
 }
 
+validate_opencodex_port() {
+  [[ "$OPENCODEX_PORT" == <-> && "$OPENCODEX_PORT" -ge 1 && "$OPENCODEX_PORT" -le 65535 ]] || {
+    echo "OPENCODEX_PORT must be an integer from 1 to 65535." >&2
+    return 2
+  }
+}
+
 prepare_opencodex_lab() {
   prepare_opencodex_lab_dirs
   write_safe_opencodex_lab_config
@@ -769,32 +787,6 @@ require_opencodex_lab_install() {
     echo "OpenCodex Lab requires $OPENCODEX_PACKAGE@$OPENCODEX_VERSION; run opencodex-install first." >&2
     return 1
   fi
-}
-
-opencodex_hk_gui_overlay_dir() {
-  local candidate
-  if [[ -n "$OPENCODEX_HK_GUI_OVERLAY_DIR" ]]; then
-    [[ -d "$OPENCODEX_HK_GUI_OVERLAY_DIR" && ! -L "$OPENCODEX_HK_GUI_OVERLAY_DIR" ]] || return 1
-    printf '%s\n' "$OPENCODEX_HK_GUI_OVERLAY_DIR"
-    return 0
-  fi
-  for candidate in \
-    "$SCRIPT_DIR/opencodex-zh-hk/$OPENCODEX_VERSION" \
-    "$SCRIPT_DIR/../resources/opencodex-zh-hk/$OPENCODEX_VERSION"; do
-    [[ -d "$candidate" && ! -L "$candidate" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
-}
-
-opencodex_sha256_matches() {
-  local path="$1"
-  local expected="$2"
-  local actual
-  [[ -f "$path" && ! -L "$path" ]] || return 1
-  actual="$(/usr/bin/shasum -a 256 "$path" 2>/dev/null | /usr/bin/awk '{print $1}')"
-  [[ "$actual" == "$expected" ]]
 }
 
 opencodex_runtime_seed_dir() {
@@ -858,76 +850,37 @@ if package_root.resolve(strict=False) != expected_root.resolve(strict=False):
     raise SystemExit(f"Refusing unexpected OpenCodex package path: {package_root}")
 if package_json.resolve(strict=False) != (expected_root / "package.json").resolve(strict=False):
     raise SystemExit(f"Refusing unexpected OpenCodex package metadata path: {package_json}")
-dist = package_root / "gui" / "dist"
+gui = package_root / "gui"
+dist = gui / "dist"
+index = dist / "index.html"
 assets = dist / "assets"
-for candidate in (package_root, package_json, package_root / "gui", dist, assets):
+for candidate in (package_root, package_json, gui, dist, index, assets):
     if candidate.is_symlink():
         raise SystemExit(f"Refusing OpenCodex GUI symlink path: {candidate}")
-if assets.exists():
+if not package_root.is_dir() or not gui.is_dir() or not dist.is_dir():
+    raise SystemExit(f"OpenCodex GUI directory is missing: {dist}")
+if not package_json.is_file() or not index.is_file():
+    raise SystemExit("OpenCodex package metadata or GUI index is not a regular file")
+for candidate in (package_json, index):
     try:
-        assets.resolve(strict=False).relative_to(dist.resolve(strict=False))
+        candidate.resolve(strict=True).relative_to(package_root.resolve(strict=True))
+    except ValueError:
+        raise SystemExit(f"Refusing OpenCodex GUI path escape: {candidate}")
+if assets.exists():
+    if not assets.is_dir():
+        raise SystemExit(f"OpenCodex GUI assets is not a directory: {assets}")
+    try:
+        assets.resolve(strict=True).relative_to(dist.resolve(strict=True))
     except ValueError:
         raise SystemExit(f"Refusing OpenCodex assets path outside GUI dist: {assets}")
 PY
-}
-
-opencodex_hk_gui_is_current() {
-  local dist="$OPENCODEX_PACKAGE_ROOT/gui/dist"
-  validate_opencodex_gui_target >/dev/null 2>&1 || return 1
-  opencodex_sha256_matches "$dist/index.html" "$OPENCODEX_HK_GUI_INDEX_SHA256" || return 1
-  opencodex_sha256_matches "$dist/assets/$OPENCODEX_HK_GUI_JS_NAME" "$OPENCODEX_HK_GUI_JS_SHA256" || return 1
-  opencodex_sha256_matches "$dist/assets/$OPENCODEX_HK_GUI_CSS_NAME" "$OPENCODEX_HK_GUI_CSS_SHA256"
-}
-
-opencodex_apply_hk_gui() {
-  local overlay dist rel source target tmp expected
-  require_opencodex_lab_install || return 1
-  validate_opencodex_gui_target || return 1
-  overlay="$(opencodex_hk_gui_overlay_dir 2>/dev/null || true)"
-  if [[ -z "$overlay" ]]; then
-    echo "OpenCodex Hong Kong Chinese interface files are missing." >&2
-    return 1
-  fi
-
-  opencodex_sha256_matches "$overlay/index.html" "$OPENCODEX_HK_GUI_INDEX_SHA256" || {
-    echo "OpenCodex Hong Kong Chinese index verification failed." >&2
-    return 1
-  }
-  opencodex_sha256_matches "$overlay/assets/$OPENCODEX_HK_GUI_JS_NAME" "$OPENCODEX_HK_GUI_JS_SHA256" || {
-    echo "OpenCodex Hong Kong Chinese script verification failed." >&2
-    return 1
-  }
-  opencodex_sha256_matches "$overlay/assets/$OPENCODEX_HK_GUI_CSS_NAME" "$OPENCODEX_HK_GUI_CSS_SHA256" || {
-    echo "OpenCodex Hong Kong Chinese style verification failed." >&2
-    return 1
-  }
-
-  dist="$OPENCODEX_PACKAGE_ROOT/gui/dist"
-  mkdir -p "$dist/assets"
-  for rel expected in \
-    "index.html" "$OPENCODEX_HK_GUI_INDEX_SHA256" \
-    "assets/$OPENCODEX_HK_GUI_JS_NAME" "$OPENCODEX_HK_GUI_JS_SHA256" \
-    "assets/$OPENCODEX_HK_GUI_CSS_NAME" "$OPENCODEX_HK_GUI_CSS_SHA256"; do
-    source="$overlay/$rel"
-    target="$dist/$rel"
-    [[ ! -L "$target" ]] || {
-      echo "Refusing OpenCodex GUI symlink target: $target" >&2
-      return 1
-    }
-    tmp="${target}.codex-accounts.$$"
-    cp "$source" "$tmp"
-    chmod 644 "$tmp"
-    mv "$tmp" "$target"
-    opencodex_sha256_matches "$target" "$expected" || return 1
-  done
-  opencodex_hk_gui_is_current
 }
 
 opencodex_runtime_values() {
   local runtime_file="$OPENCODEX_STATE_DIR/runtime-port.json"
   validate_opencodex_lab_paths >/dev/null 2>&1 || return 1
   [[ -f "$runtime_file" && ! -L "$runtime_file" ]] || return 1
-  python3 - "$runtime_file" <<'PY' 2>/dev/null
+  python3 - "$runtime_file" "$OPENCODEX_PORT" <<'PY' 2>/dev/null
 import json
 import sys
 from pathlib import Path
@@ -935,14 +888,30 @@ from pathlib import Path
 state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 pid = state.get("pid")
 port = state.get("port")
+expected_port = int(sys.argv[2])
 hostname = state.get("hostname") or "127.0.0.1"
 if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
     raise SystemExit(1)
 if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
     raise SystemExit(1)
+if port != expected_port:
+    raise SystemExit(1)
 if hostname not in {"127.0.0.1", "localhost", "::1", "[::1]"}:
     raise SystemExit(1)
 print(f"{pid}\t{port}")
+PY
+}
+
+opencodex_port_is_busy() {
+  validate_opencodex_port || return $?
+  python3 - "$OPENCODEX_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(0.2)
+    raise SystemExit(0 if sock.connect_ex(("127.0.0.1", port)) == 0 else 1)
 PY
 }
 
@@ -1282,30 +1251,20 @@ opencodex_status() {
 }
 
 opencodex_install() {
-  local npm_bin node_bin managed_path installed_version running_url="" restart_after_patch=0 seed_dir=""
+  local npm_bin node_bin managed_path installed_version running_url="" restart_after_install=0 seed_dir=""
   prepare_opencodex_lab || return 1
   seed_dir="$(opencodex_runtime_seed_dir 2>/dev/null || true)"
   installed_version="$(opencodex_installed_version 2>/dev/null || true)"
   if [[ "$installed_version" == "$OPENCODEX_VERSION" ]]; then
     if [[ -z "$seed_dir" ]] || opencodex_runtime_matches_seed "$seed_dir"; then
-      if ! opencodex_hk_gui_is_current; then
-        running_url="$(opencodex_running_url 2>/dev/null || true)"
-        if [[ -n "$running_url" ]]; then
-          restart_after_patch=1
-          opencodex_stop >/dev/null
-        fi
-        opencodex_apply_hk_gui || return 1
-        if (( restart_after_patch == 1 )); then
-          opencodex_start >/dev/null
-        fi
-      fi
+      validate_opencodex_gui_target || return 1
       echo "OpenCodex Lab $OPENCODEX_VERSION is already installed."
       return 0
     fi
 
     running_url="$(opencodex_running_url 2>/dev/null || true)"
     if [[ -n "$running_url" ]]; then
-      restart_after_patch=1
+      restart_after_install=1
       opencodex_stop >/dev/null
     fi
   elif [[ -x "$OPENCODEX_BIN" ]]; then
@@ -1322,8 +1281,8 @@ opencodex_install() {
       echo "Bundled OpenCodex runtime install verification failed (found ${installed_version:-unknown})." >&2
       return 1
     fi
-    opencodex_apply_hk_gui || return 1
-    if (( restart_after_patch == 1 )); then
+    validate_opencodex_gui_target || return 1
+    if (( restart_after_install == 1 )); then
       opencodex_start >/dev/null
     fi
     echo "Installed bundled OpenCodex Lab $installed_version (offline seed)."
@@ -1332,17 +1291,7 @@ opencodex_install() {
 
   echo "Bundled OpenCodex runtime is unavailable for $OPENCODEX_RUNTIME_ARCH; falling back to npm." >&2
   if [[ "$installed_version" == "$OPENCODEX_VERSION" ]]; then
-    if ! opencodex_hk_gui_is_current; then
-      running_url="$(opencodex_running_url 2>/dev/null || true)"
-      if [[ -n "$running_url" ]]; then
-        restart_after_patch=1
-        opencodex_stop >/dev/null
-      fi
-      opencodex_apply_hk_gui || return 1
-      if (( restart_after_patch == 1 )); then
-        opencodex_start >/dev/null
-      fi
-    fi
+    validate_opencodex_gui_target || return 1
     echo "OpenCodex Lab $OPENCODEX_VERSION is already installed."
     return 0
   fi
@@ -1358,6 +1307,7 @@ opencodex_install() {
     HOME="$OPENCODEX_FAKE_HOME" \
     CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME" \
     OPENCODEX_HOME="$OPENCODEX_STATE_DIR" \
+    OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0 \
     NPM_CONFIG_PREFIX="$OPENCODEX_NPM_PREFIX" \
     npm_config_prefix="$OPENCODEX_NPM_PREFIX" \
     npm_config_cache="$OPENCODEX_ROOT/npm-cache" \
@@ -1377,7 +1327,7 @@ opencodex_install() {
     echo "OpenCodex Lab install verification failed (found ${installed_version:-unknown})." >&2
     return 1
   fi
-  opencodex_apply_hk_gui || return 1
+  validate_opencodex_gui_target || return 1
   echo "Installed OpenCodex Lab $installed_version."
 }
 
@@ -1397,10 +1347,7 @@ opencodex_start() {
 
   url="$(opencodex_running_url 2>/dev/null || true)"
   if [[ -n "$url" ]]; then
-    opencodex_hk_gui_is_current || {
-      echo "OpenCodex Hong Kong Chinese interface needs repair. Stop the proxy and run opencodex-install." >&2
-      return 1
-    }
+    validate_opencodex_gui_target || return 1
     if ! opencodex_sync_and_verify_lab "$url"; then
       run_opencodex_lab "$OPENCODEX_BIN" stop >>"$log_file" 2>&1 || true
       remove_all_opencodex_profile_routes >/dev/null 2>&1 || true
@@ -1410,17 +1357,22 @@ opencodex_start() {
     return 0
   fi
 
-  opencodex_apply_hk_gui || return 1
+  validate_opencodex_gui_target || return 1
+  if opencodex_port_is_busy; then
+    echo "OpenCodex Lab port $OPENCODEX_PORT is already in use; refusing to choose another port." >&2
+    return 1
+  fi
 
   /usr/bin/nohup /usr/bin/env \
     HOME="$OPENCODEX_FAKE_HOME" \
     CODEX_HOME="$OPENCODEX_LAB_CODEX_HOME" \
     OPENCODEX_HOME="$OPENCODEX_STATE_DIR" \
+    OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0 \
     NPM_CONFIG_PREFIX="$OPENCODEX_NPM_PREFIX" \
     npm_config_prefix="$OPENCODEX_NPM_PREFIX" \
     npm_config_cache="$OPENCODEX_ROOT/npm-cache" \
     PATH="$managed_path" \
-    "$OPENCODEX_BIN" start >>"$log_file" 2>&1 </dev/null &
+    "$OPENCODEX_BIN" start --port "$OPENCODEX_PORT" >>"$log_file" 2>&1 </dev/null &
   launcher_pid=$!
   disown "$launcher_pid" >/dev/null 2>&1 || true
 
@@ -1463,7 +1415,7 @@ opencodex_restore() {
 }
 
 opencodex_dashboard() {
-  local url
+  local url dashboard_base_url dashboard_nonce dashboard_url
   url="$(opencodex_running_url 2>/dev/null || true)"
   if [[ ! "$url" =~ '^http://(127[.]0[.]0[.]1|localhost):[0-9]+/$' ]]; then
     echo "OpenCodex Lab is not running on a verified loopback URL." >&2
@@ -1473,15 +1425,18 @@ opencodex_dashboard() {
     echo "open command was not found." >&2
     return 1
   }
-  "$OPENCODEX_OPEN_BIN" "$url"
+  # A unique, non-secret URL forces the browser to load a fresh loopback GUI
+  # session instead of focusing a stale tab and prompting for the raw admin token.
+  dashboard_base_url="${url/127.0.0.1/localhost}"
+  dashboard_nonce="$(date '+%s')-$RANDOM"
+  dashboard_url="${dashboard_base_url}?codex_accounts=${dashboard_nonce}#dashboard"
+  "$OPENCODEX_OPEN_BIN" "$dashboard_url"
 }
 
 opencodex_launch() {
   opencodex_start >/dev/null
   OPENCODEX_LAB_LAUNCH_VERIFIED=1 \
   CODEX_PRELAUNCH_SYNC=0 \
-  CODEX_SHARED_SESSIONS=0 \
-  CODEX_SYNC_THREAD_HISTORY=0 \
     launch_account "$OPENCODEX_LAB_ACCOUNT" "OpenCodex Lab"
 }
 
@@ -1961,9 +1916,8 @@ home_uses_opencodex_proxy() {
   [[ "${home_dir:A}" == "${OPENCODEX_LAB_CODEX_HOME:A}" ]]
 }
 
-# This is deliberately separate from home_uses_opencodex_proxy(): ordinary
-# managed profiles only route model requests through the shared loopback proxy.
-# They keep their own auth and their existing private/shared history mode.
+# Compatibility scope for finding and removing routes created by older builds.
+# New builds never enable OpenCodex routing for an ordinary profile.
 profile_uses_opencodex_routing() {
   local home_dir="$1"
   is_primary_codex_home "$home_dir" && return 1
@@ -2494,30 +2448,16 @@ ensure_opencodex_available_for_profiles() {
   fi
 }
 
+opencodex_disable_profile_routes() {
+  remove_all_opencodex_profile_routes
+  echo "OpenCodex routing is disabled for regular profiles; only opencodex-lab may use the loopback proxy."
+}
+
 opencodex_enable_all_profiles() {
-  local raw_name raw_home raw_app_data name home_dir configured=0 failed=0
-  ensure_dirs
-  ensure_opencodex_available_for_profiles || return 1
-  prepare_opencodex_cli_wrapper >/dev/null || return 1
-  while IFS='|' read -r raw_name raw_home raw_app_data; do
-    name="$(printf '%s' "$raw_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    home_dir="$(printf '%s' "$raw_home" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [[ -n "$name" && -d "$home_dir" ]] || continue
-    profile_uses_opencodex_routing "$home_dir" || continue
-    if configure_opencodex_routing_for_home "$home_dir"; then
-      if [[ -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]] \
-        && ! profile_has_user_owned_model_routing "$home_dir"; then
-        configured=$(( configured + 1 ))
-      fi
-    else
-      failed=$(( failed + 1 ))
-    fi
-  done < <(list_accounts)
-  if (( failed > 0 )); then
-    echo "OpenCodex routing failed for $failed managed profile(s)." >&2
-    return 1
-  fi
-  echo "OpenCodex routing is enabled for $configured managed profile(s)."
+  # Compatibility fail-safe for older UI builds. Cross-profile loopback
+  # routing is intentionally disabled because it makes regular profiles depend
+  # on the OpenCodex process and can disconnect active OpenAI sessions.
+  opencodex_disable_profile_routes
 }
 
 ensure_aliyun_coding_plan_bridge_running() {
@@ -2828,11 +2768,6 @@ history_mode_for_home() {
   local account_home="$1"
   local marker mode
 
-  if home_uses_opencodex_proxy "$account_home"; then
-    printf '%s\n' "private"
-    return 0
-  fi
-
   if is_history_anchor_home "$account_home"; then
     printf '%s\n' "shared"
     return 0
@@ -2867,11 +2802,6 @@ set_history_mode_for_home() {
       ;;
   esac
 
-  if home_uses_opencodex_proxy "$account_home" && [[ "$mode" != "private" ]]; then
-    echo "OpenCodex Lab history is permanently private." >&2
-    return 2
-  fi
-
   mkdir -p "$account_home"
   marker="$(history_mode_marker_for_home "$account_home")"
   if is_history_anchor_home "$account_home"; then
@@ -2899,6 +2829,17 @@ shared_history_homes() {
     [[ -n "$account_home" ]] || continue
     mode="$(history_mode_for_home "$account_home")"
     [[ "$mode" == "shared" ]] && printf '%s\n' "$account_home"
+  done
+}
+
+# OpenCodex Lab may share only the three portable chat-history paths. Keep its
+# memory, config, plugin payloads, authentication, and proxy routing isolated.
+non_opencodex_payload_homes() {
+  local home_dir
+  for home_dir in "$@"; do
+    [[ -n "$home_dir" ]] || continue
+    home_uses_opencodex_proxy "$home_dir" && continue
+    printf '%s\n' "$home_dir"
   done
 }
 
@@ -3647,7 +3588,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.7.2"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.7.4"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -4265,23 +4206,24 @@ sync_fast_plugin_payloads_direct() {
 }
 
 sync_memory_and_config_for_homes() {
-  local -a homes history_homes
+  local -a homes payload_homes history_homes
   homes=("$@")
   (( ${#homes[@]} > 0 )) || return 0
+  payload_homes=("${(@f)$(non_opencodex_payload_homes "${homes[@]}")}")
 
-  local home_dir
+  local home_dir item
   for item in "${SYNC_ITEMS[@]}"; do
-    for home_dir in "${homes[@]}"; do
+    for home_dir in "${payload_homes[@]}"; do
       [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_to_shared "$home_dir" "$item"
     done
-    for home_dir in "${homes[@]}"; do
+    for home_dir in "${payload_homes[@]}"; do
       [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_from_shared "$home_dir" "$item"
     done
   done
-  if [[ "$CODEX_SYNC_PLUGIN_CONFIG" == "1" ]]; then
-    sync_plugin_config_entries "${homes[@]}"
+  if [[ "$CODEX_SYNC_PLUGIN_CONFIG" == "1" && ${#payload_homes[@]} -gt 0 && -n "${payload_homes[1]:-}" ]]; then
+    sync_plugin_config_entries "${payload_homes[@]}"
   fi
   history_homes=("${(@f)$(shared_history_homes "${homes[@]}")}")
   if (( ${#history_homes[@]} > 0 )) && [[ -n "${history_homes[1]:-}" ]]; then
@@ -4293,7 +4235,7 @@ sync_memory_and_config_to_selected_homes() {
   local dest_count="$1"
   shift || true
 
-  local -a dest_homes source_homes
+  local -a dest_homes source_homes payload_dest_homes payload_source_homes
   local i home_dir item
   dest_homes=()
   for (( i = 1; i <= dest_count; i++ )); do
@@ -4303,25 +4245,28 @@ sync_memory_and_config_to_selected_homes() {
   done
   source_homes=("$@")
   (( ${#dest_homes[@]} > 0 && ${#source_homes[@]} > 0 )) || return 0
+  payload_dest_homes=("${(@f)$(non_opencodex_payload_homes "${dest_homes[@]}")}")
+  payload_source_homes=("${(@f)$(non_opencodex_payload_homes "${source_homes[@]}")}")
+  (( ${#payload_dest_homes[@]} > 0 && ${#payload_source_homes[@]} > 0 )) || return 0
 
   for item in "${SYNC_ITEMS[@]}"; do
-    for home_dir in "${source_homes[@]}"; do
+    for home_dir in "${payload_source_homes[@]}"; do
       [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_to_shared "$home_dir" "$item"
     done
-    for home_dir in "${dest_homes[@]}"; do
+    for home_dir in "${payload_dest_homes[@]}"; do
       [[ "$item" != "memories" || "$(history_mode_for_home "$home_dir")" != "private" ]] || continue
       rsync_item_from_shared "$home_dir" "$item"
     done
   done
   if [[ "$CODEX_SYNC_PLUGIN_CONFIG" == "1" ]]; then
-    sync_plugin_config_entries_to_selected_homes "$dest_count" "${dest_homes[@]}" "${source_homes[@]}"
+    sync_plugin_config_entries_to_selected_homes "${#payload_dest_homes[@]}" "${payload_dest_homes[@]}" "${payload_source_homes[@]}"
   fi
 }
 
 sync_plugin_payloads_for_homes() {
   local -a homes
-  homes=("$@")
+  homes=("${(@f)$(non_opencodex_payload_homes "$@")}")
   (( ${#homes[@]} > 0 )) || return 0
 
   if [[ "$CODEX_SYNC_PLUGIN_PAYLOADS" == "1" ]]; then
@@ -6098,9 +6043,6 @@ launch_account() {
   fi
   if home_uses_opencodex_proxy "$home_dir"; then
     validate_opencodex_lab_paths || return 1
-    set_history_mode_for_home "$home_dir" private || return 1
-    CODEX_SHARED_SESSIONS=0
-    CODEX_SYNC_THREAD_HISTORY=0
   fi
   mkdir -p "$home_dir" "$app_data"
 
@@ -6137,32 +6079,16 @@ launch_account() {
       return 1
     }
   else
+    if [[ -e "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]]; then
+      remove_opencodex_routing_for_home "$home_dir" || {
+        echo "Could not restore the regular profile's direct OpenAI route." >&2
+        return 1
+      }
+    fi
     if profile_has_user_owned_model_routing "$home_dir"; then
       preserve_user_model_route=1
-    elif profile_uses_opencodex_routing "$home_dir"; then
-      if ! ensure_opencodex_available_for_profiles; then
-        remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
-        echo "OpenCodex could not be prepared; refusing to launch with a dead loopback route." >&2
-        return 1
-      fi
-      if ! configure_opencodex_routing_for_home "$home_dir"; then
-        remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
-        echo "OpenCodex routing could not be configured safely; profile was not launched." >&2
-        return 1
-      fi
-      if profile_has_user_owned_model_routing "$home_dir" \
-        || [[ ! -f "$home_dir/$OPENCODEX_PROFILE_ROUTE_MARKER" ]]; then
-        # The config may have changed between the first read and the atomic
-        # route update. Preserve it instead of forcing defaults or a CLI shim.
-        preserve_user_model_route=1
-      else
-        restore_non_account1_openai_config_for_home "$home_dir"
-        opencodex_cli_wrapper="$(prepare_opencodex_cli_wrapper)" || {
-          remove_opencodex_routing_for_home "$home_dir" >/dev/null 2>&1 || true
-          echo "OpenCodex CLI routing could not be prepared safely; profile was not launched." >&2
-          return 1
-        }
-      fi
+    else
+      restore_non_account1_openai_config_for_home "$home_dir"
     fi
   fi
   if ! home_uses_opencodex_proxy "$home_dir" && (( preserve_user_model_route == 0 )); then
@@ -6658,11 +6584,6 @@ link_history_for_unlocked() {
   CODEX_SHARED_SESSIONS=1
   local account_home current_mode
   account_home="$(account_home_for "$name")"
-
-  if home_uses_opencodex_proxy "$account_home"; then
-    echo "OpenCodex Lab cannot use shared local history." >&2
-    return 2
-  fi
 
   if profile_transition_is_busy "$name" "$account_home"; then
     echo "Close this Codex profile and wait for its app-server/database writes before sharing local history." >&2
@@ -8573,13 +8494,61 @@ run_codex_share_helper() {
   python3 "$CODEX_SHARE_HELPER" "$@"
 }
 
+auto_prune_child_tasks_unlocked() {
+  if [[ ! -f "$CODEX_AUTO_CHILD_PRUNE_HELPER" ]]; then
+    echo "Auto child-task cleanup helper not found: $CODEX_AUTO_CHILD_PRUNE_HELPER" >&2
+    return 1
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    echo "python3 is required for automatic child-task cleanup." >&2
+    return 1
+  }
+  CODEX_AUTO_PRUNE_ACCOUNTS_ROOT="$ACCOUNTS_ROOT" \
+  CODEX_AUTO_PRUNE_APP_DATA_ROOT="$APP_DATA_ROOT" \
+  SHARED_HISTORY_ROOT="$SHARED_HISTORY_ROOT" \
+  SHARED_SESSIONS_DIR="$SHARED_SESSIONS_DIR" \
+  SHARED_SESSION_INDEX_FILE="$SHARED_SESSION_INDEX_FILE" \
+    python3 "$CODEX_AUTO_CHILD_PRUNE_HELPER"
+}
+
+auto_prune_child_tasks() {
+  ensure_dirs
+  CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_AUTO_PRUNE_LOCK_MAX_WAITS:-20}" \
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock auto_prune_child_tasks_unlocked
+}
+
 list_exportable_threads() {
-  local name="${1:-account1}" limit="${2:-30}" account_home
-  account_home="$(account_home_for "$name")"
-  run_codex_share_helper list \
-    --account-name "$name" \
-    --account-home "$account_home" \
-    --limit "$limit"
+  local name="${1:-account1}" limit="${2:-30}" spec shared_name shared_home
+  local output_limit="$limit"
+  (( output_limit < 2000 )) && output_limit=2000
+  local -a specs
+  specs=()
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] && specs+=("$spec")
+  done < <(shared_cold_storage_targets)
+
+  {
+    for spec in "${specs[@]}"; do
+      shared_name="${spec%%=*}"
+      shared_home="${spec#*=}"
+      run_codex_share_helper list \
+        --account-name "$shared_name" \
+        --account-home "$shared_home" \
+        --limit 5000
+    done
+  } | awk -F '\t' '
+    NF >= 5 {
+      id = $1
+      size = $5 + 0
+      if (!(id in best_size) || size > best_size[id]) {
+        best_size[id] = size
+        best_line[id] = $0
+      }
+    }
+    END {
+      for (id in best_line) print best_line[id]
+    }
+  ' | sort -t $'\t' -k5,5nr | awk -v limit="$output_limit" 'NR <= limit'
 }
 
 export_thread_package() {
@@ -8699,6 +8668,47 @@ shared_cold_storage_targets() {
   done < <(list_accounts)
 }
 
+cold_storage_source_for_thread() {
+  local requested_name="${1:-}" thread_id="${2:-}"
+  if [[ ${#thread_id} -ne 36 || "$thread_id" == *[^0-9A-Fa-f-]* ]]; then
+    echo "Invalid thread ID for cold storage: $thread_id" >&2
+    return 2
+  fi
+
+  local requested_home spec name home db rollout size
+  local best_name="" best_home="" best_size=-1
+  local -a specs
+  typeset -A seen_homes
+  requested_home="$(account_home_for "$requested_name")"
+  specs=("$requested_name=$requested_home")
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] && specs+=("$spec")
+  done < <(shared_cold_storage_targets)
+
+  for spec in "${specs[@]}"; do
+    name="${spec%%=*}"
+    home="${spec#*=}"
+    [[ -z "${seen_homes[$home]:-}" ]] || continue
+    seen_homes[$home]=1
+    db="$home/state_5.sqlite"
+    [[ -f "$db" ]] || continue
+    rollout="$(sqlite3 -readonly "$db" "SELECT rollout_path FROM threads WHERE id = '$thread_id' LIMIT 1;" 2>/dev/null || true)"
+    [[ -f "$rollout" ]] || continue
+    size="$(stat -f '%z' "$rollout" 2>/dev/null || printf '0')"
+    if (( size > best_size )); then
+      best_name="$name"
+      best_home="$home"
+      best_size="$size"
+    fi
+  done
+
+  if [[ -z "$best_name" || -z "$best_home" ]]; then
+    echo "No local rollout was found for cold-storage thread: $thread_id" >&2
+    return 1
+  fi
+  printf '%s|%s\n' "$best_name" "$best_home"
+}
+
 archive_thread_cold() {
   local name="${1:-}" thread_id="${2:-}" archive_root="${3:-}"
   if [[ -z "$name" || -z "$thread_id" || -z "$archive_root" ]]; then
@@ -8707,8 +8717,10 @@ archive_thread_cold() {
   fi
   shift 3
   ensure_dirs
-  local account_home
-  account_home="$(account_home_for "$name")"
+  local account_home source_spec
+  source_spec="$(cold_storage_source_for_thread "$name" "$thread_id")" || return $?
+  name="${source_spec%%|*}"
+  account_home="${source_spec#*|}"
   if [[ "$(history_mode_for_home "$account_home")" != "shared" ]]; then
     echo "Cold storage v1 only archives shared-history tasks; private profile data was not changed." >&2
     return 2
@@ -8773,6 +8785,7 @@ restore_thread_cold() {
       run_codex_share_helper cold-restore \
         --thread-id "$thread_id" \
         --index "$COLD_STORAGE_INDEX_FILE" \
+        --mark-latest \
         "${target_args[@]}"
 }
 
@@ -8795,7 +8808,7 @@ archive_threads_cold() {
   tiered_storage_assert_external_root "$archive_root" || return $?
 
   local -a target_specs target_args thread_args
-  local spec thread_id
+  local spec thread_id source_spec source_name source_home
   target_specs=()
   target_args=()
   thread_args=()
@@ -8811,6 +8824,13 @@ archive_threads_cold() {
   local archived_count=0 failed_count=0 rc
   for thread_id in "${thread_ids[@]}"; do
     [[ -n "$thread_id" ]] || continue
+    source_spec="$(cold_storage_source_for_thread "$name" "$thread_id")" || {
+      (( failed_count += 1 ))
+      echo "failed=$thread_id" >&2
+      continue
+    }
+    source_name="${source_spec%%|*}"
+    source_home="${source_spec#*|}"
     tiered_storage_assert_idle "${target_specs[@]}" || {
       rc=$?
       echo "Batch cold storage paused before $thread_id; completed items remain archived." >&2
@@ -8819,8 +8839,8 @@ archive_threads_cold() {
     if CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
       CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
         run_codex_share_helper cold-archive \
-          --account-name "$name" \
-          --account-home "$account_home" \
+          --account-name "$source_name" \
+          --account-home "$source_home" \
           --thread-id "$thread_id" \
           --archive-root "$archive_root" \
           --index "$COLD_STORAGE_INDEX_FILE" \
@@ -8853,18 +8873,25 @@ archive_cold_older_than() {
   ensure_dirs
   local account_home
   account_home="$(account_home_for "$name")"
-  local -a target_args ids
-  local spec candidates
+  local -a target_args target_specs ids
+  local spec source_home candidates
   target_args=()
+  target_specs=()
   while IFS= read -r spec; do
     [[ -n "$spec" ]] || continue
+    target_specs+=("$spec")
     target_args+=(--target "$spec")
   done < <(shared_cold_storage_targets)
-  candidates="$(run_codex_share_helper cold-candidates \
-    --account-home "$account_home" \
-    --older-than-days "$days" \
-    --ids-only \
-    "${target_args[@]}")"
+  candidates="$({
+    for spec in "${target_specs[@]}"; do
+      source_home="${spec#*=}"
+      run_codex_share_helper cold-candidates \
+        --account-home "$source_home" \
+        --older-than-days "$days" \
+        --ids-only \
+        "${target_args[@]}"
+    done
+  } | awk 'NF && !seen[$0]++')"
   ids=("${(@f)candidates}")
   if (( ${#ids[@]} == 0 )); then
     echo "No safe cold-storage candidates older than $days day(s)."
@@ -8903,10 +8930,11 @@ restore_threads_cold() {
     }
     if CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-20}" \
       CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock \
-        run_codex_share_helper cold-restore \
-          --thread-id "$thread_id" \
-          --index "$COLD_STORAGE_INDEX_FILE" \
-          "${target_args[@]}"; then
+      run_codex_share_helper cold-restore \
+        --thread-id "$thread_id" \
+        --index "$COLD_STORAGE_INDEX_FILE" \
+        --mark-latest \
+        "${target_args[@]}"; then
       (( restored_count += 1 ))
       echo "restored=$thread_id"
     else
@@ -8958,6 +8986,7 @@ main() {
     opencodex-dashboard) opencodex_dashboard ;;
     opencodex-launch) opencodex_launch ;;
     opencodex-enable-all-profiles) opencodex_enable_all_profiles ;;
+    opencodex-disable-profile-routes) opencodex_disable_profile_routes ;;
     delete-account) delete_account "${2:-}" ;;
     link-history) link_history_for "${2:-}" ;;
     unlink-history) unlink_history_for "${2:-}" ;;
@@ -8975,6 +9004,7 @@ main() {
     list-cold-archives) list_cold_archives ;;
     restore-thread-cold) restore_thread_cold "${2:-}" ;;
     restore-threads-cold) restore_threads_cold "${@:2}" ;;
+    auto-prune-child-tasks) auto_prune_child_tasks ;;
     prune-global-state-home) prune_global_state_for_home "${2:-}" ;;
     prune-loop) prune_global_state_loop ;;
     link-all-history) link_all_history ;;

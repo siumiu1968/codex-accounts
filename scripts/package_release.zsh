@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_PATH="$DIST_DIR/Codex Accounts.app"
 ZIP_PATH="$DIST_DIR/Codex-Accounts-macOS.zip"
-RUNTIME_SEED_DIR="$APP_PATH/Contents/Resources/opencodex-runtime/2.7.33/arm64"
+RUNTIME_SEED_DIR="$APP_PATH/Contents/Resources/opencodex-runtime/2.29.0/arm64"
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
@@ -64,8 +64,8 @@ cleanup() { rm -rf "$VERIFY_DIR"; }
 trap cleanup EXIT
 ditto -x -k "$ZIP_PATH" "$VERIFY_DIR"
 codesign --verify --deep --strict "$VERIFY_DIR/Codex Accounts.app"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VERIFY_DIR/Codex Accounts.app/Contents/Info.plist")" == "2.7.2" ]]
-[[ -f "$VERIFY_DIR/Codex Accounts.app/Contents/Resources/opencodex-runtime/2.7.33/arm64/manifest.json" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$VERIFY_DIR/Codex Accounts.app/Contents/Info.plist")" == "2.7.4" ]]
+[[ -f "$VERIFY_DIR/Codex Accounts.app/Contents/Resources/opencodex-runtime/2.29.0/arm64/manifest.json" ]]
 
 echo "Release package:"
 echo "  $ZIP_PATH"

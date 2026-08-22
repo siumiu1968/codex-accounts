@@ -1585,7 +1585,7 @@ private func localExternalProviderDetails(in home: String) -> LocalExternalProvi
         && (try? String(contentsOf: ownershipMarker, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)) == "managed-by-codex-accounts-opencodex-lab-v1"
     if isManagedOpenCodexLab {
-        return LocalExternalProviderDetails(model: "2.7.33", providerLabel: "opencodex")
+        return LocalExternalProviderDetails(model: "2.29.0", providerLabel: "opencodex")
     }
 
     guard isPrimaryCodexHome(home) else { return nil }
@@ -2183,7 +2183,8 @@ final class KeepAwakeController: ObservableObject {
 
     var isAwake: Bool { mode != .off }
 
-    private var caffeinateProcess: Process?
+    private var sleepActivity: NSObjectProtocol?
+    private let sleepActivityLock = NSLock()
     private var clamshellTimer: Timer?
     private var stateMonitorTimer: Timer?
     private var stateRefreshInFlight = false
@@ -2191,7 +2192,7 @@ final class KeepAwakeController: ObservableObject {
     private var storedBrightnessBeforeLidClose: Float?
     private var dimmedForClosedLid = false
     private var ownsSystemSleepOverrideThisRun = false
-    private let pidFileURL = URL(fileURLWithPath: NSHomeDirectory())
+    private let legacyPidFileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/Codex Accounts/keep-awake.pid")
     private let sleepOwnershipFileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/Codex Accounts/keep-awake-clamshell-owned")
@@ -2202,7 +2203,7 @@ final class KeepAwakeController: ObservableObject {
     }
 
     private init() {
-        recoverExistingCaffeinate()
+        cleanupLegacyManagedCaffeinate()
         startStateMonitor()
     }
 
@@ -2221,17 +2222,14 @@ final class KeepAwakeController: ObservableObject {
                 if !sleepDisabled {
                     self.clearSystemSleepOwnership()
                 }
-                var hasCaffeinate = self.runningManagedCaffeinatePID() != nil
-                if sleepDisabled, !hasCaffeinate {
-                    hasCaffeinate = self.ensureManagedCaffeinate().0
+                var hasActivity = self.nativeActivityIsActive()
+                if sleepDisabled, !hasActivity {
+                    hasActivity = self.ensureNativeActivity().0
                 }
 
                 let detectedMode: KeepAwakeMode = sleepDisabled
                     ? .clamshell
-                    : (hasCaffeinate ? .display : .off)
-                if !hasCaffeinate {
-                    self.removePidFile()
-                }
+                    : (hasActivity ? .display : .off)
                 self.updateMode(detectedMode)
             }
         }
@@ -2288,26 +2286,9 @@ final class KeepAwakeController: ObservableObject {
         setMode(.off)
     }
 
-    func stopCaffeinateForTermination() {
-        stopManagedCaffeinate()
+    func stopKeepAwakeForTermination() {
+        stopNativeActivity()
         stopClamshellMonitor(restoreBrightness: true)
-    }
-
-    private func stopManagedCaffeinate() {
-        let runningProcess = caffeinateProcess
-        let savedPID = readPid()
-        caffeinateProcess = nil
-        removePidFile()
-
-        runningProcess?.terminate()
-        if let savedPID, isRunningCaffeinate(savedPID) {
-            Darwin.kill(savedPID, SIGTERM)
-        }
-        terminateMatchingCaffeinateProcesses()
-    }
-
-    private func recoverExistingCaffeinate() {
-        refreshState(force: true)
     }
 
     private func startStateMonitor() {
@@ -2321,8 +2302,8 @@ final class KeepAwakeController: ObservableObject {
 
     private func applyMode(_ requestedMode: KeepAwakeMode, previousMode: KeepAwakeMode) -> (Bool, String) {
         if requestedMode != .off {
-            let caffeinateResult = ensureManagedCaffeinate()
-            guard caffeinateResult.0 else { return caffeinateResult }
+            let activityResult = ensureNativeActivity()
+            guard activityResult.0 else { return activityResult }
         }
 
         let shouldDisableSystemSleep = requestedMode == .clamshell
@@ -2330,14 +2311,14 @@ final class KeepAwakeController: ObservableObject {
             let privilegeResult = setSystemSleepDisabled(shouldDisableSystemSleep)
             guard privilegeResult.0 else {
                 if previousMode == .off {
-                    stopManagedCaffeinate()
+                    stopNativeActivity()
                 }
                 return privilegeResult
             }
         }
 
         if requestedMode == .off {
-            stopManagedCaffeinate()
+            stopNativeActivity()
         }
         if requestedMode != .clamshell {
             clearSystemSleepOwnership()
@@ -2345,37 +2326,33 @@ final class KeepAwakeController: ObservableObject {
         return (true, "")
     }
 
-    private func ensureManagedCaffeinate() -> (Bool, String) {
-        if let pid = runningManagedCaffeinatePID() {
-            writePid(pid)
-            return (true, "")
-        }
+    private func ensureNativeActivity() -> (Bool, String) {
+        sleepActivityLock.lock()
+        defer { sleepActivityLock.unlock() }
+        guard sleepActivity == nil else { return (true, "") }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-d", "-i", "-m", "-s"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            caffeinateProcess = process
-            writePid(process.processIdentifier)
-            return (true, "")
-        } catch {
-            return (false, error.localizedDescription)
-        }
+        sleepActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
+            reason: "Codex Accounts keeps the open display awake"
+        )
+        return (true, "")
     }
 
-    private func runningManagedCaffeinatePID() -> Int32? {
-        if let pid = readPid(), isRunningCaffeinate(pid) {
-            return pid
+    private func nativeActivityIsActive() -> Bool {
+        sleepActivityLock.lock()
+        defer { sleepActivityLock.unlock() }
+        return sleepActivity != nil
+    }
+
+    private func stopNativeActivity() {
+        sleepActivityLock.lock()
+        let activity = sleepActivity
+        sleepActivity = nil
+        sleepActivityLock.unlock()
+
+        if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
         }
-        if let pid = matchingCaffeinatePIDs().first {
-            writePid(pid)
-            return pid
-        }
-        return nil
     }
 
     private func systemSleepDisabled() -> Bool {
@@ -2427,77 +2404,33 @@ final class KeepAwakeController: ObservableObject {
         try? FileManager.default.removeItem(at: sleepOwnershipFileURL)
     }
 
-    private func writePid(_ pid: Int32) {
-        do {
-            try FileManager.default.createDirectory(
-                at: pidFileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try "\(pid)\n".write(to: pidFileURL, atomically: true, encoding: .utf8)
-        } catch {
-            // The switch still works without pid persistence; stale cleanup is best-effort.
+    private func cleanupLegacyManagedCaffeinate() {
+        guard let text = try? String(contentsOf: legacyPidFileURL, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+            try? FileManager.default.removeItem(at: legacyPidFileURL)
+            return
         }
-    }
 
-    private func readPid() -> Int32? {
-        guard let text = try? String(contentsOf: pidFileURL, encoding: .utf8) else { return nil }
-        return Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
+        try? FileManager.default.removeItem(at: legacyPidFileURL)
+        guard Darwin.kill(pid, 0) == 0 else { return }
 
-    private func removePidFile() {
-        try? FileManager.default.removeItem(at: pidFileURL)
-    }
-
-    private func terminateSavedCaffeinate() {
-        guard let pid = readPid(), isRunningCaffeinate(pid) else { return }
-        Darwin.kill(pid, SIGTERM)
-    }
-
-    private func terminateMatchingCaffeinateProcesses() {
-        for pid in matchingCaffeinatePIDs() {
-            Darwin.kill(pid, SIGTERM)
-        }
-    }
-
-    private func matchingCaffeinatePIDs() -> [Int32] {
-        let result = runProcess(
-            executable: "/bin/ps",
-            arguments: ["axww", "-o", "pid=", "-o", "command="],
-            timeout: 3
-        )
-        guard result.0 == 0 else { return [] }
-
-        return result.1.split(separator: "\n").compactMap { line in
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let spaceIndex = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else { return nil }
-            let pidText = String(trimmed[..<spaceIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let command = String(trimmed[spaceIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard isManagedCaffeinateCommand(command) else { return nil }
-            return Int32(pidText)
-        }
-    }
-
-    private func isRunningCaffeinate(_ pid: Int32) -> Bool {
-        guard Darwin.kill(pid, 0) == 0 else { return false }
-        guard let command = processCommand(pid) else { return false }
-        return isManagedCaffeinateCommand(command.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private func isManagedCaffeinateCommand(_ command: String) -> Bool {
-        command == "/usr/bin/caffeinate -dims"
-            || command == "caffeinate -dims"
-            || command == "/usr/bin/caffeinate -d -i -m -s"
-            || command == "caffeinate -d -i -m -s"
-    }
-
-    private func processCommand(_ pid: Int32) -> String? {
         let result = runProcess(
             executable: "/bin/ps",
             arguments: ["-p", "\(pid)", "-o", "command="],
             timeout: 3
         )
-        guard result.0 == 0 else { return nil }
-        return result.1
+        guard result.0 == 0 else { return }
+        let command = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyCommands = [
+            "/usr/bin/caffeinate -dims",
+            "caffeinate -dims",
+            "/usr/bin/caffeinate -d -i -m -s",
+            "caffeinate -d -i -m -s"
+        ]
+        if legacyCommands.contains(command) {
+            Darwin.kill(pid, SIGTERM)
+        }
     }
 
     private func updateMode(_ newMode: KeepAwakeMode) {
@@ -2604,6 +2537,8 @@ struct AccountsRootView: View {
     @State private var statusText = "就緒"
     @AppStorage("autoRefresh") private var autoRefresh = true
     @AppStorage("autoSync") private var autoSync = true
+    @AppStorage("autoPruneChildTasksLowDisk") private var autoPruneChildTasksLowDisk = true
+    @AppStorage("lastAutoChildTaskPruneTimestamp") private var lastAutoChildTaskPruneTimestamp = 0.0
     @AppStorage("autoQuotaPool") private var autoQuotaPool = false
     @AppStorage("language") private var language = "zh"
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
@@ -2619,6 +2554,7 @@ struct AccountsRootView: View {
     @State private var isCleaningSidebarState = false
     @State private var isRepairingHistoryPayloads = false
     @State private var isManagingColdStorage = false
+    @State private var isAutoPruningChildTasks = false
     @State private var hasEntered = true
     @State private var showKeepAwakeHelp = false
     @State private var showKeyboardCleanHelp = false
@@ -2674,6 +2610,9 @@ struct AccountsRootView: View {
     private let liveUsageStatusTimeout: TimeInterval = 60
     private let autoSyncStartupDelay: TimeInterval = 90
     private let autoSyncInterval: TimeInterval = 600
+    private let autoChildTaskPruneCooldown: TimeInterval = 600
+    private let autoChildTaskPruneThresholdBytes: Int64 = 10_000_000_000
+    private let autoChildTaskPruneTargetBytes: Int64 = 20_000_000_000
 
     var body: some View {
         ZStack {
@@ -3351,6 +3290,10 @@ struct AccountsRootView: View {
         guard activeOperationCount == 0 else { return }
         let now = Date()
 
+        if startAutoChildTaskPruneIfNeeded(now: now) {
+            return
+        }
+
         if autoSync,
            !isSyncing,
            now.timeIntervalSince(launchedAt) >= autoSyncStartupDelay,
@@ -3362,6 +3305,53 @@ struct AccountsRootView: View {
         if autoRefresh, !isRefreshing {
             refreshProfilesForAutoQuota()
         }
+    }
+
+    private func availableInternalStorageBytes() -> Int64? {
+        guard let attributes = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+              let freeSize = attributes[.systemFreeSize] as? NSNumber
+        else {
+            return nil
+        }
+        return freeSize.int64Value
+    }
+
+    @discardableResult
+    private func startAutoChildTaskPruneIfNeeded(now: Date) -> Bool {
+        guard autoPruneChildTasksLowDisk,
+              !isAutoPruningChildTasks,
+              now.timeIntervalSince1970 - lastAutoChildTaskPruneTimestamp >= autoChildTaskPruneCooldown,
+              let freeBytes = availableInternalStorageBytes(),
+              freeBytes < autoChildTaskPruneThresholdBytes
+        else {
+            return false
+        }
+
+        isAutoPruningChildTasks = true
+        lastAutoChildTaskPruneTimestamp = now.timeIntervalSince1970
+        runBackground(nil) {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_AUTO_PRUNE_THRESHOLD_BYTES"] = String(autoChildTaskPruneThresholdBytes)
+            environment["CODEX_AUTO_PRUNE_TARGET_BYTES"] = String(autoChildTaskPruneTargetBytes)
+            return runCodexScript(
+                scriptPath,
+                ["auto-prune-child-tasks"],
+                wait: true,
+                timeout: 240,
+                environment: environment
+            )
+        } completion: { result in
+            isAutoPruningChildTasks = false
+            let output = result.1
+            if result.0 == 0, output.contains("status=deleted") {
+                statusText = tr("內置空間不足，已自動清理完成子 task", "Low disk space: completed child tasks were cleaned automatically")
+            } else if result.0 == 0, output.contains("status=no-safe-candidates") {
+                statusText = tr("內置空間不足，但未有可安全刪除嘅子 task", "Low disk space, but no child tasks are safe to delete")
+            } else if result.0 != 0 {
+                statusText = tr("自動清理子 task 暫時未能完成", "Automatic child-task cleanup could not finish")
+            }
+        }
+        return true
     }
 
     private func refreshProfilesForAutoQuota() {
@@ -3947,6 +3937,7 @@ struct AccountsRootView: View {
 
                 sidebarToggle(tr("每分鐘重新整理", "Auto refresh"), isOn: $autoRefresh, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
                 sidebarToggle(tr("每 10 分鐘同步", "Sync every 10 min"), isOn: $autoSync, tint: syncAccent)
+                sidebarToggle(tr("低空間自動清理子 task", "Auto-clean child tasks on low disk"), isOn: $autoPruneChildTasksLowDisk, tint: Color(red: 1.00, green: 0.56, blue: 0.20))
 
                 HStack(spacing: scaled(8)) {
                     miniButton(tr("立即同步", "Sync now")) { syncMemories() }
@@ -4062,16 +4053,16 @@ struct AccountsRootView: View {
             return tr("需要修復版本", "Version repair needed")
         }
         if openCodexStatus.running {
-            return tr("全部 Profile 可用", "Available to all profiles")
+            return tr("只限 OpenCodex Lab", "OpenCodex Lab only")
         }
         if openCodexStatus.installed {
-            return tr("已內置 · 開 Profile 自動啟動", "Bundled · starts with profiles")
+            return tr("已內置 · Lab 獨立使用", "Bundled · isolated Lab only")
         }
         return tr("準備內置功能", "Preparing bundled feature")
     }
 
     private var openCodexVersionReady: Bool {
-        openCodexStatus.installed && openCodexStatus.version == "2.7.33"
+        openCodexStatus.installed && openCodexStatus.version == "2.29.0"
     }
 
     private var openCodexPanel: some View {
@@ -4084,8 +4075,8 @@ struct AccountsRootView: View {
 
                 VStack(alignment: .leading, spacing: scaled(1)) {
                     Text(openCodexStatus.running
-                        ? tr("模型已可供受管 Profile 選用", "Models are ready for managed profiles")
-                        : tr("打開 Profile 時會自動啟動本機代理", "The local proxy starts when a profile opens"))
+                        ? tr("OpenCodex Lab 已連接固定本機代理", "OpenCodex Lab is connected to its fixed local proxy")
+                        : tr("普通 Profile 保持原有直連或自訂路由", "Regular profiles keep direct or existing custom routes"))
                         .font(appFont(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.68))
                         .lineLimit(2)
@@ -4132,7 +4123,7 @@ struct AccountsRootView: View {
                 .disabled(openCodexOperationInFlight || !openCodexStatus.running)
                 .opacity(openCodexStatus.running ? 1 : 0.52)
             } else if openCodexStatus.installed {
-                miniButton(tr("修復內置版本 2.7.33", "Repair bundled 2.7.33")) {
+                miniButton(tr("修復內置版本 2.29.0", "Repair bundled 2.29.0")) {
                     installOpenCodexLab()
                 }
                 .disabled(openCodexOperationInFlight)
@@ -4153,8 +4144,8 @@ struct AccountsRootView: View {
             .buttonStyle(.plain)
         }
         .help(tr(
-            "OpenCodex runtime 內置喺安裝包，並只會解壓到 Codex Accounts 專用資料夾。未有自訂模型路由嘅受管 Profile 都可選用模型；OpenAI 仍使用各 Profile 自己嘅登入，第三方模型登入由本機 OpenCodex 共用。唔會合併或複製對話紀錄同登入 token。",
-            "The OpenCodex runtime is bundled and extracted only into Codex Accounts data. Managed profiles without a custom model route can use its models; OpenAI keeps each profile's own sign-in, while third-party model sign-ins are shared locally by OpenCodex. Chats and login tokens are not merged or copied."
+            "OpenCodex 只會喺獨立 opencodex-lab Profile 使用固定 loopback port。Lab 可選擇共享本機對話，但登入、設定同代理路由保持獨立；普通 Profile 保持 OpenAI 直連或原有自訂路由。",
+            "OpenCodex uses a fixed loopback port only inside the isolated opencodex-lab profile. The Lab may share local chats, while sign-in, settings, and proxy routing remain isolated; regular profiles keep direct OpenAI access or their existing custom route."
         ))
     }
 
@@ -4173,7 +4164,7 @@ struct AccountsRootView: View {
         guard let resources = Bundle.main.resourceURL else { return }
         let seedManifest = resources
             .appendingPathComponent("opencodex-runtime", isDirectory: true)
-            .appendingPathComponent("2.7.33", isDirectory: true)
+            .appendingPathComponent("2.29.0", isDirectory: true)
             .appendingPathComponent(runtimeArchitecture, isDirectory: true)
             .appendingPathComponent("manifest.json")
         guard FileManager.default.fileExists(atPath: seedManifest.path) else { return }
@@ -4184,7 +4175,7 @@ struct AccountsRootView: View {
             DispatchQueue.main.async {
                 openCodexOperationInFlight = false
                 if result.0 == 0 {
-                    statusText = tr("內置 OpenCodex 2.7.33 已準備好", "Bundled OpenCodex 2.7.33 is ready")
+                    statusText = tr("內置 OpenCodex 2.29.0 已準備好", "Bundled OpenCodex 2.29.0 is ready")
                 } else {
                     let detail = trimmedToolOutput(result.1, maxLength: 500)
                     statusText = detail.isEmpty
@@ -4276,7 +4267,7 @@ struct AccountsRootView: View {
         runOpenCodexAction(
             command: "opencodex-install",
             loading: tr("準備內置 OpenCodex...", "Preparing bundled OpenCodex..."),
-            success: tr("內置 OpenCodex 2.7.33 已準備好", "Bundled OpenCodex 2.7.33 is ready"),
+            success: tr("內置 OpenCodex 2.29.0 已準備好", "Bundled OpenCodex 2.29.0 is ready"),
             timeout: 300
         )
     }
@@ -5529,7 +5520,7 @@ struct AccountsRootView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: scaled(12), style: .continuous))
         .help(isOpenCodex
-            ? tr("OpenCodex Lab 使用本機 loopback 代理，同現有帳戶及對話隔離。", "OpenCodex Lab uses an isolated local loopback proxy.")
+            ? tr("OpenCodex Lab 使用獨立本機 loopback 代理；本機對話可另外選擇共享。", "OpenCodex Lab uses an isolated local loopback proxy; local chats may be shared separately.")
             : tr("外部 API profile 不使用 OpenAI quota。", "External API profiles do not use OpenAI quota."))
     }
 
@@ -6632,7 +6623,7 @@ struct AccountsRootView: View {
         let historyMode = profileHistoryMode(for: profile)
         let privateHistoryItem = CallbackMenuItem(
             title: tr("🔒 私人本機對話（只限此 Profile）", "🔒 Private local chats (this profile only)"),
-            enabled: !isOpenCodexLab && !isHistoryAnchor(profile) && historyMode != .privateOnly
+            enabled: !isHistoryAnchor(profile) && historyMode != .privateOnly
         ) {
             separateHistory(profile)
         }
@@ -6641,7 +6632,7 @@ struct AccountsRootView: View {
 
         let sharedHistoryItem = CallbackMenuItem(
             title: tr("共享本機對話（其他 Profile 可見）", "Share local chats (visible to other profiles)"),
-            enabled: !isOpenCodexLab && historyMode != .shared
+            enabled: historyMode != .shared
         ) {
             shareHistory(profile)
         }
@@ -6649,7 +6640,7 @@ struct AccountsRootView: View {
         menu.addItem(sharedHistoryItem)
         if isOpenCodexLab {
             menu.addItem(CallbackMenuItem(
-                title: tr("OpenCodex Lab 永久使用獨立本機對話", "OpenCodex Lab always keeps isolated local chats"),
+                title: tr("只共享對話；登入、設定同代理路由保持獨立", "Shares chats only; sign-in, settings, and proxy routing stay isolated"),
                 enabled: false
             ) {})
         }
@@ -8276,10 +8267,17 @@ struct AccountsRootView: View {
             "同其他 Profile 共享 \(profile.displayName) 嘅本機對話？",
             "Share \(profile.displayName)'s local chats with other profiles?"
         )
-        alert.informativeText = tr(
-            "現有私人本機對話會合併入共享紀錄，本機記憶之後亦會參與共享同步；其他 Profile 都可能見到，而且唔會自動拆返。請先關閉呢個 Profile。",
-            "Existing private local chats will be merged into shared history, and local memories will join shared sync afterward. Other profiles may see them, and this cannot be automatically undone. Close this profile first."
-        )
+        if profile.id == "opencodex-lab" {
+            alert.informativeText = tr(
+                "現有私人本機對話會合併入共享紀錄，其他 Profile 都可能見到，而且唔會自動拆返。OpenCodex 登入、設定、本機記憶同代理路由仍保持獨立。請先關閉呢個 Profile。",
+                "Existing private local chats will be merged into shared history. Other profiles may see them, and this cannot be automatically undone. OpenCodex sign-in, settings, local memory, and proxy routing remain isolated. Close this profile first."
+            )
+        } else {
+            alert.informativeText = tr(
+                "現有私人本機對話會合併入共享紀錄，本機記憶之後亦會參與共享同步；其他 Profile 都可能見到，而且唔會自動拆返。請先關閉呢個 Profile。",
+                "Existing private local chats will be merged into shared history, and local memories will join shared sync afterward. Other profiles may see them, and this cannot be automatically undone. Close this profile first."
+            )
+        }
         alert.addButton(withTitle: tr("共享本機對話", "Share Local Chats"))
         alert.addButton(withTitle: tr("取消", "Cancel"))
         alert.alertStyle = .warning
@@ -9370,7 +9368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = KeepAwakeController.shared
         guard !terminationCleanupInFlight else { return .terminateLater }
         guard controller.isSwitching || controller.ownsSystemSleepOverride else {
-            controller.stopCaffeinateForTermination()
+            controller.stopKeepAwakeForTermination()
             return .terminateNow
         }
 
@@ -9389,7 +9387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard controller.ownsSystemSleepOverride else {
-            controller.stopCaffeinateForTermination()
+            controller.stopKeepAwakeForTermination()
             terminationCleanupInFlight = false
             sender.reply(toApplicationShouldTerminate: true)
             return
@@ -9399,7 +9397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // SleepDisabled setting must survive this app quitting.
         controller.setMode(.off) { success in
             if success {
-                controller.stopCaffeinateForTermination()
+                controller.stopKeepAwakeForTermination()
             }
             self.terminationCleanupInFlight = false
             sender.reply(toApplicationShouldTerminate: success)
@@ -9409,7 +9407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         syncProcess?.terminate()
         KeyboardCleanController.shared.stop()
-        KeepAwakeController.shared.stopCaffeinateForTermination()
+        KeepAwakeController.shared.stopKeepAwakeForTermination()
     }
 }
 

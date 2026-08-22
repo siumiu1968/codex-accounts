@@ -4,14 +4,13 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 HELPER="$ROOT/scripts/codex_multi_account.zsh"
 SEED_HELPER="$ROOT/scripts/opencodex_runtime_seed.py"
-OVERLAY="$ROOT/resources/opencodex-zh-hk/2.7.33"
 TMP_ROOT="$(mktemp -d /tmp/codex-accounts-seed.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 make_seed() {
   local output_dir="$1"
   local mode="${2:-valid}"
-  OUTPUT_DIR="$output_dir" MODE="$mode" OVERLAY="$OVERLAY" SEED_HELPER="$SEED_HELPER" python3 - <<'PY'
+  OUTPUT_DIR="$output_dir" MODE="$mode" SEED_HELPER="$SEED_HELPER" python3 - <<'PY'
 import gzip
 import hashlib
 import importlib.util
@@ -23,7 +22,6 @@ from pathlib import Path
 
 output = Path(os.environ["OUTPUT_DIR"])
 mode = os.environ["MODE"]
-overlay = Path(os.environ["OVERLAY"])
 seed_helper_path = Path(os.environ["SEED_HELPER"])
 helper_spec = importlib.util.spec_from_file_location("opencodex_runtime_seed", seed_helper_path)
 if helper_spec is None or helper_spec.loader is None:
@@ -40,7 +38,7 @@ package = tree / "@bitkyc08" / "opencodex"
 (package / "package.json").write_text(
     json.dumps({
         "name": "@bitkyc08/opencodex",
-        "version": "2.7.33",
+        "version": "2.29.0",
         "description": "OpenCodex test seed",
         "license": "MIT",
         "repository": {"type": "git", "url": "https://github.com/lidge-jun/opencodex"},
@@ -57,21 +55,17 @@ bun = tree / "bun" / "bin" / "bun.exe"
 bun.write_bytes(b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01mock-arm64-bun\n")
 bun.chmod(0o755)
 (tree / ".bin" / "ocx").symlink_to("../@bitkyc08/opencodex/bin/ocx.mjs")
-for relative in (
-    "index.html",
-    "assets/index-Cgt7VoIY.js",
-    "assets/index-D6Fcl4yM.css",
-):
-    target = package / "gui" / "dist" / relative
-    target.write_bytes((overlay / relative).read_bytes())
+(package / "gui" / "dist" / "index.html").write_text(
+    '<!doctype html><html lang="zh-TW"><body>OpenCodex test</body></html>\n',
+    encoding="utf-8",
+)
+(package / "gui" / "dist" / "assets" / "app.js").write_text("export {};\n", encoding="utf-8")
 
 critical_names = [
     "node_modules/@bitkyc08/opencodex/package.json",
     "node_modules/@bitkyc08/opencodex/bin/ocx.mjs",
     "node_modules/bun/bin/bun.exe",
     "node_modules/@bitkyc08/opencodex/gui/dist/index.html",
-    "node_modules/@bitkyc08/opencodex/gui/dist/assets/index-Cgt7VoIY.js",
-    "node_modules/@bitkyc08/opencodex/gui/dist/assets/index-D6Fcl4yM.css",
 ]
 
 def sha256(path: Path) -> str:
@@ -101,7 +95,7 @@ with tarfile.open(archive_path, mode="r:gz") as archive:
 manifest = {
     "schema_version": 1,
     "package": "@bitkyc08/opencodex",
-    "version": "2.7.33",
+    "version": "2.29.0",
     "arch": "arm64",
     "archive": archive_path.name,
     "archive_sha256": sha256(archive_path),
@@ -113,7 +107,7 @@ manifest = {
     "third_party_notices_sha256": sha256(notices),
     "source_package": {
         "name": "@bitkyc08/opencodex",
-        "version": "2.7.33",
+        "version": "2.29.0",
         "description": "OpenCodex test seed",
         "license": "MIT",
         "repository": "https://github.com/lidge-jun/opencodex",
@@ -170,12 +164,12 @@ VALID_CASE="$TMP_ROOT/valid-case"
 install_output="$(run_install "$VALID_CASE" "$VALID_SEED")"
 [[ "$install_output" == *"offline seed"* ]]
 [[ ! -e "$NPM_CALLED_LOG" ]]
-[[ "$(jq -r '.version' "$VALID_CASE/app-data/OpenCodex/runtime/node_modules/@bitkyc08/opencodex/package.json")" == "2.7.33" ]]
+[[ "$(jq -r '.version' "$VALID_CASE/app-data/OpenCodex/runtime/node_modules/@bitkyc08/opencodex/package.json")" == "2.29.0" ]]
 [[ -x "$VALID_CASE/app-data/OpenCodex/runtime/node_modules/.bin/ocx" ]]
 python3 "$SEED_HELPER" validate-current \
   --seed-dir "$VALID_SEED" \
   --runtime "$VALID_CASE/app-data/OpenCodex/runtime" \
-  --version 2.7.33 \
+  --version 2.29.0 \
   --arch arm64 >/dev/null
 
 STALE_OUTSIDE="$TMP_ROOT/stale-outside"
@@ -191,7 +185,7 @@ noncritical_rc=0
 python3 "$SEED_HELPER" validate-current \
   --seed-dir "$VALID_SEED" \
   --runtime "$VALID_CASE/app-data/OpenCodex/runtime" \
-  --version 2.7.33 \
+  --version 2.29.0 \
   --arch arm64 >/dev/null 2>&1 || noncritical_rc=$?
 [[ "$noncritical_rc" != "0" ]]
 repair_output="$(run_install "$VALID_CASE" "$VALID_SEED" 2>"$TMP_ROOT/noncritical-repair.log")"

@@ -21,13 +21,11 @@ find "$RESOURCES" -maxdepth 1 \( -name 'codex_remote_bridge.py*' -o -name 'start
 cp "$ROOT_DIR/scripts/codex_share_package.py" "$RESOURCES/codex_share_package.py"
 chmod +x "$RESOURCES/codex_share_package.py"
 
+cp "$ROOT_DIR/scripts/auto_prune_child_tasks.py" "$RESOURCES/auto_prune_child_tasks.py"
+chmod +x "$RESOURCES/auto_prune_child_tasks.py"
+
 cp "$ROOT_DIR/scripts/opencodex_runtime_seed.py" "$RESOURCES/opencodex_runtime_seed.py"
 chmod +x "$RESOURCES/opencodex_runtime_seed.py"
-
-if [[ -d "$ROOT_DIR/resources/opencodex-zh-hk" ]]; then
-  rm -rf "$RESOURCES/opencodex-zh-hk"
-  cp -R "$ROOT_DIR/resources/opencodex-zh-hk" "$RESOURCES/opencodex-zh-hk"
-fi
 
 if [[ -d "$ROOT_DIR/resources/opencodex-runtime" ]]; then
   rm -rf "$RESOURCES/opencodex-runtime"
