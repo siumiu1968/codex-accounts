@@ -15,6 +15,7 @@ mkdir -p "$MACOS" "$RESOURCES"
 cp "$SRC_DIR/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT_DIR/scripts/codex_multi_account.zsh" "$RESOURCES/codex_multi_account.zsh"
 chmod +x "$RESOURCES/codex_multi_account.zsh"
+cp "$ROOT_DIR/scripts/sync_paginated_history.py" "$RESOURCES/sync_paginated_history.py"
 
 find "$RESOURCES" -maxdepth 1 \( -name 'codex_remote_bridge.py*' -o -name 'start_mac_bridge.zsh*' -o -name '__pycache__' \) -exec rm -rf {} +
 

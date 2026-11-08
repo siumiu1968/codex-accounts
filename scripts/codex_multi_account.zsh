@@ -395,7 +395,7 @@ active_sqlite_homes_payload() {
   local -A seen
   for home_dir in "$@"; do
     [[ -n "$home_dir" && -z "${seen[$home_dir]:-}" ]] || continue
-    for db_name in "state_5.sqlite" "sqlite/state_5.sqlite" "goals_1.sqlite"; do
+    for db_name in "state_5.sqlite" "sqlite/state_5.sqlite" "goals_1.sqlite" "thread_history_1.sqlite"; do
       db_path="$home_dir/$db_name"
       db_candidates=()
       for candidate in "$db_path" "$db_path-wal" "$db_path-shm"; do
@@ -4482,6 +4482,7 @@ PY
 }
 
 sync_global_state_for_homes() {
+  [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" ]] || return 0
   local -a homes
   homes=("$@")
   (( ${#homes[@]} > 0 )) || return 0
@@ -4533,12 +4534,12 @@ active_home_keys = {str(home) for home in parse_home_lines(os.environ.get("CODEX
 STATE_NAME = ".codex-global-state.json"
 ROOT_LIST_KEYS = (
     "electron-saved-workspace-roots",
-    "project-order",
 )
 SOURCE_ROOT_LIST_KEYS = ROOT_LIST_KEYS + (
     "active-workspace-roots",
 )
 DICT_KEYS = (
+    "local-projects",
     "electron-workspace-root-labels",
     "thread-workspace-root-hints",
     "thread-project-assignments",
@@ -4741,10 +4742,25 @@ for _, _, data in states:
         for item_key, item_value in value.items():
             if isinstance(item_key, str) and item_key and item_key not in merged_dicts[key]:
                 merged_dicts[key][item_key] = item_value
+            elif key == "local-projects" and isinstance(item_value, dict):
+                existing = merged_dicts[key].get(item_key)
+                if not isinstance(existing, dict) or thread_marker((item_value.get("updatedAt"), None)) > thread_marker((existing.get("updatedAt"), None)):
+                    merged_dicts[key][item_key] = item_value
+
+# An explicit project assignment takes precedence over stale projectless flags
+# and output-directory metadata retained from before a thread was moved.
+explicit_project_thread_ids = {
+    thread_id for thread_id, assignment in merged_dicts["thread-project-assignments"].items()
+    if isinstance(assignment, dict)
+    and assignment.get("projectKind") == "local"
+    and assignment.get("projectId") in merged_dicts["local-projects"]
+}
+projectless_thread_ids.difference_update(explicit_project_thread_ids)
 
 root_recency = {}
 thread_cwds = {}
 project_thread_ids = set()
+native_project_ids_by_home = {}
 for home in homes:
     for db_path in state_db_paths(home):
         if not db_path.exists():
@@ -4753,6 +4769,12 @@ for home in homes:
         try:
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
             con.execute("PRAGMA busy_timeout=2000")
+            try:
+                native_project_ids_by_home.setdefault(str(home), set()).update(
+                    row[0] for row in con.execute("SELECT id FROM projects")
+                )
+            except sqlite3.Error:
+                pass
             cols = {row[1] for row in con.execute("PRAGMA table_info(threads)").fetchall()}
             required = {"id", "cwd", "updated_at", "archived", "rollout_path"}
             if not required.issubset(cols):
@@ -4783,7 +4805,7 @@ for home in homes:
                 thread_key = str(thread_id) if thread_id else ""
                 if thread_key:
                     live_thread_ids.add(thread_key)
-                if not root_is_real_project(root):
+                if not root_is_real_project(root) and thread_key not in explicit_project_thread_ids:
                     if thread_key:
                         projectless_thread_ids.add(thread_key)
                     continue
@@ -4807,13 +4829,38 @@ for home in homes:
                 pass
 
 root_position = {root: index for index, root in enumerate(root_order)}
+project_thread_ids.update(explicit_project_thread_ids & live_thread_ids)
 merged_roots = sorted(
     [root for root in root_order if root in valid_project_roots],
     key=lambda root: (-root_recency.get(root, 0), root_position.get(root, 0)),
 )
 merged_root_set = set(merged_roots)
+project_keys = merged_root_set | set(merged_dicts["local-projects"])
+merged_project_order = []
+for _, _, source_data in states:
+    source_order = source_data.get("project-order", [])
+    if isinstance(source_order, list):
+        for project_id in source_order:
+            if isinstance(project_id, str) and project_id in merged_dicts["local-projects"] and project_id not in merged_project_order:
+                merged_project_order.append(project_id)
+for project_id in merged_dicts["local-projects"]:
+    if project_id not in merged_project_order:
+        merged_project_order.append(project_id)
 if thread_cwds:
     merged_dicts["thread-workspace-root-hints"].update(thread_cwds)
+
+project_map_key = "app-server-project-id-by-legacy-project-id-by-host"
+native_project_map = {}
+for source_home, _, source_data in states:
+    host_maps = source_data.get(project_map_key)
+    if not isinstance(host_maps, dict):
+        continue
+    source_map = host_maps.get(f"local:{source_home}")
+    if not isinstance(source_map, dict):
+        continue
+    for legacy_id, native_id in source_map.items():
+        if legacy_id in merged_dicts["local-projects"] and native_id in native_project_ids_by_home.get(str(source_home), set()):
+            native_project_map.setdefault(legacy_id, native_id)
 
 for home, path, data in states:
     if str(home) not in dest_home_keys or str(home) in active_home_keys:
@@ -4821,10 +4868,11 @@ for home, path, data in states:
     next_data = dict(data)
     for key in ROOT_LIST_KEYS:
         next_data[key] = merged_roots
+    next_data["project-order"] = merged_project_order
     for key in DICT_KEYS:
         current = next_data.get(key)
         merged = dict(merged_dicts[key])
-        if isinstance(current, dict):
+        if isinstance(current, dict) and key not in {"local-projects", "thread-project-assignments", "sidebar-project-thread-orders"}:
             merged.update(current)
         if key == "thread-workspace-root-hints" and thread_cwds:
             merged.update(thread_cwds)
@@ -4833,7 +4881,7 @@ for home, path, data in states:
         elif key == "sidebar-project-thread-orders":
             pruned = {}
             for root, value in merged.items():
-                if root not in merged_root_set:
+                if root not in project_keys:
                     continue
                 if isinstance(value, list):
                     kept = [thread_id for thread_id in value if str(thread_id) in project_thread_ids and str(thread_id) not in pinned_thread_ids]
@@ -4858,6 +4906,21 @@ for home, path, data in states:
         elif key in next_data:
             next_data.pop(key, None)
 
+    # Host keys contain CODEX_HOME; do not copy another profile's migration
+    # flags. Only map IDs that have already been synced to this database.
+    host_maps = next_data.get(project_map_key)
+    host_maps = dict(host_maps) if isinstance(host_maps, dict) else {}
+    host_key = f"local:{home}"
+    local_map = host_maps.get(host_key)
+    local_map = dict(local_map) if isinstance(local_map, dict) else {}
+    native_ids = native_project_ids_by_home.get(str(home), set())
+    for legacy_id, native_id in native_project_map.items():
+        if native_id in native_ids:
+            local_map[legacy_id] = native_id
+    if local_map:
+        host_maps[host_key] = local_map
+        next_data[project_map_key] = host_maps
+
     projectless = next_data.get("projectless-thread-ids")
     if isinstance(projectless, list):
         ordered_projectless = []
@@ -4877,6 +4940,17 @@ for home, path, data in states:
     if next_data != data:
         write_state(path, next_data)
 PY
+}
+
+CODEX_PAGINATED_HISTORY_HELPER="${0:A:h}/sync_paginated_history.py"
+
+sync_paginated_history_for_homes() {
+  local helper="$CODEX_PAGINATED_HISTORY_HELPER"
+  [[ -f "$helper" ]] || return 1
+  local active_payload="$1" dest_payload="$2"
+  shift 2
+  CODEX_HISTORY_DEST_HOMES="$dest_payload" CODEX_ACTIVE_DB_HOMES="$active_payload" \
+    python3 "$helper" "$@"
 }
 
 sync_thread_index_for_homes() {
@@ -4901,7 +4975,7 @@ sync_thread_index_for_homes() {
     active_db_payload="$(active_sqlite_homes_payload "${active_probe_homes[@]}")"
   fi
 
-  CODEX_THREAD_INDEX_HOMES="$homes_payload" CODEX_THREAD_INDEX_DEST_HOMES="$dest_payload" CODEX_ACTIVE_DB_HOMES="$active_db_payload" python3 - <<'PY'
+  CODEX_THREAD_INDEX_HOMES="$homes_payload" CODEX_THREAD_INDEX_DEST_HOMES="$dest_payload" CODEX_ACTIVE_DB_HOMES="$active_db_payload" CODEX_PRESERVE_DEST_SIDEBAR="${CODEX_PRESERVE_DEST_SIDEBAR:-0}" python3 - <<'PY' || return $?
 import os
 import json
 import sqlite3
@@ -4928,11 +5002,20 @@ if not dest_homes:
 active_db_homes = {str(home) for home in parse_home_lines(os.environ.get("CODEX_ACTIVE_DB_HOMES", ""))}
 
 table_specs = [
+    ("projects", ("id",), ("updated_at_ms",)),
+    ("project_roots", ("project_id", "position"), ()),
     ("threads", ("id",), ("updated_at_ms", "updated_at")),
     ("thread_dynamic_tools", ("thread_id", "position"), ()),
     ("thread_spawn_edges", ("child_thread_id",), ()),
     ("stage1_outputs", ("thread_id",), ("source_updated_at",)),
 ]
+preserve_sidebar = os.environ.get("CODEX_PRESERVE_DEST_SIDEBAR") == "1"
+local_placement_fields = {
+    "is_pinned", "thread_section_id", "section_position", "section_entered_at_ms", "project_id",
+}
+local_thread_fields = local_placement_fields | {"name", "title", "archived", "archived_at"}
+if preserve_sidebar:
+    table_specs = [spec for spec in table_specs if spec[0] not in {"projects", "project_roots"}]
 
 def state_db_paths(home):
     return (home / "state_5.sqlite", home / "sqlite" / "state_5.sqlite")
@@ -5068,6 +5151,30 @@ def best_thread_text(left, right, field):
         return right.get(field)
     return left.get(field)
 
+history_mode_cache = {}
+
+def align_thread_history_mode(row):
+    # The rollout header owns the format. A newer message timestamp on a stale
+    # profile must not turn paginated history back into the legacy reader.
+    try:
+        path = Path(row.get("rollout_path") or "").resolve()
+        key = (str(path), str(row.get("id") or ""))
+        if key not in history_mode_cache:
+            with path.open("r", encoding="utf-8") as handle:
+                record = json.loads(handle.readline(1024 * 1024))
+            meta = record.get("payload", {})
+            history_mode_cache[key] = (
+                record.get("type") == "session_meta"
+                and isinstance(meta, dict)
+                and meta.get("id") == row.get("id")
+                and meta.get("history_mode") == "paginated"
+            )
+        if history_mode_cache[key]:
+            row["history_mode"] = "paginated"
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return row
+
 def merge_thread_rows(existing, incoming):
     if existing is None:
         return dict(incoming)
@@ -5101,9 +5208,9 @@ def thread_is_indexable(row):
         return False
     return thread_has_live_rollout(row)
 
-def session_index_records():
+def session_index_records(rows):
     records = {}
-    for row in catalog.get("threads", {}).values():
+    for row in rows:
         thread_id = row.get("id")
         if not thread_id:
             continue
@@ -5111,7 +5218,8 @@ def session_index_records():
             continue
         records[str(thread_id)] = {
             "id": str(thread_id),
-            "thread_name": thread_index_name(row),
+            "thread_name": (str(row.get("name") or "").strip() if preserve_sidebar else "")
+            or thread_index_name(row),
             "updated_at": thread_updated_at_iso(row),
         }
     return records
@@ -5121,6 +5229,8 @@ def session_index_paths_for_homes(homes):
     seen_paths = set()
     for home in homes:
         path = home / "session_index.jsonl"
+        if preserve_sidebar and path.is_symlink():
+            continue
         try:
             resolved = path.resolve(strict=False) if path.is_symlink() else path
         except OSError:
@@ -5132,11 +5242,34 @@ def session_index_paths_for_homes(homes):
     return paths
 
 def repair_session_index_files(homes):
-    thread_records = session_index_records()
-    if not thread_records:
+    if not catalog.get("threads"):
         return
 
     for index_path in session_index_paths_for_homes(homes):
+        if preserve_sidebar and str(index_path.parent) in active_db_homes:
+            continue
+        if preserve_sidebar:
+            # Use the committed destination rows, including local names and
+            # archive state. The shared catalogue may disagree with both.
+            rows = []
+            for db_path in state_db_paths(index_path.parent):
+                if not db_path.is_file() or db_path.is_symlink():
+                    continue
+                try:
+                    con = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=3)
+                    try:
+                        con.row_factory = sqlite3.Row
+                        rows = [dict(row) for row in con.execute("SELECT * FROM threads")]
+                        break
+                    finally:
+                        con.close()
+                except sqlite3.Error:
+                    continue
+        else:
+            rows = catalog["threads"].values()
+        thread_records = session_index_records(rows)
+        if not thread_records:
+            continue
         existing_lines = []
         seen_ids = set()
         changed = False
@@ -5160,6 +5293,10 @@ def repair_session_index_files(homes):
                                 continue
                             fresh = thread_records.get(thread_id)
                             if not fresh:
+                                if preserve_sidebar:
+                                    seen_ids.add(thread_id)
+                                    existing_lines.append(raw_line)
+                                    continue
                                 changed = True
                                 continue
                             seen_ids.add(thread_id)
@@ -5169,7 +5306,7 @@ def repair_session_index_files(homes):
                                 changed = True
                             existing_name = str(record.get("thread_name") or "").strip()
                             fresh_name = str(fresh.get("thread_name") or "").strip()
-                            if (
+                            if (not preserve_sidebar or not existing_name) and (
                                 not existing_name
                                 or title_text_score(fresh_name) > title_text_score(existing_name)
                                 or (
@@ -5298,6 +5435,7 @@ def mark_backfill_complete(con):
     )
 
 catalog = {name: {} for name, _, _ in table_specs}
+project_roots_by_db = {}
 
 template_db = next((db_path for home in homes for db_path in state_db_paths(home) if db_path.exists()), None)
 if template_db is not None:
@@ -5327,7 +5465,13 @@ for home in homes:
                     key = tuple(row.get(col) for col in key_cols)
                     if any(part is None for part in key):
                         continue
+                    if table == "projects":
+                        row["__source_db"] = str(db_path)
+                    elif table == "project_roots":
+                        project_roots_by_db.setdefault(str(db_path), []).append(row)
+                        continue
                     if table == "threads":
+                        row = align_thread_history_mode(row)
                         rel = session_relative_path(row.get("rollout_path"))
                         if rel:
                             row["__session_rel"] = rel
@@ -5344,6 +5488,53 @@ for home in homes:
             pass
         finally:
             con.close()
+
+# Keep the full root snapshot from the same database as the newest project.
+# Merging roots independently would resurrect removed roots from older copies.
+projects = catalog.get("projects", {})
+for project in projects.values():
+    for row in project_roots_by_db.get(project["__source_db"], ()):
+        if row.get("project_id") == project.get("id"):
+            catalog["project_roots"][(row["project_id"], row["position"])] = row
+
+# Desktop project IDs are migrated separately for each CODEX_HOME. Resolve
+# explicit legacy assignments against real, copied native project records.
+# Never let a newer conversation message with a null project erase a saved
+# project assignment; retain conflicting non-null native assignments.
+project_map_key = "app-server-project-id-by-legacy-project-id-by-host"
+native_ids = {key[0] for key in projects}
+native_by_legacy = {}
+project_states = []
+for home in (() if preserve_sidebar else homes):
+    state_path = home / ".codex-global-state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            continue
+        host_maps = state.get(project_map_key, {})
+        local_map = host_maps.get(f"local:{home}", {}) if isinstance(host_maps, dict) else {}
+        if isinstance(local_map, dict):
+            for legacy_id, native_id in local_map.items():
+                if isinstance(native_id, str) and native_id in native_ids:
+                    native_by_legacy.setdefault(legacy_id, native_id)
+        project_states.append(state)
+    except (OSError, ValueError):
+        continue
+explicit_native_assignments = {}
+for state in project_states:
+    assignments = state.get("thread-project-assignments", {})
+    if not isinstance(assignments, dict):
+        continue
+    for thread_id, assignment in assignments.items():
+        if not isinstance(assignment, dict) or assignment.get("projectKind") != "local":
+            continue
+        legacy_id = assignment.get("projectId")
+        native_id = native_by_legacy.get(legacy_id)
+        if native_id:
+            explicit_native_assignments.setdefault(thread_id, native_id)
+for key, row in catalog["threads"].items():
+    if not row.get("project_id") and key[0] in explicit_native_assignments:
+        row["project_id"] = explicit_native_assignments[key[0]]
 
 for home in dest_homes:
     if str(home) in active_db_homes:
@@ -5363,10 +5554,18 @@ for home in dest_homes:
                 dest_cols = table_columns(con, table)
                 if not dest_cols or any(key not in dest_cols for key in key_cols):
                     continue
+                if table == "project_roots":
+                    for project in projects.values():
+                        con.execute("DELETE FROM project_roots WHERE project_id = ?", (project["id"],))
                 for row in catalog[table].values():
                     write_row = dict(row)
                     if table == "threads" and "rollout_path" in dest_cols:
                         write_row["rollout_path"] = normalize_thread_rollout_path(write_row, home)
+                    if preserve_sidebar and table == "threads":
+                        # Imported chats start unfiled. Existing chats keep the
+                        # destination's layout, including deliberate unpinning.
+                        for field in local_placement_fields:
+                            write_row.pop(field, None)
                     cols = [col for col in dest_cols if col in write_row]
                     if any(key not in cols for key in key_cols):
                         continue
@@ -5374,6 +5573,8 @@ for home in dest_homes:
                     quoted_cols = ", ".join(f'"{col}"' for col in cols)
                     conflict_cols = ", ".join(f'"{col}"' for col in key_cols)
                     update_cols = [col for col in cols if col not in key_cols]
+                    if preserve_sidebar and table == "threads":
+                        update_cols = [col for col in update_cols if col not in local_thread_fields]
                     if update_cols:
                         updates = ", ".join(f'"{col}" = excluded."{col}"' for col in update_cols)
                         sql = (
@@ -5390,11 +5591,14 @@ for home in dest_homes:
             con.commit()
         except sqlite3.Error:
             con.rollback()
+            if preserve_sidebar:
+                raise
         finally:
             con.close()
 
 repair_session_index_files(dest_homes)
 PY
+  sync_paginated_history_for_homes "$active_db_payload" "$dest_payload" "${homes[@]}"
 }
 
 sync_message() {
@@ -5414,6 +5618,7 @@ sync_message() {
 }
 
 cleanup_thread_indexes_for_homes() {
+  [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" ]] || return 0
   local home_dir
   for home_dir in "$@"; do
     if [[ "$CODEX_DELETE_STALE_THREAD_ROWS" == "1" ]]; then
@@ -5426,6 +5631,7 @@ cleanup_thread_indexes_for_homes() {
 }
 
 sync_selected_homes() {
+  local CODEX_PRESERVE_DEST_SIDEBAR=1
   local -a homes
   local -a history_homes
   homes=("$@")
@@ -5436,7 +5642,7 @@ sync_selected_homes() {
   history_homes=("${(@f)$(shared_history_homes "${homes[@]}")}")
   if [[ "$CODEX_SYNC_THREAD_HISTORY" == "1" ]]; then
     if (( ${#history_homes[@]} > 0 )) && [[ -n "${history_homes[1]:-}" ]]; then
-      sync_thread_index_for_homes "${history_homes[@]}"
+      sync_thread_index_for_homes "${history_homes[@]}" || return $?
       sync_global_state_for_homes "${history_homes[@]}"
       sync_goal_state_for_homes "${history_homes[@]}"
     fi
@@ -5446,6 +5652,7 @@ sync_selected_homes() {
 }
 
 sync_history_selected_homes() {
+  local CODEX_PRESERVE_DEST_SIDEBAR=1
   local -a homes
   local -a history_homes
   homes=("$@")
@@ -5462,7 +5669,7 @@ sync_history_selected_homes() {
     seed_shared_history_from_home "$home_dir"
   done
   CODEX_SYNC_THREAD_HISTORY=1
-  sync_thread_index_for_homes "${history_homes[@]}"
+  sync_thread_index_for_homes "${history_homes[@]}" || return $?
   sync_global_state_for_homes "${history_homes[@]}"
   sync_goal_state_for_homes "${history_homes[@]}"
   cleanup_thread_indexes_for_homes "${history_homes[@]}"
@@ -5561,7 +5768,9 @@ refresh_shared_history_for_home() {
   previous_skip_active="$CODEX_SKIP_ACTIVE_STATE_DB_WRITES"
   CODEX_SKIP_ACTIVE_STATE_DB_WRITES=0
   sync_thread_index_to_selected_homes 1 "$target_home" "${homes[@]}" >/dev/null 2>&1 || true
-  sync_global_state_to_selected_homes 1 "$target_home" "${homes[@]}" >/dev/null 2>&1 || true
+  if [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" ]]; then
+    sync_global_state_to_selected_homes 1 "$target_home" "${homes[@]}" >/dev/null 2>&1 || true
+  fi
   sync_goal_state_to_selected_homes 1 "$target_home" "${homes[@]}" >/dev/null 2>&1 || true
   CODEX_SKIP_ACTIVE_STATE_DB_WRITES="$previous_skip_active"
   restore_account1_visible_thread_model_providers_for_home "$target_home" >/dev/null 2>&1 || true
@@ -5628,6 +5837,7 @@ sync_history_loop() {
 }
 
 sync_account_unlocked() {
+  local CODEX_PRESERVE_DEST_SIDEBAR=1
   local name="$1"
   local target_home home_dir
   local -a all_homes payload_homes history_homes
@@ -5649,7 +5859,7 @@ sync_account_unlocked() {
   history_homes=("${(@f)$(shared_history_homes "${all_homes[@]}")}")
   if [[ "$CODEX_SYNC_THREAD_HISTORY" == "1" ]]; then
     if (( ${#history_homes[@]} > 0 )) && [[ -n "${history_homes[1]:-}" ]]; then
-      sync_thread_index_for_homes "${history_homes[@]}"
+      sync_thread_index_for_homes "${history_homes[@]}" || return $?
       sync_global_state_for_homes "${history_homes[@]}"
       sync_goal_state_for_homes "${history_homes[@]}"
     fi
@@ -5682,18 +5892,12 @@ sync_account_prelaunch_unlocked() {
   history_homes=("${(@f)$(shared_history_homes "${all_homes[@]}")}")
   if [[ "$CODEX_SYNC_THREAD_HISTORY" == "1" ]]; then
     if [[ "$(history_mode_for_home "$target_home")" == "shared" && ${#history_homes[@]} -gt 0 && -n "${history_homes[1]:-}" ]]; then
-      sync_debug "prelaunch global-state account=$name"
-      sync_global_state_to_selected_homes 1 "$target_home" "${history_homes[@]}"
       sync_debug "prelaunch thread-index account=$name"
-      sync_thread_index_to_selected_homes 1 "$target_home" "${history_homes[@]}"
-      sync_debug "prelaunch global-state-prune account=$name"
-      sync_global_state_to_selected_homes 1 "$target_home" "${history_homes[@]}"
+      CODEX_PRESERVE_DEST_SIDEBAR=1 sync_thread_index_to_selected_homes 1 "$target_home" "${history_homes[@]}" || return $?
       sync_debug "prelaunch goal-state account=$name"
       sync_goal_state_to_selected_homes 1 "$target_home" "${history_homes[@]}"
     fi
   fi
-  sync_debug "prelaunch thread-index-cleanup account=$name"
-  cleanup_thread_indexes_for_homes "${history_homes[@]}"
   sync_debug "prelaunch complete account=$name"
   sync_message
 }
@@ -5798,6 +6002,17 @@ is_codex_gui_process_args() {
       return 0
     fi
   done
+
+  app_path="${args%%/Contents/MacOS/*}"
+  if [[ "$app_path" == /private/var/folders/*/AppTranslocation/*/d/*.app \
+    && ( "$args" == "$app_path/Contents/MacOS/ChatGPT" \
+      || "$args" == "$app_path/Contents/MacOS/ChatGPT "* \
+      || "$args" == "$app_path/Contents/MacOS/Codex" \
+      || "$args" == "$app_path/Contents/MacOS/Codex "* ) ]]; then
+    if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/Info.plist" 2>/dev/null)" == "com.openai.codex" ]]; then
+      return 0
+    fi
+  fi
   return 1
 }
 
@@ -6020,6 +6235,7 @@ close_all_accounts_fast() {
 
 launch_account() {
   local name="${1:-}" display_name="${2:-}"
+  local CODEX_PRESERVE_DEST_SIDEBAR=1
   if [[ -z "$name" ]]; then
     echo "launch-account requires an account name." >&2
     exit 2
@@ -6060,6 +6276,14 @@ launch_account() {
 
   if [[ "$CODEX_CLONE_PRIMARY_ON_LAUNCH" == "1" && "$home_dir" != "$PRIMARY_CODEX_HOME" && ! -e "$home_dir/config.toml" ]]; then
     copy_initial_profile_to "$home_dir"
+  fi
+  # Sync must run after this profile exits, otherwise the active-profile guard
+  # skips its state and a relaunch keeps displaying the stale project list.
+  stop_codex_windows_for_app_data "$app_data"
+  stop_codex_servers_for_home "$home_dir"
+  if ! wait_for_codex_window_exit "$app_data"; then
+    echo "Existing Codex window for this profile did not exit in time." >&2
+    return 1
   fi
   if [[ "$CODEX_PRELAUNCH_SYNC" == "1" ]]; then
     if ! sync_account_for_launch "$name" >/dev/null; then
@@ -6116,12 +6340,6 @@ launch_account() {
     echo "  proxy=$CODEX_PROXY_URL"
   fi
 
-  stop_codex_windows_for_app_data "$app_data"
-  stop_codex_servers_for_home "$home_dir"
-  if ! wait_for_codex_window_exit "$app_data"; then
-    echo "Existing Codex window for this profile did not exit in time." >&2
-    return 1
-  fi
   ensure_owl_auth_features_enabled "$app_data"
 
   # Keep the account env scoped to this launch. `launchctl setenv` is global
@@ -6354,6 +6572,7 @@ seed_shared_history_from_home() {
   rm -f "${SHARED_SESSION_INDEX_FILE}.touch"
   recover_shared_history_backups_from_home "$account_home"
   portable_history_items | while read -r item; do
+    [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" || "$item" != "session_index.jsonl" ]] || continue
     seed_shared_history_item_from_home "$account_home" "$item"
   done
   [[ -e "$SHARED_SESSION_INDEX_FILE" ]] || : > "$SHARED_SESSION_INDEX_FILE"
@@ -6457,6 +6676,7 @@ ensure_shared_history_links() {
   seed_shared_history_from_home "$CODEX_HISTORY_ANCHOR_HOME"
   seed_shared_history_from_home "$account_home"
   portable_history_items | while read -r item; do
+    [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" || "$item" != "session_index.jsonl" ]] || continue
     replace_with_symlink "$account_home" "$item"
   done
 }
@@ -6470,6 +6690,7 @@ shared_history_links_ready() {
 
   [[ "$CODEX_SHARED_SESSIONS" == "1" ]] || return 1
   for item in session_index.jsonl sessions shell_snapshots; do
+    [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" || "$item" != "session_index.jsonl" ]] || continue
     target="$account_home/$item"
     source="$(shared_history_source_for_item "$item")"
     [[ -L "$target" ]] || return 1
@@ -6585,10 +6806,6 @@ link_history_for_unlocked() {
   local account_home current_mode
   account_home="$(account_home_for "$name")"
 
-  if profile_transition_is_busy "$name" "$account_home"; then
-    echo "Close this Codex profile and wait for its app-server/database writes before sharing local history." >&2
-    return 1
-  fi
   current_mode="$(history_mode_for_home "$account_home")"
   if [[ "${CODEX_LINK_HISTORY_SKIP_PRIVATE:-0}" == "1" && "$current_mode" == "private" ]]; then
     echo "Skipping private history profile: $(sanitize_account_name "$name")"
@@ -6597,6 +6814,10 @@ link_history_for_unlocked() {
   if [[ "$current_mode" == "shared" ]] && portable_history_links_point_to_shared "$account_home"; then
     echo "$(sanitize_account_name "$name") history is already shared."
     return 0
+  fi
+  if profile_transition_is_busy "$name" "$account_home"; then
+    echo "暫時未能確認 $name 已停止使用：可能仍有背景程序，或磁碟檢查逾時。請稍後重試；如仍有該帳戶視窗，請先關閉。現有對話未有改動。" >&2
+    return 1
   fi
 
   mkdir -p "$account_home"
@@ -6615,7 +6836,7 @@ link_history_for_unlocked() {
     replace_with_symlink "$account_home" "$item"
   done
 
-  sync_thread_index_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
+  sync_thread_index_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home" || return $?
   sync_global_state_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
   sync_goal_state_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
   set_history_mode_for_home "$account_home" shared
@@ -8361,7 +8582,8 @@ profile_transition_is_busy() {
   while read -r pid args; do
     [[ -n "${pid:-}" && -n "${args:-}" ]] || continue
     [[ "$args" == *"codex app-server"* ]] || continue
-    [[ "$args" == *"--codex-home $home_dir"* || "$args" == *"--codex-home=$home_dir"* ]] && return 0
+    [[ "$args" == *"--codex-home $home_dir" || "$args" == *"--codex-home $home_dir "* \
+      || "$args" == *"--codex-home=$home_dir" || "$args" == *"--codex-home=$home_dir "* ]] && return 0
     process_env_contains "$pid" "CODEX_HOME=$home_dir" && return 0
   done < <(ps axww -o pid= -o args=)
   active_homes="$(active_sqlite_homes_payload "$home_dir" 2>/dev/null || true)"

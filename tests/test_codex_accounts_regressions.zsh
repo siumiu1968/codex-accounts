@@ -1341,7 +1341,7 @@ assert helper.count('chmod 600 "$auth_file"') >= 2
 assert 'local max_attempts=2' in helper
 
 global_sync_match = re.search(
-    r"sync_global_state_for_homes\(\) \{(.*?)\n\}",
+    r"sync_global_state_for_homes\(\) \{(.*?)\nPY\n\}",
     helper,
     flags=re.DOTALL,
 )

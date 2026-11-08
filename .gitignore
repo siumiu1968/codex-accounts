@@ -9,3 +9,18 @@ __pycache__/
 *.xcuserstate
 xcuserdata/
 docs/assets/raw-screenshots/
+
+# Local accounts, credentials, and chat data
+.env
+.env.*
+!.env.example
+auth.json
+.secrets/
+.codex/
+.codex-accounts/
+.codex-shared-*/
+.codex-global-state.json*
+session_index.jsonl
+rollout-*.jsonl
+*.sqlite
+*.sqlite-*
