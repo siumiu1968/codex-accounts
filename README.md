@@ -2,11 +2,13 @@
 
 **Languages:** [繁體中文](#繁體中文) | [简体中文](#简体中文) | [English](#english)
 
-![Anonymized Codex Accounts UI overview captured for V2.5.5](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
+![Codex Accounts 4.0 accounts page with demo profiles](docs/assets/codex-accounts-v4-accounts-en.jpg)
 
-![Anonymized Codex Accounts theme selector captured for V2.5.5](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
+![Codex Accounts 4.0 insights page with demo data](docs/assets/codex-accounts-v4-insights-en.jpg)
 
-> 私隱說明 / Privacy: 圖中所有 profile 名稱、`/tmp/demo-profiles` 路徑及 quota 數值均為虛構示範資料。All profile names, `/tmp/demo-profiles` paths, and quota values shown above are fictional demo data.
+![Codex Accounts 4.0 theme picker](docs/assets/codex-accounts-v4-themes-en.jpg)
+
+> 私隱說明 / Privacy: 圖中所有 profile 名稱、路徑、額度同 token 數字都係虛構示範資料。All profile names, paths, quota and token figures shown above are made-up demo data.
 
 ---
 
@@ -15,6 +17,25 @@
 ## 繁體中文
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
+
+### V4.0.0 更新介紹
+
+V4.0.0 係一次由頭到尾嘅重新設計。
+
+- **全新介面**：左邊導航（可以拖闊拖窄）、帳戶列表、右邊詳情欄；粗額度條會按剩餘量由綠變紅，一眼睇到邊個帳戶用得。
+- **自動分方案**：按帳戶實際方案自動分組（Pro 20x／Pro 10x／Plus／Free），亦可以手動改；常用帳戶可以置頂。
+- **分析頁**：Token 總量、API 等值估算、快取命中率、每日用量、帳戶比較、模型同推理級別分佈、活躍時段、最耗 Token 嘅對話，仲會提示邊個帳戶嘅額度會喺重設前嘥咗。可以睇全部帳戶，亦可以逐個睇。
+- **每分鐘更新額度**：App 開住就會每分鐘更新所有帳戶（包括冇用緊嗰啲）並記錄落嚟做分析。
+- **13 個主題**：每個都有深色同淺色兩套，全部通過文字對比度檢查；可以揀自己嘅圖片做背景（圖片只留喺你部 Mac）。
+- **螢幕清潔**：確認之後黑屏 15 秒並暫停觸控，方便抹螢幕；左邊欄可以直接開關防睡眠同鍵盤清潔。
+- **新安裝更順**：第一次開會跟系統語言；缺少 `jq` 或 Python 3 時會喺畫面提示點裝；提供 Apple Silicon 同 Intel 通用版。
+- **已移除**：OpenCodex 模式同對話冷儲存。舊資料夾唔會被刪除。
+
+分析頁只會讀 Codex 喺本機記低嘅用量數字、模型名同項目資料夾名，唔會讀對話內容，亦唔會上傳任何資料。API 等值係按公開價目估算，唔係實際收費。
+
+![Codex Accounts 4.0 帳戶頁（示範資料）](docs/assets/codex-accounts-v4-accounts-zh-HK.jpg)
+
+![Codex Accounts 4.0 分析頁（示範資料）](docs/assets/codex-accounts-v4-insights-zh-HK.jpg)
 
 ### V2.7.4 更新介紹
 
@@ -120,17 +141,18 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 - 多 profile 管理：新增、打開、關閉、改名、顯示資料夾、封存和刪除 profile。
 - 每個 profile 獨立登入：不同 OpenAI / GPT 帳戶互不混用 session。
-- 內置 OpenCodex：只限獨立 `opencodex-lab` Profile；可選擇共享本機對話，登入、設定同代理路由保持獨立，普通 Profile 保持直連或原有自訂路由。
+- 分析頁：Token 用量、API 等值估算、帳戶比較、模型分佈、活躍時段同額度規劃；只讀本機用量數字，唔讀對話內容。
+- 方案分組同置頂：按 Pro／Plus／Free 自動分組，可手動修改同置頂。
 - 輕量啟動與獨立同步：打開 profile 唔會被重型同步阻塞；本機記憶、rules、AGENTS 同外掛設定可用自動或手動同步。
 - 用量顯示：顯示 5H / 1W 額度、百分比和恢復時間；「今日使用」只計 Codex 實際運行時間，睡眠同關機時間唔會計算。
 - 狀態自動整理：每分鐘刷新登入狀態和 quota，保留最近可用數據，避免畫面突然全變未知。
 - 本機對話私隱：每個 profile 可選擇「私人本機對話」或共享模式；私人 profile 會略過本機對話、記憶同批量匯入共享。
 - 記憶與外掛同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，外掛啟用狀態會喺不同帳號之間合併。
 - 三段防睡眠：關閉、開屏防睡眠、合蓋繼續運行；開屏模式使用 `caffeinate`，合蓋模式需要 macOS 管理員確認，離開時會恢復系統設定。
-- 電腦清潔模式：暫停大部分鍵盤輸入，方便清潔鍵盤，保留滑鼠/觸控板操作去關閉模式。
+- 清潔模式：鍵盤清潔會暫停鍵盤輸入；螢幕清潔會喺確認後黑屏 15 秒並暫停觸控。
 - 對話包匯出/導入：可把單一對話打包成 `.codexshare`，匯入到單一或全部 profile，方便可信團隊交接上下文。
 - 更新通道：檢查 GitHub release，驗證下載檔版本同 bundle id，然後自動替換 `/Applications/Codex Accounts.app`。
-- Liquid Glass 介面：8 款高辨識主題、hover 發光、profile 卡片動效、廣東話 / 繁體中文 / 簡體中文 / 英文 / 日本語介面。
+- 介面：13 款主題（各有深色同淺色）、可自選背景圖片、可調闊度嘅側欄；廣東話 / 繁體中文 / 簡體中文 / 英文 / 日本語。
 - 菜單列控制：快速新增、同步、關閉所有 Codex 視窗、切換防睡眠。
 
 ### 不會做的事
@@ -143,13 +165,13 @@ V2.3.0 重點修復長時間使用後偶發卡死嘅問題。外部 Codex script
 
 ### 安裝
 
-系統需求：macOS 14 或以上。
+系統需求：macOS 14 或以上，Apple Silicon 或 Intel。另外需要 `jq`（macOS 15 或以上已內置；macOS 14 可以用 `brew install jq`）同 Python 3（裝 Apple 嘅 Command Line Tools 就有：`xcode-select --install`）。缺少時 app 會喺畫面提示。
 
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下載 `Codex-Accounts-macOS.zip`。
 2. 解壓後把 `Codex Accounts.app` 移到 `/Applications`。
 3. 從 Finder 開啟 app。
 
-如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。
+如果 macOS 阻擋第一次開啟，進入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，選擇 `Open Anyway`。呢個 app 未經 Apple 公證；如果仍然開唔到，可以喺終端機執行 `xattr -dr com.apple.quarantine "/Applications/Codex Accounts.app"`。
 
 安裝 V2.7.1 之後，可以直接喺 app 入面檢查同安裝下一個 GitHub release；GitHub API 暫時失效時會自動使用網頁後備路徑。
 
@@ -204,6 +226,21 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## 简体中文
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
+
+### V4.0.0 更新介绍
+
+V4.0.0 是一次从头到尾的重新设计。
+
+- **全新界面**：左侧导航（可拖动调整宽度）、账号列表、右侧详情栏；粗额度条按剩余量由绿变红，一眼看出哪个账号可用。
+- **自动分方案**：按账号实际方案自动分组（Pro 20x／Pro 10x／Plus／Free），也可以手动修改；常用账号可以置顶。
+- **分析页**：Token 总量、API 等值估算、缓存命中率、每日用量、账号对比、模型与推理级别分布、活跃时段、最耗 Token 的对话，并提示哪个账号的额度会在重置前浪费。可以看全部账号，也可以逐个看。
+- **每分钟更新额度**：App 开着时每分钟更新所有账号（包括没在用的）并记录下来用于分析。
+- **13 个主题**：每个都有深色和浅色两套，全部通过文字对比度检查；可以选择自己的图片做背景（图片只留在你的 Mac）。
+- **屏幕清洁**：确认后黑屏 15 秒并暂停触控，方便擦屏幕；左侧栏可以直接开关防睡眠和键盘清洁。
+- **新安装更顺**：首次打开跟随系统语言；缺少 `jq` 或 Python 3 时会在界面提示如何安装；提供 Apple Silicon 与 Intel 通用版。
+- **已移除**：OpenCodex 模式和对话冷存储。旧文件夹不会被删除。
+
+分析页只读取 Codex 在本机记录的用量数字、模型名和项目文件夹名，不读取对话内容，也不上传任何数据。API 等值按公开价目估算，不是实际收费。
 
 ### V2.7.4 更新介绍
 
@@ -309,17 +346,18 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 - 多 profile 管理：新增、打开、关闭、改名、显示资料夹、归档和删除 profile。
 - 每个 profile 独立登录：不同 OpenAI / GPT 账号互不混用 session。
-- 内置 OpenCodex：仅限独立的 `opencodex-lab` Profile；可选择共享本地对话，登录、设置和代理路由保持独立，普通 Profile 保持直连或原有自定义路由。
+- 分析页：Token 用量、API 等值估算、账号对比、模型分布、活跃时段和额度规划；只读取本机用量数字，不读取对话内容。
+- 方案分组与置顶：按 Pro／Plus／Free 自动分组，可手动修改和置顶。
 - 轻量启动与独立同步：打开 profile 不会被重型同步阻塞；本地记忆、rules、AGENTS 和插件设置可自动或手动同步。
 - 用量显示：显示 5H / 1W 额度、百分比和恢复时间；“今日使用”只计算 Codex 实际运行时间，睡眠和关机时间不会计入。
 - 状态自动整理：每分钟刷新登录状态和 quota，保留最近可用数据，避免画面突然全变未知。
 - 本地对话隐私：每个 profile 可选择“私人本地对话”或共享模式；私人 profile 会跳过本地对话、记忆和批量导入共享。
 - 记忆与插件同步：可同步 `AGENTS.md`、`memories/`、`rules/`、`plugins/`、`skills/`、`vendor_imports/`，插件启用状态会在不同账号之间合并。
 - 三段防睡眠：关闭、开屏防睡眠、合盖继续运行；开屏模式使用 `caffeinate`，合盖模式需要 macOS 管理员确认，离开时会恢复系统设置。
-- 电脑清洁模式：暂停大部分键盘输入，方便清洁键盘，保留鼠标/触控板操作去关闭模式。
+- 清洁模式：键盘清洁会暂停键盘输入；屏幕清洁会在确认后黑屏 15 秒并暂停触控。
 - 对话包导出/导入：可把单一对话打包成 `.codexshare`，导入到单一或全部 profile，方便可信团队交接上下文。
 - 更新通道：检查 GitHub release，验证下载文件版本和 bundle id，然后自动替换 `/Applications/Codex Accounts.app`。
-- Liquid Glass 界面：8 款高辨识度主题、hover 发光、profile 卡片动效、香港粤语 / 繁体中文 / 简体中文 / 英文 / 日文界面。
+- 界面：13 款主题（各有深色和浅色）、可自选背景图片、可调宽度的侧栏；香港粤语 / 繁体中文 / 简体中文 / 英文 / 日语。
 - 菜单栏控制：快速新增、同步、关闭所有 Codex 窗口、切换防睡眠。
 
 ### 它不会做什么
@@ -332,13 +370,13 @@ V2.3.0 重点修复长时间使用后偶发卡死的问题。外部 Codex script
 
 ### 安装
 
-系统要求：macOS 14 或更高版本。
+系统要求：macOS 14 或更高版本，Apple Silicon 或 Intel。另外需要 `jq`（macOS 15 及以上已内置；macOS 14 可用 `brew install jq`）和 Python 3（安装 Apple 的 Command Line Tools 即可：`xcode-select --install`）。缺少时 app 会在界面提示。
 
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下载 `Codex-Accounts-macOS.zip`。
 2. 解压后把 `Codex Accounts.app` 移到 `/Applications`。
 3. 从 Finder 打开 app。
 
-如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。
+如果 macOS 阻挡第一次打开，进入 `System Settings` → `Privacy & Security`，找到 `Codex Accounts`，选择 `Open Anyway`。此 app 未经 Apple 公证；如果仍然打不开，可以在终端执行 `xattr -dr com.apple.quarantine "/Applications/Codex Accounts.app"`。
 
 安装 V2.7.1 之后，可以直接在 app 里检查并安装下一个 GitHub release；GitHub API 暂时失效时会自动使用网页备用路径。
 
@@ -393,6 +431,23 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V4.0.0 Update
+
+V4.0.0 is a redesign from top to bottom.
+
+- **New interface**: a navigation sidebar you can drag wider or narrower, the account list, and a detail column. Thick quota bars run from green to red by what is left, so the usable account is obvious.
+- **Plans, detected**: accounts are grouped by their actual plan (Pro 20x / Pro 10x / Plus / Free). You can override a plan by hand and pin the accounts you use most.
+- **Insights**: total tokens, an API-equivalent estimate, cache hit rate, daily use, a per-account comparison, model and reasoning-effort mix, busiest hours, the largest conversations, and a warning when an account's quota will expire unused. View all accounts or one at a time.
+- **Quota every minute**: while the app is open, every account is refreshed each minute, including the ones you are not using, and recorded for the charts.
+- **13 themes**: each designed for dark and light, all checked for text contrast. You can use a picture of your own as the background; it stays on your Mac.
+- **Screen Clean**: after you confirm, the screen goes black for 15 seconds and touch is paused so you can wipe it. Keep Awake and Keyboard Clean now have switches in the sidebar.
+- **Smoother first run**: the app starts in your Mac's language, tells you on screen if `jq` or Python 3 is missing and how to get it, and ships as a universal build for Apple Silicon and Intel.
+- **Removed**: OpenCodex mode and conversation cold storage. Existing folders are left alone.
+
+![Codex Accounts 4.0 in a light theme with demo profiles](docs/assets/codex-accounts-v4-light-en.jpg)
+
+Insights reads only the usage numbers, model names and project folder names that Codex records on your Mac. It never reads conversation text and uploads nothing. The API equivalent is an estimate from published prices, not a bill.
 
 ### V2.7.4 Update
 
@@ -498,17 +553,18 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 - Multi-profile management: create, open, close, rename, reveal, archive, and delete profiles.
 - Separate sign-in state: every profile keeps its own OpenAI / GPT account session.
-- Bundled OpenCodex: available only in the isolated `opencodex-lab` profile; local chats may be shared while sign-in, settings, and proxy routing remain isolated, and regular profiles keep direct or existing custom routes.
+- Insights: token use, an API-equivalent estimate, account comparison, model mix, busiest hours and quota planning, read only from local usage numbers, never from conversation text.
+- Plan groups and pins: accounts are grouped by Pro / Plus / Free automatically; override by hand and pin favourites.
 - Lightweight launch with independent sync: opening a profile is not blocked by heavy sync; local memory, rules, AGENTS, and plugin settings can sync automatically or on demand.
 - Usage meters: show 5H / 1W quota, percentage, and reset time; Today counts only actual Codex runtime and excludes sleep and offline time.
 - Stable status refresh: sign-in state and quota refresh every minute, with last-known usage preserved when the endpoint is temporarily unavailable.
 - Per-profile local history privacy: choose private local chats or shared mode; private profiles are excluded from local chat, memory, and bulk-import sharing.
 - Optional memory and plugin sync for `AGENTS.md`, `memories/`, `rules/`, `plugins/`, `skills/`, and `vendor_imports/`, including enabled plugin entries across accounts.
 - Three-level Keep Awake: Off, Screen Awake, and Lid Closed; Screen Awake uses `caffeinate`, while Lid Closed requires macOS administrator approval and restores the system setting when disabled.
-- Keyboard Clean Mode: blocks most keyboard input while keeping mouse/trackpad control available so the mode can be turned off safely.
+- Clean modes: Keyboard Clean pauses keyboard input; Screen Clean blacks out the display for 15 seconds after you confirm, with touch paused.
 - Conversation package export/import: package a single thread as `.codexshare` and import it into one profile or all profiles for trusted team handoff.
 - Update channel: checks GitHub releases, validates the downloaded app version and bundle id, then replaces `/Applications/Codex Accounts.app`.
-- Liquid Glass interface: eight distinct themes, hover glow, profile card animation, Cantonese Hong Kong, Traditional Chinese, Simplified Chinese, English, and Japanese UI.
+- Interface: 13 themes in dark and light, an optional background picture of your own, a resizable sidebar; Cantonese, Traditional Chinese, Simplified Chinese, English and Japanese.
 - Menu bar controls: quick create, sync, close all Codex windows, and toggle Keep Awake.
 
 ### What It Does Not Do
@@ -521,13 +577,13 @@ V2.3.0 fixes an intermittent freeze that could appear after the app had been run
 
 ### Install
 
-System requirement: macOS 14 or later.
+System requirements: macOS 14 or later, Apple Silicon or Intel. The app also needs `jq` (included from macOS 15; on macOS 14 use `brew install jq`) and Python 3 (it comes with Apple's Command Line Tools: `xcode-select --install`). The app tells you on screen if either is missing.
 
 1. Download `Codex-Accounts-macOS.zip` from [Releases](https://github.com/siumiu1968/codex-accounts/releases).
 2. Unzip it and move `Codex Accounts.app` to `/Applications`.
 3. Open the app from Finder.
 
-If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`.
+If macOS blocks the first launch, open `System Settings` → `Privacy & Security`, find `Codex Accounts`, and choose `Open Anyway`. The app is not notarized by Apple; if it still will not open, run `xattr -dr com.apple.quarantine "/Applications/Codex Accounts.app"` in Terminal.
 
 After installing V2.7.1, future GitHub releases can be checked and installed directly inside the app, with the web fallback used when the GitHub API is temporarily unavailable.
 

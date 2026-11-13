@@ -16,6 +16,7 @@ cp "$SRC_DIR/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT_DIR/scripts/codex_multi_account.zsh" "$RESOURCES/codex_multi_account.zsh"
 chmod +x "$RESOURCES/codex_multi_account.zsh"
 cp "$ROOT_DIR/scripts/sync_paginated_history.py" "$RESOURCES/sync_paginated_history.py"
+cp "$ROOT_DIR/scripts/storage_review_layout.py" "$RESOURCES/storage_review_layout.py"
 
 find "$RESOURCES" -maxdepth 1 \( -name 'codex_remote_bridge.py*' -o -name 'start_mac_bridge.zsh*' -o -name '__pycache__' \) -exec rm -rf {} +
 
@@ -25,13 +26,15 @@ chmod +x "$RESOURCES/codex_share_package.py"
 cp "$ROOT_DIR/scripts/auto_prune_child_tasks.py" "$RESOURCES/auto_prune_child_tasks.py"
 chmod +x "$RESOURCES/auto_prune_child_tasks.py"
 
-cp "$ROOT_DIR/scripts/opencodex_runtime_seed.py" "$RESOURCES/opencodex_runtime_seed.py"
-chmod +x "$RESOURCES/opencodex_runtime_seed.py"
+# OpenCodex mode was removed in 3.3.1: its runtime is no longer bundled, and an older copy is cleared.
+rm -rf "$RESOURCES/opencodex-runtime" "$RESOURCES/opencodex_runtime_seed.py"
 
-if [[ -d "$ROOT_DIR/resources/opencodex-runtime" ]]; then
-  rm -rf "$RESOURCES/opencodex-runtime"
-  cp -R "$ROOT_DIR/resources/opencodex-runtime" "$RESOURCES/opencodex-runtime"
+if [[ -f "$SRC_DIR/AccountsLogo.png" ]]; then
+  cp "$SRC_DIR/AccountsLogo.png" "$RESOURCES/AccountsLogo.png"
 fi
+
+# The background picture is each user's own file in Application Support; none ships inside the app.
+rm -f "$RESOURCES/AppBackdrop.png"
 
 if [[ -f "$SRC_DIR/AppIcon.icns" ]]; then
   cp "$SRC_DIR/AppIcon.icns" "$RESOURCES/AppIcon.icns"
@@ -46,14 +49,36 @@ if [[ -d "$SRC_DIR/ProfileLetterIcons" ]]; then
   cp -R "$SRC_DIR/ProfileLetterIcons" "$RESOURCES/ProfileLetterIcons"
 fi
 
-swiftc \
-  -target "$BUILD_ARCH-apple-macos$MACOS_DEPLOYMENT_TARGET" \
-  "$SRC_DIR/Sources/CodexAccounts.swift" \
-  -framework AppKit \
-  -framework CoreGraphics \
-  -framework IOKit \
-  -framework SwiftUI \
-  -o "$MACOS/Codex Accounts"
+# BUILD_ARCH=universal builds for Apple Silicon and Intel. The source is compiled by its path inside the
+# repository and the prefix map removes the rest, so the builder's folder and user name never end up in the app.
+if [[ "$BUILD_ARCH" == "universal" ]]; then
+  ARCHS=(arm64 x86_64)
+else
+  ARCHS=("$BUILD_ARCH")
+fi
+SLICES=()
+for arch in "${ARCHS[@]}"; do
+  slice="$MACOS/.codex-accounts-$arch"
+  (
+    cd "$ROOT_DIR"
+    swiftc \
+      -target "$arch-apple-macos$MACOS_DEPLOYMENT_TARGET" \
+      -file-prefix-map "$ROOT_DIR=." \
+      "macos/CodexAccounts/Sources/CodexAccounts.swift" \
+      -framework AppKit \
+      -framework CoreGraphics \
+      -framework IOKit \
+      -framework SwiftUI \
+      -o "$slice"
+  )
+  SLICES+=("$slice")
+done
+if (( ${#SLICES[@]} > 1 )); then
+  lipo -create "${SLICES[@]}" -output "$MACOS/Codex Accounts"
+  rm -f "${SLICES[@]}"
+else
+  mv -f "${SLICES[1]}" "$MACOS/Codex Accounts"
+fi
 
 chmod +x "$MACOS/Codex Accounts"
 

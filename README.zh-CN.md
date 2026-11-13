@@ -4,11 +4,22 @@
 
 Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / OpenAI profile。每个 profile 都有独立的 `CODEX_HOME` 和应用数据目录，因此可以保持不同的登录状态，不必反复退出和重新登录。
 
-![为 V2.5.5 制作的匿名 Codex Accounts 界面截图](docs/assets/codex-accounts-v2.5.5-overview-zh-HK.jpg)
+![Codex Accounts 4.0 账号页（演示数据）](docs/assets/codex-accounts-v4-accounts-zh-HK.jpg)
 
-![为 V2.5.5 制作的匿名 Codex Accounts 主题截图](docs/assets/codex-accounts-v2.5.5-themes-zh-HK.jpg)
+![Codex Accounts 4.0 分析页（演示数据）](docs/assets/codex-accounts-v4-insights-zh-HK.jpg)
 
-> 两张图片都只使用虚构 profile 名称、`/tmp/demo-profiles/...` 演示路径和模拟用量，不包含真实账号、姓名、电脑用户名、token 或对话内容。
+> 图片只使用虚构的 profile 名称、路径、额度和 token 数字，不包含真实账号资料。
+
+## 4.0.0 更新
+
+- 全新界面：可调宽度的侧栏、账号列表、详情栏；粗额度条按剩余量由绿变红。
+- 按账号实际方案自动分组（Pro 20x／Pro 10x／Plus／Free），可手动修改和置顶。
+- 新增分析页：Token 总量、API 等值估算、缓存命中率、每日用量、账号对比、模型与推理级别分布、活跃时段和额度规划。只读取本机用量数字，不读取对话内容，不上传数据。
+- App 开着时每分钟更新所有账号的额度并记录。
+- 13 个主题，各有深色和浅色；可选择自己的图片做背景。
+- 屏幕清洁：确认后黑屏 15 秒并暂停触控。
+- 首次打开跟随系统语言；缺少 `jq` 或 Python 3 时在界面提示；提供 Apple Silicon 与 Intel 通用版。
+- 移除 OpenCodex 模式和对话冷存储，旧文件夹不会被删除。
 
 ## 2.7.4 更新
 
@@ -97,7 +108,7 @@ Codex Accounts 是一个非官方 macOS 工具，用来管理多个 Codex / Open
 
 ## 安装
 
-系统要求：macOS 14 或更高版本。
+系统要求：macOS 14 或更高版本，Apple Silicon 或 Intel。另外需要 `jq`（macOS 15 及以上已内置；macOS 14 可用 `brew install jq`）和 Python 3（`xcode-select --install`）。
 
 1. 到 [Releases](https://github.com/siumiu1968/codex-accounts/releases) 下载 `Codex-Accounts-macOS.zip`。
 2. 解压后把 `Codex Accounts.app` 移到 `/Applications`。

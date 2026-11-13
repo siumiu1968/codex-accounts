@@ -2,6 +2,10 @@
 set -euo pipefail
 setopt typesetsilent
 
+# An app opened from Finder gets only the system folders in PATH. Homebrew's folders go last, so the system's
+# own tools still win and a Homebrew jq is found on macOS 14, which does not ship one.
+export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin"
+
 # Launch a second Codex profile and sync local memory files between profiles.
 # This intentionally does not copy auth.json, cookies, or SQLite logs.
 
@@ -112,7 +116,7 @@ RESET_CREDITS_API_URL="${RESET_CREDITS_API_URL:-https://chatgpt.com/backend-api/
 TOKEN_REFRESH_URL="${TOKEN_REFRESH_URL:-https://auth.openai.com/oauth/token}"
 CHATGPT_CLIENT_ID="${CHATGPT_CLIENT_ID:-app_EMoamEEZ73f0CkXaXp7hrann}"
 USAGE_CACHE_SECONDS="${USAGE_CACHE_SECONDS:-120}"
-USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache-v8}"
+USAGE_CACHE_ROOT="${USAGE_CACHE_ROOT:-$APP_DATA_ROOT/.usage-cache-v9}"
 USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS="${USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS:-1}"
 USAGE_DIRECT_TIMEOUT_SECONDS="${USAGE_DIRECT_TIMEOUT_SECONDS:-3}"
 TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS="${TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS:-3}"
@@ -132,27 +136,29 @@ CODEX_AUTO_SYNC_LOCK_MAX_WAITS="${CODEX_AUTO_SYNC_LOCK_MAX_WAITS:-0}"
 CODEX_SYNC_STALE_LOCK_SECONDS="${CODEX_SYNC_STALE_LOCK_SECONDS:-15}"
 CODEX_SKIP_ACTIVE_STATE_DB_WRITES="${CODEX_SKIP_ACTIVE_STATE_DB_WRITES:-1}"
 CODEX_DELETE_STALE_THREAD_ROWS="${CODEX_DELETE_STALE_THREAD_ROWS:-0}"
-CODEX_DEFAULT_OPENAI_MODEL="${CODEX_DEFAULT_OPENAI_MODEL:-gpt-5.6-sol}"
+CODEX_DEFAULT_OPENAI_MODEL="${CODEX_DEFAULT_OPENAI_MODEL:-}"
 CODEX_DEFAULT_OPENAI_REASONING_EFFORT="${CODEX_DEFAULT_OPENAI_REASONING_EFFORT:-xhigh}"
 CODEX_PRUNE_GLOBAL_STATE_ON_SYNC="${CODEX_PRUNE_GLOBAL_STATE_ON_SYNC:-0}"
-CODEX_PRUNE_LOCAL_THREAD_CATALOG="${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-1}"
+CODEX_PRUNE_LOCAL_THREAD_CATALOG="${CODEX_PRUNE_LOCAL_THREAD_CATALOG:-0}"
 CODEX_CATALOG_ORPHAN_GRACE_SECONDS="${CODEX_CATALOG_ORPHAN_GRACE_SECONDS:-120}"
 CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH="${CODEX_REPAIR_COMPACTED_IMAGES_ON_LAUNCH:-0}"
 CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH="${CODEX_HEAVY_STATE_REPAIR_ON_LAUNCH:-0}"
 CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES="${CODEX_COMPACTED_IMAGE_REPAIR_MIN_BYTES:-67108864}"
 CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS="${CODEX_SESSION_PAYLOAD_IMAGE_MIN_CHARS:-65536}"
 CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS="${CODEX_SESSION_PAYLOAD_STRING_MAX_CHARS:-200000}"
-CODEX_ACTIVE_DB_LSOF_MAX_WAITS="${CODEX_ACTIVE_DB_LSOF_MAX_WAITS:-4}"
+CODEX_ACTIVE_DB_LSOF_MAX_WAITS="${CODEX_ACTIVE_DB_LSOF_MAX_WAITS:-40}"
 CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS="${CODEX_ACTIVE_DB_LSOF_WAIT_SECONDS:-0.05}"
 CODEX_RSYNC_MAX_WAITS="${CODEX_RSYNC_MAX_WAITS:-80}"
 CODEX_RSYNC_WAIT_SECONDS="${CODEX_RSYNC_WAIT_SECONDS:-0.1}"
 CODEX_USAGE_LIVE_LOOKUP="${CODEX_USAGE_LIVE_LOOKUP:-0}"
 CODEX_USAGE_LIVE_MIN_PARALLELISM="${CODEX_USAGE_LIVE_MIN_PARALLELISM:-10}"
 USAGE_CACHE_STALE_SECONDS="${USAGE_CACHE_STALE_SECONDS:-604800}"
+USAGE_RETRY_AFTER_AUTH_FAILURE_SECONDS="${USAGE_RETRY_AFTER_AUTH_FAILURE_SECONDS:-1800}"
+USAGE_RETRY_AFTER_ERROR_SECONDS="${USAGE_RETRY_AFTER_ERROR_SECONDS:-300}"
 SYNC_LOCK_DIR="${SYNC_LOCK_DIR:-$APP_DATA_ROOT/.sync.lock}"
 CODEX_INJECT_PROXY_ENV="${CODEX_INJECT_PROXY_ENV:-auto}"
 CODEX_PROXY_URL="${CODEX_PROXY_URL:-http://127.0.0.1:7897}"
-CODEX_NO_PROXY="${CODEX_NO_PROXY:-localhost,127.0.0.1,::1}"
+CODEX_NO_PROXY="${CODEX_NO_PROXY:-localhost,127.0.0.1,::1,persistent.oaistatic.com}"
 DASHSCOPE_SECRET_ENV_FILE="${DASHSCOPE_SECRET_ENV_FILE:-$ACCOUNTS_ROOT/.secrets/dashscope.env}"
 ALIYUN_CODING_PLAN_BRIDGE_HOST="${ALIYUN_CODING_PLAN_BRIDGE_HOST:-127.0.0.1}"
 ALIYUN_CODING_PLAN_BRIDGE_PORT="${ALIYUN_CODING_PLAN_BRIDGE_PORT:-31416}"
@@ -162,7 +168,7 @@ ALIYUN_CODING_PLAN_BASE_URL="${ALIYUN_CODING_PLAN_BASE_URL:-https://coding.dashs
 CODEX_BUNDLED_NODE_BIN="${CODEX_BUNDLED_NODE_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
 CODEX_BUNDLED_NPM_BIN="${CODEX_BUNDLED_NPM_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/npm}"
 OPENCODEX_PACKAGE="@bitkyc08/opencodex"
-OPENCODEX_VERSION="2.29.0"
+OPENCODEX_VERSION="2.31.0"
 OPENCODEX_PORT="${OPENCODEX_PORT:-10100}"
 OPENCODEX_LAB_ACCOUNT="opencodex-lab"
 OPENCODEX_LAB_CODEX_HOME="${OPENCODEX_LAB_CODEX_HOME:-$ACCOUNTS_ROOT/$OPENCODEX_LAB_ACCOUNT}"
@@ -220,6 +226,7 @@ Usage:
   scripts/codex_multi_account.zsh launch-account2
   scripts/codex_multi_account.zsh sync-once
   scripts/codex_multi_account.zsh sync-history-once
+  scripts/codex_multi_account.zsh storage-review-layout <status|enable|rollback> [account-name]
   scripts/codex_multi_account.zsh sync-account <account-name>
   scripts/codex_multi_account.zsh sync-account-for-launch <account-name>
   scripts/codex_multi_account.zsh repair-account1
@@ -285,7 +292,7 @@ OpenCodex Lab:
   - Uses only $HOME/.codex-accounts/opencodex-lab for Codex data.
   - Uses only "$HOME/Library/Application Support/Codex Accounts/OpenCodex/state"
     for OpenCodex state, with a managed npm runtime and fake HOME beside it.
-  - Version is pinned to @bitkyc08/opencodex@2.29.0.
+  - Version is pinned to @bitkyc08/opencodex@2.31.0.
   - The loopback port is fixed at 10100 by default (override with OPENCODEX_PORT).
   - It never installs an OpenCodex service or Codex shim.
   - The dashboard is loopback-only; no remote management token is created.
@@ -1882,10 +1889,19 @@ configure_account1_aliyun_proxy_for_home() {
 restore_non_account1_openai_config_for_home() {
   local home_dir="$1"
   local config_file="$home_dir/config.toml"
+  local preferred_model preferred_effort
   is_primary_codex_home "$home_dir" && return 0
   [[ -f "$config_file" ]] || return 0
 
-  if ! awk -v wanted_model="$CODEX_DEFAULT_OPENAI_MODEL" -v wanted_effort="$CODEX_DEFAULT_OPENAI_REASONING_EFFORT" '
+  preferred_model="${CODEX_DEFAULT_OPENAI_MODEL:-}"
+  if [[ -z "$preferred_model" ]]; then
+    preferred_model="$(preferred_openai_model_for_home "$home_dir" 2>/dev/null || true)"
+  fi
+  [[ "$preferred_model" =~ '^gpt-[A-Za-z0-9._:-]+$' ]] || return 0
+  preferred_effort="$(preferred_openai_reasoning_effort_for_home "$home_dir" 2>/dev/null || true)"
+  preferred_effort="${preferred_effort:-$CODEX_DEFAULT_OPENAI_REASONING_EFFORT}"
+
+  if ! awk -v wanted_model="$preferred_model" -v wanted_effort="$preferred_effort" '
     BEGIN { in_table = 0; ok_model = 0; ok_provider = 0; ok_effort = 0 }
     /^\[/ { in_table = 1 }
     in_table == 0 && $0 == "model = \"" wanted_model "\"" { ok_model = 1 }
@@ -1895,7 +1911,7 @@ restore_non_account1_openai_config_for_home() {
   ' "$config_file" >/dev/null 2>&1; then
     backup_config_once "$home_dir" "openai-default-model"
   fi
-  write_top_level_model_config "$config_file" "$CODEX_DEFAULT_OPENAI_MODEL" "openai" "$CODEX_DEFAULT_OPENAI_REASONING_EFFORT"
+  write_top_level_model_config "$config_file" "$preferred_model" "openai" "$preferred_effort"
 }
 
 home_uses_account1_ai_proxy() {
@@ -2748,6 +2764,16 @@ is_history_anchor_home() {
   same_resolved_path "$account_home" "$CODEX_HISTORY_ANCHOR_HOME"
 }
 
+# The desktop Storage page deliberately excludes symbolic links. Its review
+# profile may own the single physical sessions directory; the shared path is
+# then a compatibility link back to it. Never replace the real directory.
+profile_owns_shared_sessions() {
+  local account_home="$1"
+  local target="$account_home/sessions"
+  [[ -d "$target" && ! -L "$target" && -L "$SHARED_SESSIONS_DIR" ]] &&
+    same_resolved_path "$target" "$SHARED_SESSIONS_DIR"
+}
+
 portable_history_links_point_to_shared() {
   local account_home="$1"
   local item target source
@@ -2755,6 +2781,9 @@ portable_history_links_point_to_shared() {
   for item in session_index.jsonl sessions shell_snapshots; do
     target="$account_home/$item"
     source="$(shared_history_source_for_item "$item")"
+    if [[ "$item" == "sessions" ]] && profile_owns_shared_sessions "$account_home"; then
+      continue
+    fi
     [[ -L "$target" ]] || return 1
     same_resolved_path "$target" "$source" || return 1
   done
@@ -2930,6 +2959,9 @@ init_account() {
     echo "Account 1 already exists: $PRIMARY_CODEX_HOME"
     return 0
   fi
+  if profile_owns_shared_sessions "$home_dir"; then
+    storage_review_layout rollback "$name" || return $?
+  fi
 
   mkdir -p "$home_dir" "$app_data"
   remove_shared_history_links_for_blank_account "$home_dir"
@@ -2937,9 +2969,10 @@ init_account() {
   mkdir -p "$home_dir/sessions" "$home_dir/shell_snapshots"
   [[ -e "$home_dir/session_index.jsonl" || -L "$home_dir/session_index.jsonl" ]] || : > "$home_dir/session_index.jsonl"
   set_history_mode_for_home "$home_dir" private
-  local history_mode="private"
+  link_history_for "$name" >/dev/null
+  local history_mode="shared"
 
-  echo "Initialized blank account:"
+  echo "Initialized shared account:"
   echo "  name: $(sanitize_account_name "$name")"
   echo "  CODEX_HOME: $home_dir"
   echo "  app data: $app_data"
@@ -2988,11 +3021,19 @@ list_accounts() {
     local name=""
     name="$(basename "$dir")"
     [[ "$name" == .* || "$name" == .deleted-* ]] && continue
+    # OpenCodex mode is no longer offered; its managed lab profile is not an account.
+    [[ "$name" == "$OPENCODEX_LAB_ACCOUNT" ]] && continue
     echo "$name | $dir | $(account_app_data_for "$name")"
   done
 }
 
 delete_account() {
+  ensure_dirs
+  CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-40}" \
+    with_sync_lock delete_account_unlocked "$@"
+}
+
+delete_account_unlocked() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
     echo "delete-account requires an account name." >&2
@@ -3013,6 +3054,9 @@ delete_account() {
   local home_dir app_data archive_root stamp archive_dir
   home_dir="$(account_home_for "$name")"
   app_data="$(account_app_data_for "$name")"
+  if profile_owns_shared_sessions "$home_dir"; then
+    storage_review_layout_unlocked rollback "$home_dir" >/dev/null || return $?
+  fi
   stamp="$(date '+%Y%m%d-%H%M%S')"
   archive_root="$HOME/.codex-accounts-archive"
   archive_dir="$archive_root/$name-$stamp"
@@ -3071,6 +3115,10 @@ reset_epoch_from_text() {
   value="$(printf '%s' "${1:-}" | trim_usage_text)"
   if [[ "$value" == "unknown" || "$value" == "none" || -z "$value" ]]; then
     return 1
+  fi
+  if [[ "$value" == @* && "${value#@}" =~ '^[0-9]+$' ]]; then
+    printf '%s\n' "${value#@}"
+    return 0
   fi
 
   if [[ "$value" =~ '^[0-9][0-9]:[0-9][0-9]$' ]]; then
@@ -3239,6 +3287,18 @@ invalidate_cached_usage() {
   local cache_file="$1"
   [[ -n "$cache_file" ]] || return 0
   rm -f "$cache_file" 2>/dev/null || true
+}
+
+# The plan the usage endpoint reports (free, plus, pro, team...). It is kept beside the usage cache
+# in its own file so the quota format stays the same; the app uses it to sort accounts by plan.
+# Only the plan name is stored, nothing else from the response.
+write_cached_plan() {
+  local cache_file="$1"
+  local plan="${2:-}"
+  [[ -n "$cache_file" ]] || return 0
+  plan="$(printf '%s' "$plan" | tr -cd 'A-Za-z0-9_.-' | cut -c1-40)"
+  [[ -n "$plan" && "$plan" != "null" ]] || return 0
+  printf '%s\n' "$plan" > "$cache_file.plan.tmp.$$" 2>/dev/null && mv -f "$cache_file.plan.tmp.$$" "$cache_file.plan" 2>/dev/null || rm -f "$cache_file.plan.tmp.$$"
 }
 
 cleanup_app_server_process() {
@@ -3427,7 +3487,7 @@ fetch_reset_credits_http_status() {
   local header_file http_status
 
   header_file="$(make_private_curl_headers_for_auth "$auth_file" 0)" || return 1
-  http_status="$(curl -sS --connect-timeout "$USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS" --max-time "$USAGE_DIRECT_TIMEOUT_SECONDS" -o "$tmp_file" -w '%{http_code}' \
+  http_status="$(curl -sS --connect-timeout 1 --max-time 2 -o "$tmp_file" -w '%{http_code}' \
     --header "@$header_file" \
     "$RESET_CREDITS_API_URL" 2>/dev/null || true)"
   rm -f "$header_file"
@@ -3463,13 +3523,7 @@ fetch_reset_credits_detail_for() {
 
   tmp_file="$(mktemp)"
   http_status="$(fetch_reset_credits_http_status "$auth_file" "$tmp_file")"
-  if [[ "$http_status" == "401" ]]; then
-    rm -f "$tmp_file"
-    if refresh_chatgpt_tokens_for "$auth_file"; then
-      tmp_file="$(mktemp)"
-      http_status="$(fetch_reset_credits_http_status "$auth_file" "$tmp_file")"
-    fi
-  fi
+  # This optional detail endpoint must not rotate credentials or hold up quota.
 
   if [[ "$http_status" != "200" ]]; then
     rm -f "$tmp_file"
@@ -3486,7 +3540,7 @@ merge_reset_credits_detail_into_raw_summary() {
   local auth_file="$1"
   local raw_summary="$2"
   local cache_file="${3:-}"
-  local detail raw_detail cached_line cached_detail
+  local detail raw_detail cached_line cached_detail detail_file detail_age
   local -a parts
 
   parts=("${(@ps:\t:)raw_summary}")
@@ -3499,11 +3553,13 @@ merge_reset_credits_detail_into_raw_summary() {
     return 0
   fi
 
-  # Reuse a matching cached expiry instead of delaying every account refresh.
-  if [[ "$raw_detail" =~ '^[1-9][0-9]*$' && -n "$cache_file" && -f "$cache_file" ]]; then
-    cached_line="$(awk 'NR == 1 { print; exit }' "$cache_file" 2>/dev/null || true)"
-    cached_detail="${cached_line##*$'\t'}"
-    if [[ "$cached_detail" == "$raw_detail@"* ]]; then
+  # Credit details have their own clock. Refreshing quota must not extend an
+  # old expiry list indefinitely, even when the available count is unchanged.
+  detail_file="${cache_file}.reset-credits"
+  if [[ "$raw_detail" =~ '^[1-9][0-9]*$' && -n "$cache_file" && -f "$detail_file" ]]; then
+    detail_age=$(( $(date '+%s') - $(stat -f '%m' "$detail_file" 2>/dev/null || printf 0) ))
+    cached_detail="$(head -n 1 "$detail_file" 2>/dev/null || true)"
+    if (( detail_age >= 0 && detail_age < 300 )) && [[ "$cached_detail" == "$raw_detail@"* ]]; then
       printf '%s\t%s\t%s\n' "${parts[1]:-}" "${parts[2]:-}" "$cached_detail"
       return 0
     fi
@@ -3514,6 +3570,11 @@ merge_reset_credits_detail_into_raw_summary() {
     printf '%s\n' "$raw_summary"
     return 0
   }
+  if [[ -n "$cache_file" ]]; then
+    mkdir -p "$USAGE_CACHE_ROOT"
+    (umask 077; printf '%s\n' "$detail" > "${detail_file}.$$")
+    mv "${detail_file}.$$" "$detail_file"
+  fi
   printf '%s\t%s\t%s\n' "${parts[1]:-}" "${parts[2]:-}" "$detail"
 }
 
@@ -3528,14 +3589,8 @@ format_reset_epoch() {
     return 0
   fi
 
-  local today reset_day
-  today="$(date '+%Y%m%d')"
-  reset_day="$(date -r "$epoch" '+%Y%m%d' 2>/dev/null || echo '')"
-  if [[ "$reset_day" == "$today" ]]; then
-    date -r "$epoch" '+%H:%M' 2>/dev/null || printf 'unknown'
-  else
-    date -r "$epoch" '+%m/%d %H:%M' 2>/dev/null || printf 'unknown'
-  fi
+  # Keep the full instant, including year and timezone, until UI rendering.
+  printf '@%s' "$epoch"
 }
 
 emit_usage_summary_from_raw() {
@@ -3551,7 +3606,7 @@ emit_usage_summary_from_raw() {
   [[ -n "$quota" ]] || return 1
   if [[ "$quota" == "unlimited" ]]; then
     write_cached_usage "$cache_file" "$quota" "none" "$reset_credits"
-    printf '%s\t%s\t%s\n' "$quota" "none" "$reset_credits"
+    printf '%s\t%s\t%s\tlive\t%s\n' "$quota" "none" "$reset_credits" "$(date '+%s')"
     return 0
   fi
 
@@ -3568,8 +3623,10 @@ emit_usage_summary_from_raw() {
   done
   [[ -n "$reset" ]] || reset="unknown"
 
+  # The exact reset times, to the second: they tell one account's quota window from another's.
+  print -r -- "$reset_epochs" > "$cache_file.resets" 2>/dev/null || true
   write_cached_usage "$cache_file" "$quota" "$reset" "$reset_credits"
-  printf '%s\t%s\t%s\n' "$quota" "$reset" "$reset_credits"
+  printf '%s\t%s\t%s\tlive\t%s\n' "$quota" "$reset" "$reset_credits" "$(date '+%s')"
 }
 
 fetch_usage_summary_via_app_server() {
@@ -3578,7 +3635,7 @@ fetch_usage_summary_via_app_server() {
   local auth_file="$home_dir/auth.json"
   local codex_bin="$CODEX_APP/Contents/Resources/codex"
   local timeout_seconds="$APP_SERVER_USAGE_TIMEOUT_SECONDS"
-  local init_request initialized_notification rate_request line raw_summary error_message server_pid
+  local init_request initialized_notification rate_request line raw_summary error_message server_pid deadline remaining
   local -a app_server_env
 
   # The direct ChatGPT usage endpoint can return 403 for local Codex tokens.
@@ -3588,7 +3645,7 @@ fetch_usage_summary_via_app_server() {
   [[ -x "$codex_bin" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.7.4"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
+  init_request='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-accounts","title":"Codex Accounts","version":"2.8.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}'
   initialized_notification='{"method":"initialized"}'
   rate_request='{"method":"account/rateLimits/read","id":2}'
 
@@ -3613,7 +3670,10 @@ fetch_usage_summary_via_app_server() {
   print -p -- "$initialized_notification" 2>/dev/null || true
   print -p -- "$rate_request" 2>/dev/null || true
 
-  while read -t "$timeout_seconds" -p line; do
+  deadline=$(( SECONDS + timeout_seconds ))
+  while (( SECONDS < deadline )); do
+    remaining=$(( deadline - SECONDS ))
+    read -t "$remaining" -p line || break
     raw_summary="$(printf '%s\n' "$line" | jq -r '
       def clamp: if . < 0 then 0 elif . > 100 then 100 else . end;
       def has_usage($w): $w != null and ($w.usedPercent != null);
@@ -3655,8 +3715,8 @@ fetch_usage_summary_via_app_server() {
           ([($c.credits // $c.items // $c.resetCredits // $c.reset_credits // [])[]? | reset_credit_expiry(.) | select(. != null) | tostring] | join(",")) as $expiries |
           if $expiries != "" then ($count + "@" + $expiries) else $count end
         end;
-      select(.id? == 2 and .result?.rateLimits?) |
-      .result.rateLimits as $l |
+      select(.id? == 2 and (.result?.rateLimits? or .result?.rateLimitsByLimitId?.codex?)) |
+      (.result.rateLimitsByLimitId.codex // .result.rateLimits) as $l |
       (.result.rateLimitResetCredits // .result.rate_limit_reset_credits) as $rc |
       if (($l.credits.unlimited // false) == true) then
         ["unlimited", "none", reset_credits($rc)]
@@ -3675,6 +3735,7 @@ fetch_usage_summary_via_app_server() {
       end | @tsv
     ' 2>/dev/null || true)"
     if [[ -n "$raw_summary" ]]; then
+      write_cached_plan "$cache_file" "$(printf '%s\n' "$line" | jq -r 'select(.id? == 2) | ((.result.rateLimitsByLimitId.codex // .result.rateLimits).planType // .result.planType // empty) | tostring' 2>/dev/null || true)"
       cleanup_app_server_process "$server_pid"
       raw_summary="$(merge_reset_credits_detail_into_raw_summary "$auth_file" "$raw_summary" "$cache_file")"
       emit_usage_summary_from_raw "$cache_file" "$raw_summary"
@@ -3700,7 +3761,49 @@ fetch_usage_summary_via_app_server() {
   return 1
 }
 
+# True while an account that just failed should not be asked again. The app polls every minute, and a signed-out
+# account would otherwise hit the sign-in service every time. Signing in again ends the wait straight away.
+usage_retry_later_active() {
+  local marker="$1.retry-later"
+  local auth_file="$2"
+  local wait_seconds modified now
+  [[ -f "$marker" ]] || return 1
+  [[ "$auth_file" -nt "$marker" ]] && return 1
+  wait_seconds="$(<"$marker")"
+  [[ "$wait_seconds" =~ '^[0-9]+$' ]] || return 1
+  modified="$(stat -f '%m' "$marker" 2>/dev/null || printf 0)"
+  now="$(date '+%s')"
+  (( now - modified < wait_seconds ))
+}
+
 fetch_usage_summary_for() {
+  local name="$1"
+  local home_dir="$2"
+  local cache_file summary
+  local result=0
+  cache_file="$(usage_cache_file_for "$name")"
+
+  if [[ "$CODEX_USAGE_LIVE_LOOKUP" == "1" && "${CODEX_USAGE_RESPECT_BACKOFF:-0}" == "1" ]] \
+      && usage_retry_later_active "$cache_file" "$home_dir/auth.json"; then
+    CODEX_USAGE_LIVE_LOOKUP=0 fetch_usage_summary_once "$name" "$home_dir"
+    return $?
+  fi
+
+  summary="$(fetch_usage_summary_once "$name" "$home_dir")" || result=$?
+  if [[ "$CODEX_USAGE_LIVE_LOOKUP" == "1" ]]; then
+    case "$summary" in
+      __auth_invalid__*) print -r -- "$USAGE_RETRY_AFTER_AUTH_FAILURE_SECONDS" > "$cache_file.retry-later" ;;
+      *$'\t'live$'\t'*) rm -f "$cache_file.retry-later" ;;
+      *) print -r -- "$USAGE_RETRY_AFTER_ERROR_SECONDS" > "$cache_file.retry-later" ;;
+    esac
+  fi
+  if [[ -n "$summary" ]]; then
+    print -r -- "$summary"
+  fi
+  return $result
+}
+
+fetch_usage_summary_once() {
   local name="$1"
   local home_dir="$2"
   local auth_file="$home_dir/auth.json"
@@ -3772,6 +3875,7 @@ fetch_usage_summary_for() {
     return 0
   fi
 
+  write_cached_plan "$cache_file" "$(jq -r '(.plan_type // .planType // .rate_limit.plan_type // empty) | tostring' "$tmp_file" 2>/dev/null || true)"
   raw_summary="$(jq -r '
     def clamp: if . < 0 then 0 elif . > 100 then 100 else . end;
     def limits:
@@ -3858,7 +3962,7 @@ account_status_for() {
     exit 2
   fi
 
-  local home_dir auth_file auth_mode last_refresh auth_status quota reset reset_credits usage_summary
+  local home_dir auth_file auth_mode last_refresh auth_status quota reset reset_credits usage_summary usage_source usage_observed cache_file
   local -a usage_parts
   home_dir="$(account_home_for "$name")"
   auth_file="$home_dir/auth.json"
@@ -3868,6 +3972,8 @@ account_status_for() {
   quota="unknown"
   reset="unknown"
   reset_credits="unknown"
+  usage_source="unavailable"
+  usage_observed="0"
 
   if home_uses_opencodex_proxy "$home_dir"; then
     echo "$(sanitize_account_name "$name") | signed_in_local | external | local-proxy | external | opencodex:$OPENCODEX_VERSION | none"
@@ -3890,6 +3996,8 @@ account_status_for() {
         quota="${usage_parts[1]:-unknown}"
         reset="${usage_parts[2]:-unknown}"
         reset_credits="${usage_parts[3]:-unknown}"
+        usage_source="${usage_parts[4]:-cached}"
+        usage_observed="${usage_parts[5]:-0}"
         if [[ "$quota" == "__auth_invalid__" ]]; then
           # The app-server confirmed Codex itself cannot use this token.
           # Treat it as an expired login instead of showing stale quota.
@@ -3904,7 +4012,11 @@ account_status_for() {
     fi
   fi
 
-  echo "$(sanitize_account_name "$name") | $auth_status | $auth_mode | $last_refresh | $quota | $reset | $reset_credits"
+  if [[ "$usage_observed" == "0" ]]; then
+    cache_file="$(usage_cache_file_for "$name")"
+    usage_observed="$(stat -f '%m' "$cache_file" 2>/dev/null || printf 0)"
+  fi
+  echo "$(sanitize_account_name "$name") | $auth_status | $auth_mode | $last_refresh | $quota | $reset | $reset_credits | $usage_source | $usage_observed"
 }
 
 list_accounts_status() {
@@ -4943,6 +5055,7 @@ PY
 }
 
 CODEX_PAGINATED_HISTORY_HELPER="${0:A:h}/sync_paginated_history.py"
+CODEX_STORAGE_REVIEW_HELPER="${0:A:h}/storage_review_layout.py"
 
 sync_paginated_history_for_homes() {
   local helper="$CODEX_PAGINATED_HISTORY_HELPER"
@@ -5198,6 +5311,98 @@ def thread_has_live_rollout(row):
     except OSError:
         return False
 
+def real_message(value):
+    if isinstance(value, str):
+        normalized = " ".join(value.split()).casefold().rstrip(".")
+        return normalized not in {
+            "", "[image]", "[external unsupported block: image]",
+            "the user started this session without a specific request",
+            "the user started this session without a task",
+        }
+    if isinstance(value, list):
+        return any(real_message(item) for item in value)
+    if isinstance(value, dict):
+        if "text" in value:
+            return real_message(value["text"])
+        return bool(value)  # Structured attachments are content, including image-only chats.
+    return False
+
+def has_paginated_records(thread_id):
+    # A header-only rollout can still have messages in its native history DB.
+    for home in dict.fromkeys(homes + dest_homes):
+        path = home / "thread_history_1.sqlite"
+        if not path.is_file():
+            continue
+        try:
+            con = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
+            try:
+                for table in ("thread_items", "thread_realtime_items", "thread_turns"):
+                    if con.execute(f'SELECT 1 FROM "{table}" WHERE thread_id=? LIMIT 1', (thread_id,)).fetchone():
+                        return True
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return True  # Unreadable history cannot prove that a chat is empty.
+    return False
+
+activity_cache = {}
+
+def thread_has_activity(row):
+    if real_message(row.get("first_user_message")):
+        return True
+    thread_id = row.get("id")
+    try:
+        path = Path(row["rollout_path"]).resolve()
+        key = (path, thread_id)
+        if key in activity_cache:
+            return activity_cache[key]
+        remaining = 512 * 1024
+        with path.open("rb") as handle:
+            header_line = handle.readline(remaining + 1)
+            if len(header_line) > remaining:
+                return True
+            header = json.loads(header_line)
+            meta = header.get("payload", {})
+            if header.get("type") != "session_meta" or meta.get("id") != thread_id:
+                return True
+            remaining -= len(header_line)
+            while remaining > 0:
+                line = handle.readline(remaining + 1)
+                if not line:
+                    paginated = row.get("history_mode") == "paginated" or meta.get("history_mode") == "paginated"
+                    activity_cache[key] = bool(paginated and has_paginated_records(thread_id))
+                    return activity_cache[key]
+                if len(line) > remaining:
+                    return True  # A large or partially recognized rollout may contain real work.
+                remaining -= len(line)
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                kind = record.get("type")
+                payload = record.get("payload") or {}
+                if kind in {"turn_context", "token_usage_record", "world_state", "inter_agent_communication_metadata"}:
+                    continue
+                item = payload.get("type")
+                if kind == "response_item" and item == "message":
+                    role = payload.get("role")
+                    if role in {"system", "developer"} or (
+                        role in {"user", "assistant"} and not real_message(payload.get("content"))
+                    ):
+                        continue
+                if kind == "event_msg":
+                    if item in {"token_count", "task_started", "thread_name_updated"}:
+                        continue
+                    if item in {"user_message", "agent_message", "task_complete"} and not any(
+                        real_message(payload.get(field)) for field in
+                        ("message", "last_agent_message", "images", "local_images", "attachments")
+                    ):
+                        continue
+                activity_cache[key] = True
+                return True
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        pass
+    return True
+
 def thread_is_indexable(row):
     try:
         if int(row.get("archived") or 0) != 0:
@@ -5206,7 +5411,7 @@ def thread_is_indexable(row):
         return False
     if not (str(row.get("preview") or "").strip() or str(row.get("title") or "").strip()):
         return False
-    return thread_has_live_rollout(row)
+    return thread_has_live_rollout(row) and thread_has_activity(row)
 
 def session_index_records(rows):
     records = {}
@@ -5241,8 +5446,45 @@ def session_index_paths_for_homes(homes):
             paths.append(resolved)
     return paths
 
+def excludes_saved_index_entry(row, home):
+    """Only drop entries whose local metadata establishes they are hidden or stale."""
+    try:
+        if int(row.get("archived") or 0) != 0:
+            return True
+    except (TypeError, ValueError):
+        return False
+
+    updated_ms = row_marker(row, ("updated_at_ms",))
+    if not updated_ms:
+        updated_ms = row_marker(row, ("updated_at",)) * 1000
+    if (
+        row.get("source") != "vscode"
+        or row.get("is_pinned")
+        or not updated_ms
+        or updated_ms >= (time.time() - 60 * 86400) * 1000
+    ):
+        return False
+
+    sessions = home / "sessions"
+    rollout = Path(str(row.get("rollout_path") or ""))
+    if rollout.suffix != ".jsonl" or not rollout.is_relative_to(sessions):
+        return False
+    try:
+        if not sessions.is_dir():
+            return False
+        for candidate in (rollout, rollout.with_suffix(".jsonl.zst")):
+            try:
+                candidate.stat()
+            except FileNotFoundError:
+                continue
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def repair_session_index_files(homes):
-    if not catalog.get("threads"):
+    if not preserve_sidebar and not catalog.get("threads"):
         return
 
     for index_path in session_index_paths_for_homes(homes):
@@ -5268,7 +5510,11 @@ def repair_session_index_files(homes):
         else:
             rows = catalog["threads"].values()
         thread_records = session_index_records(rows)
-        if not thread_records:
+        excluded_ids = {
+            str(row["id"]) for row in rows
+            if preserve_sidebar and row.get("id") and excludes_saved_index_entry(row, index_path.parent)
+        }
+        if not thread_records and not excluded_ids:
             continue
         existing_lines = []
         seen_ids = set()
@@ -5289,6 +5535,9 @@ def repair_session_index_files(homes):
                         thread_id = str(record.get("id") or "")
                         if thread_id:
                             if thread_id in seen_ids:
+                                changed = True
+                                continue
+                            if thread_id in excluded_ids:
                                 changed = True
                                 continue
                             fresh = thread_records.get(thread_id)
@@ -5779,7 +6028,6 @@ refresh_shared_history_for_home() {
 repair_account1() {
   require_rsync
   ensure_dirs
-  configure_account1_aliyun_proxy_for_home "$PRIMARY_CODEX_HOME"
   refresh_shared_history_for_home "$PRIMARY_CODEX_HOME"
   normalize_thread_sources_for_home "$PRIMARY_CODEX_HOME"
   restore_account1_visible_thread_model_providers_for_home "$PRIMARY_CODEX_HOME"
@@ -6291,10 +6539,15 @@ launch_account() {
       exit 1
     fi
   fi
-  prepare_profile_login_storage_for_launch "$home_dir"
+  prepare_profile_login_storage_for_launch "$home_dir" || return $?
+  if [[ "$history_mode" == "shared" && "${CODEX_STORAGE_REVIEW_ON_LAUNCH:-1}" == "1" ]] &&
+      ! profile_owns_shared_sessions "$home_dir"; then
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_STORAGE_REVIEW_LOCK_MAX_WAITS:-12}" \
+      with_sync_lock storage_review_layout_unlocked enable "$home_dir" >/dev/null ||
+      echo "Opening normally; shared Storage review will switch when the previous review profile is closed." >&2
+  fi
   if is_primary_codex_home "$home_dir"; then
-    configure_account1_aliyun_proxy_for_home "$home_dir"
-    ensure_aliyun_coding_plan_bridge_running
+    : # account1 now uses the normal Codex/OpenAI login and routing.
   elif home_uses_opencodex_proxy "$home_dir"; then
     # OpenCodex owns this dedicated lab config while its proxy is running.
     # Never rewrite it to the normal OpenAI defaults during an account launch.
@@ -6352,15 +6605,6 @@ launch_account() {
       --env "CODEX_APP_SERVER_FORCE_CLI=1"
     )
   fi
-  if is_primary_codex_home "$home_dir"; then
-    load_aliyun_coding_plan_key
-    if [[ -n "${AI_API_KEY:-}" ]]; then
-      launch_env+=(--env "AI_API_KEY=$AI_API_KEY")
-    fi
-    if [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then
-      launch_env+=(--env "DASHSCOPE_API_KEY=$DASHSCOPE_API_KEY")
-    fi
-  fi
   if proxy_injection_enabled; then
     launch_env+=(
       --env "HTTP_PROXY=$CODEX_PROXY_URL"
@@ -6377,8 +6621,10 @@ launch_account() {
   if proxy_injection_enabled; then
     # Chromium/Electron does not reliably honor HTTP_PROXY on macOS. Pass the
     # same per-profile proxy explicitly so account, usage, and profile requests
-    # do not bypass Clash and get challenged by Cloudflare.
+    # go through Clash. chatgpt.com must stay on that proxy: a direct TLS
+    # handshake times out and the app reports "workspace routing discovery failed".
     launch_args+=(--proxy-server="$CODEX_PROXY_URL")
+    launch_args+=(--proxy-bypass-list="localhost;127.0.0.1;[::1];persistent.oaistatic.com")
   fi
   open -na "$CODEX_APP" \
     "${launch_env[@]}" \
@@ -6447,6 +6693,9 @@ replace_with_symlink() {
   source="$(shared_history_source_for_item "$item")"
   local target="$account_home/$item"
 
+  if [[ "$item" == "sessions" ]] && profile_owns_shared_sessions "$account_home"; then
+    return 0
+  fi
   seed_shared_history_item_from_home "$account_home" "$item"
 
   [[ -e "$source" || -L "$source" ]] || return 0
@@ -6693,6 +6942,9 @@ shared_history_links_ready() {
     [[ "${CODEX_PRESERVE_DEST_SIDEBAR:-0}" != "1" || "$item" != "session_index.jsonl" ]] || continue
     target="$account_home/$item"
     source="$(shared_history_source_for_item "$item")"
+    if [[ "$item" == "sessions" ]] && profile_owns_shared_sessions "$account_home"; then
+      continue
+    fi
     [[ -L "$target" ]] || return 1
     same_resolved_path "$target" "$source" || return 1
   done
@@ -6703,6 +6955,28 @@ prepare_profile_login_storage_for_launch() {
   local account_home="$1"
   shared_history_links_ready "$account_home" && return 0
   prepare_profile_login_storage "$account_home"
+}
+
+storage_review_layout() {
+  local action="${1:-status}" name="${2:-account1}" home_dir
+  case "$action" in status|enable|rollback) ;; *) return 2 ;; esac
+  home_dir="$(account_home_for "$name")" || return $?
+  [[ "$action" != "enable" || "$(history_mode_for_home "$home_dir")" == "shared" ]] || {
+    echo "A private profile uses its own Storage and cannot review the shared history." >&2
+    return 1
+  }
+  if [[ "$action" == "status" ]]; then
+    storage_review_layout_unlocked "$action" "$home_dir"
+  else
+    ensure_dirs
+    CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 CODEX_SYNC_LOCK_MAX_WAITS="${CODEX_HISTORY_MODE_LOCK_MAX_WAITS:-40}" \
+      with_sync_lock storage_review_layout_unlocked "$action" "$home_dir"
+  fi
+}
+
+storage_review_layout_unlocked() {
+  python3 "$CODEX_STORAGE_REVIEW_HELPER" "$1" "$2" "$SHARED_SESSIONS_DIR" \
+    "$PRIMARY_CODEX_HOME" "$SECOND_CODEX_HOME" "$ACCOUNTS_ROOT"
 }
 
 ensure_shared_sessions_link() {
@@ -6789,6 +7063,9 @@ prepare_profile_login_storage() {
     materialize_legacy_history_links "$account_home"
     ensure_shared_history_links "$account_home"
   else
+    if profile_owns_shared_sessions "$account_home"; then
+      CODEX_SYNC_LOCK_FAIL_ON_TIMEOUT=1 with_sync_lock storage_review_layout_unlocked rollback "$account_home" >/dev/null || return $?
+    fi
     detach_shared_sessions_link "$account_home"
     detach_shared_history_links "$account_home"
   fi
@@ -6836,8 +7113,7 @@ link_history_for_unlocked() {
     replace_with_symlink "$account_home" "$item"
   done
 
-  sync_thread_index_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home" || return $?
-  sync_global_state_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
+  CODEX_PRESERVE_DEST_SIDEBAR=1 sync_thread_index_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home" || return $?
   sync_goal_state_for_homes "$CODEX_HISTORY_ANCHOR_HOME" "$account_home"
   set_history_mode_for_home "$account_home" shared
 }
@@ -8612,6 +8888,9 @@ separate_history_for_unlocked() {
     echo "$(sanitize_account_name "$name") history is already private."
     return 0
   fi
+  if profile_owns_shared_sessions "$account_home"; then
+    storage_review_layout_unlocked rollback "$account_home" >/dev/null || return $?
+  fi
 
   local ids_file transaction_backup_dir memory_backup_dir
   ids_file="$(mktemp "$account_home/.private-history-ids.XXXXXX")"
@@ -8717,20 +8996,8 @@ run_codex_share_helper() {
 }
 
 auto_prune_child_tasks_unlocked() {
-  if [[ ! -f "$CODEX_AUTO_CHILD_PRUNE_HELPER" ]]; then
-    echo "Auto child-task cleanup helper not found: $CODEX_AUTO_CHILD_PRUNE_HELPER" >&2
-    return 1
-  fi
-  command -v python3 >/dev/null 2>&1 || {
-    echo "python3 is required for automatic child-task cleanup." >&2
-    return 1
-  }
-  CODEX_AUTO_PRUNE_ACCOUNTS_ROOT="$ACCOUNTS_ROOT" \
-  CODEX_AUTO_PRUNE_APP_DATA_ROOT="$APP_DATA_ROOT" \
-  SHARED_HISTORY_ROOT="$SHARED_HISTORY_ROOT" \
-  SHARED_SESSIONS_DIR="$SHARED_SESSIONS_DIR" \
-  SHARED_SESSION_INDEX_FILE="$SHARED_SESSION_INDEX_FILE" \
-    python3 "$CODEX_AUTO_CHILD_PRUNE_HELPER"
+  echo "status=disabled reason=formal_cleanup_required"
+  return 0
 }
 
 auto_prune_child_tasks() {
@@ -9181,6 +9448,7 @@ main() {
     launch-account2) launch_account2 ;;
     sync-once) sync_once ;;
     sync-history-once) sync_history_once ;;
+    storage-review-layout) storage_review_layout "${2:-status}" "${3:-account1}" ;;
     sync-account) sync_account "${2:-}" ;;
     sync-account-for-launch) sync_account_for_launch "${2:-}" ;;
     repair-account1) repair_account1 ;;

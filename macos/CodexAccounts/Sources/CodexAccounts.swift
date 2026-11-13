@@ -1,11 +1,15 @@
 import AppKit
 import ApplicationServices
+import Charts
 import CoreGraphics
 import Darwin
 import Foundation
 import IOKit
+import IOKit.hid
+import SQLite3
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 private let codexAccountsWorkQueue = DispatchQueue(label: "local.codex.accounts.work", qos: .utility)
 private let codexAccountsLaunchQueue = DispatchQueue(label: "local.codex.accounts.launch", qos: .userInitiated)
@@ -142,160 +146,6 @@ private struct ExportableThread: Identifiable {
     let sizeBytes: Int64
 }
 
-private struct ColdArchiveEntry: Identifiable {
-    let id: String
-    let title: String
-    let updatedAt: String
-    let archivedAt: String
-    let rolloutSizeBytes: Int64
-    let packageSizeBytes: Int64
-    let packagePath: String
-    let isAvailable: Bool
-}
-
-private final class BulkColdTaskTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    let threads: [ExportableThread]
-    private var selectedIDs: Set<String>
-    weak var tableView: NSTableView?
-
-    init(threads: [ExportableThread]) {
-        self.threads = threads
-        self.selectedIDs = []
-        super.init()
-        selectOlderThan(days: 7)
-    }
-
-    func numberOfRows(in tableView: NSTableView) -> Int { threads.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row >= 0, row < threads.count else { return nil }
-        let thread = threads[row]
-        switch tableColumn?.identifier.rawValue {
-        case "selected":
-            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSelection(_:)))
-            button.tag = row
-            button.state = selectedIDs.contains(thread.id) ? .on : .off
-            return button
-        case "updated":
-            return label(thread.updatedAt, alignment: .left)
-        case "size":
-            return label(ByteCountFormatter.string(fromByteCount: thread.sizeBytes, countStyle: .file), alignment: .right)
-        default:
-            let field = label(thread.title, alignment: .left)
-            field.lineBreakMode = .byTruncatingTail
-            field.toolTip = thread.title
-            return field
-        }
-    }
-
-    private func label(_ value: String, alignment: NSTextAlignment) -> NSTextField {
-        let field = NSTextField(labelWithString: value)
-        field.alignment = alignment
-        field.font = NSFont.systemFont(ofSize: 11)
-        field.textColor = .labelColor
-        return field
-    }
-
-    @objc private func toggleSelection(_ sender: NSButton) {
-        guard sender.tag >= 0, sender.tag < threads.count else { return }
-        let id = threads[sender.tag].id
-        if sender.state == .on { selectedIDs.insert(id) } else { selectedIDs.remove(id) }
-    }
-
-    @objc func selectAll(_ sender: Any?) {
-        selectedIDs = Set(threads.map(\.id))
-        tableView?.reloadData()
-    }
-
-    @objc func selectOlderThanWeek(_ sender: Any?) {
-        selectOlderThan(days: 7)
-        tableView?.reloadData()
-    }
-
-    @objc func clearSelection(_ sender: Any?) {
-        selectedIDs.removeAll()
-        tableView?.reloadData()
-    }
-
-    func selectedThreads() -> [ExportableThread] {
-        threads.filter { selectedIDs.contains($0.id) }
-    }
-
-    private func selectOlderThan(days: Double) {
-        let cutoff = Date().addingTimeInterval(-days * 86_400)
-        let formatter = ISO8601DateFormatter()
-        selectedIDs = Set(threads.compactMap { thread in
-            guard let date = formatter.date(from: thread.updatedAt), date <= cutoff else { return nil }
-            return thread.id
-        })
-    }
-}
-
-private final class BulkColdArchiveTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    let entries: [ColdArchiveEntry]
-    private var selectedIDs: Set<String>
-    weak var tableView: NSTableView?
-
-    init(entries: [ColdArchiveEntry]) {
-        self.entries = entries
-        self.selectedIDs = Set(entries.first(where: \.isAvailable).map { [$0.id] } ?? [])
-    }
-
-    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row >= 0, row < entries.count else { return nil }
-        let entry = entries[row]
-        switch tableColumn?.identifier.rawValue {
-        case "selected":
-            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSelection(_:)))
-            button.tag = row
-            button.state = selectedIDs.contains(entry.id) ? .on : .off
-            button.isEnabled = entry.isAvailable
-            return button
-        case "archived":
-            return label(entry.archivedAt, alignment: .left)
-        case "size":
-            return label(ByteCountFormatter.string(fromByteCount: entry.rolloutSizeBytes, countStyle: .file), alignment: .right)
-        case "status":
-            return label(entry.isAvailable ? "Online" : "Offline", alignment: .center)
-        default:
-            let field = label(entry.title, alignment: .left)
-            field.lineBreakMode = .byTruncatingTail
-            field.toolTip = entry.title
-            return field
-        }
-    }
-
-    private func label(_ value: String, alignment: NSTextAlignment) -> NSTextField {
-        let field = NSTextField(labelWithString: value)
-        field.alignment = alignment
-        field.font = NSFont.systemFont(ofSize: 11)
-        field.textColor = .labelColor
-        return field
-    }
-
-    @objc private func toggleSelection(_ sender: NSButton) {
-        guard sender.tag >= 0, sender.tag < entries.count, entries[sender.tag].isAvailable else { return }
-        let id = entries[sender.tag].id
-        if sender.state == .on { selectedIDs.insert(id) } else { selectedIDs.remove(id) }
-    }
-
-    @objc func selectAllAvailable(_ sender: Any?) {
-        selectedIDs = Set(entries.filter(\.isAvailable).map(\.id))
-        tableView?.reloadData()
-    }
-
-    @objc func clearSelection(_ sender: Any?) {
-        selectedIDs.removeAll()
-        tableView?.reloadData()
-    }
-
-    func selectedEntries() -> [ColdArchiveEntry] {
-        entries.filter { $0.isAvailable && selectedIDs.contains($0.id) }
-    }
-}
-
 private final class FlippedAccessoryView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -430,20 +280,6 @@ private struct LocalExternalProviderDetails {
     let providerLabel: String
 }
 
-private struct OpenCodexLabStatus: Equatable {
-    let installed: Bool
-    let running: Bool
-    let version: String
-    let dashboardURL: String
-
-    static let unavailable = OpenCodexLabStatus(
-        installed: false,
-        running: false,
-        version: "unknown",
-        dashboardURL: ""
-    )
-}
-
 private struct AppThemeOption: Identifiable {
     let id: String
     let zhTitle: String
@@ -488,6 +324,16 @@ private enum AppLanguage: String, CaseIterable, Identifiable {
     case ja = "ja"
 
     var id: String { rawValue }
+
+    /// What a first launch starts in: the closest match to the Mac's own language, English when there is none.
+    static var systemDefault: AppLanguage {
+        let preferred = (Locale.preferredLanguages.first ?? "en").lowercased()
+        if preferred.hasPrefix("yue") || preferred.hasSuffix("-hk") || preferred.hasSuffix("-mo") { return .zhHK }
+        if preferred.hasPrefix("zh-hant") || preferred.hasPrefix("zh-tw") { return .zhHant }
+        if preferred.hasPrefix("zh") { return .zhCN }
+        if preferred.hasPrefix("ja") { return .ja }
+        return .en
+    }
 
     static func normalized(_ rawValue: String?) -> AppLanguage {
         switch rawValue {
@@ -1387,6 +1233,8 @@ private func parsedCodexProfiles(
             }
             guard parts.count >= 2 else { return nil }
             let name = parts[0]
+            // OpenCodex mode was removed in 3.3.1; an old lab folder is never listed.
+            guard name != "opencodex-lab" else { return nil }
             let fallbackDisplay = name == "account1" ? "Account 1" : (name == "account2" ? "Account 2" : name)
             let display = displayNames[name] ?? fallbackDisplay
             let status = statusByName[name] ?? []
@@ -1456,10 +1304,13 @@ private func profileWithCachedUsageFallback(_ profile: CodexProfile, hasLocalTok
     )
 }
 
+/// The account script's usage cache (USAGE_CACHE_ROOT in codex_multi_account.zsh). Keep the version in step
+/// with the script, or the app falls back to an old folder full of stale numbers.
+private let codexUsageCacheFolder = URL(fileURLWithPath: NSHomeDirectory())
+    .appendingPathComponent("Library/Application Support/Codex Accounts/.usage-cache-v9")
+
 private func cachedUsage(for profileID: String) -> (quota: String, reset: String, resetCredits: String)? {
-    let cacheURL = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Application Support/Codex Accounts/.usage-cache-v8")
-        .appendingPathComponent("\(profileID).status")
+    let cacheURL = codexUsageCacheFolder.appendingPathComponent("\(profileID).status")
 
     guard let text = try? String(contentsOf: cacheURL, encoding: .utf8)
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1585,7 +1436,7 @@ private func localExternalProviderDetails(in home: String) -> LocalExternalProvi
         && (try? String(contentsOf: ownershipMarker, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)) == "managed-by-codex-accounts-opencodex-lab-v1"
     if isManagedOpenCodexLab {
-        return LocalExternalProviderDetails(model: "2.29.0", providerLabel: "opencodex")
+        return LocalExternalProviderDetails(model: "2.31.0", providerLabel: "opencodex")
     }
 
     guard isPrimaryCodexHome(home) else { return nil }
@@ -2013,6 +1864,136 @@ final class KeyboardCleanController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
             self.isSwitching = false
             NotificationCenter.default.post(name: .keyboardCleanStateChanged, object: nil)
+        }
+    }
+}
+
+private final class ScreenCleanWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
+/// Blacks out every screen for a few seconds and pauses the touch screen, so the display can be wiped.
+/// Nothing here is a system setting: the windows and the held touch device go away with the timer, or with
+/// this process. Callers must have asked the user first.
+final class ScreenCleanController: ObservableObject {
+    static let shared = ScreenCleanController()
+    static let seconds = 15.0
+
+    @Published private(set) var isActive = false
+
+    #if UI_PREVIEW
+    // Test builds rehearse the timing only: invisible windows, no cursor change, the touch screen left alone.
+    private let rehearsal = true
+    var windowCount: Int { windows.count }
+    #else
+    private let rehearsal = false
+    #endif
+
+    private var windows: [NSWindow] = []
+    private var touchScreen: IOHIDManager?
+    private var keyMonitor: Any?
+    private var timer: DispatchWorkItem?
+    private var onFinish: (() -> Void)?
+    private let sessionLock = NSLock()
+    private var session = 0
+
+    private init() {}
+
+    func start(seconds: Double = ScreenCleanController.seconds, onFinish: @escaping () -> Void = {}) {
+        guard !isActive else { return }
+        isActive = true
+        self.onFinish = onFinish
+        windows = NSScreen.screens.map(makeWindow)
+        if !rehearsal {
+            holdTouchScreen()
+            NSApp.activate(ignoringOtherApps: true)
+            windows.first?.makeKeyAndOrderFront(nil)
+            NSCursor.hide()
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                if event.keyCode == 53 { self?.finish() }   // Esc ends early; every other key is ignored.
+                return nil
+            }
+        }
+        let end = DispatchWorkItem { [weak self] in self?.finish() }
+        timer = end
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: end)
+        armWatchdog(after: seconds + 5)
+    }
+
+    func finish() {
+        guard isActive else { return }
+        isActive = false
+        timer?.cancel()
+        timer = nil
+        sessionLock.withLock { session += 1 }
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+        releaseTouchScreen()
+        if !rehearsal { NSCursor.unhide() }
+        let closing = windows
+        windows = []
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.25
+            closing.forEach { $0.animator().alphaValue = 0 }
+        }, completionHandler: {
+            closing.forEach { $0.orderOut(nil) }
+        })
+        let done = onFinish
+        onFinish = nil
+        done?()
+    }
+
+    private func makeWindow(for screen: NSScreen) -> NSWindow {
+        let window = ScreenCleanWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.setFrame(screen.frame, display: false)
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.hasShadow = false
+        window.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        window.animationBehavior = .none
+        window.ignoresMouseEvents = rehearsal
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+        if !rehearsal {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                window.animator().alphaValue = 1
+            }
+        }
+        return window
+    }
+
+    /// Takes the touch screen (and only the touch screen; the trackpad is a different usage) away from the
+    /// system. If that is refused the black windows still swallow every touch.
+    private func holdTouchScreen() {
+        let matching: [String: Any] = [
+            kIOHIDPrimaryUsagePageKey as String: kHIDPage_Digitizer,
+            kIOHIDPrimaryUsageKey as String: kHIDUsage_Dig_TouchScreen
+        ]
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeSeizeDevice)) == kIOReturnSuccess else { return }
+        touchScreen = manager
+    }
+
+    private func releaseTouchScreen() {
+        guard let manager = touchScreen else { return }
+        IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeSeizeDevice))
+        touchScreen = nil
+    }
+
+    /// The shield hides even Force Quit, so a stuck main thread must never leave the screen black: quitting is
+    /// what gives the screen and the touch device back.
+    private func armWatchdog(after seconds: Double) {
+        let armed = sessionLock.withLock { session }
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + seconds) { [self] in
+            guard sessionLock.withLock({ session }) == armed else { return }
+            _exit(0)
         }
     }
 }
@@ -2532,13 +2513,12 @@ struct AccountsRootView: View {
 
     @StateObject private var keepAwake = KeepAwakeController.shared
     @StateObject private var keyboardClean = KeyboardCleanController.shared
+    @StateObject private var screenClean = ScreenCleanController.shared
     @StateObject private var updater = UpdateController.shared
     @State private var profiles: [CodexProfile] = []
     @State private var statusText = "就緒"
     @AppStorage("autoRefresh") private var autoRefresh = true
     @AppStorage("autoSync") private var autoSync = true
-    @AppStorage("autoPruneChildTasksLowDisk") private var autoPruneChildTasksLowDisk = true
-    @AppStorage("lastAutoChildTaskPruneTimestamp") private var lastAutoChildTaskPruneTimestamp = 0.0
     @AppStorage("autoQuotaPool") private var autoQuotaPool = false
     @AppStorage("language") private var language = "zh"
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
@@ -2553,8 +2533,6 @@ struct AccountsRootView: View {
     @State private var isSyncing = false
     @State private var isCleaningSidebarState = false
     @State private var isRepairingHistoryPayloads = false
-    @State private var isManagingColdStorage = false
-    @State private var isAutoPruningChildTasks = false
     @State private var hasEntered = true
     @State private var showKeepAwakeHelp = false
     @State private var showKeyboardCleanHelp = false
@@ -2588,43 +2566,67 @@ struct AccountsRootView: View {
     @State private var localAuthTokenProfileIDs: Set<String> = []
     @AppStorage("sidebarAutomationExpanded") private var sidebarAutomationExpanded = true
     @AppStorage("sidebarToolsExpanded") private var sidebarToolsExpanded = false
-    @AppStorage("sidebarOpenCodexExpanded") private var sidebarOpenCodexExpanded = false
     @AppStorage("sidebarAppearanceExpanded") private var sidebarAppearanceExpanded = false
     @AppStorage("sidebarUpdatesExpanded") private var sidebarUpdatesExpanded = false
-    @State private var openCodexStatus = OpenCodexLabStatus.unavailable
-    @State private var openCodexOperationInFlight = false
-    @State private var openCodexStatusRefreshInFlight = false
-    @State private var openCodexStatusRefreshPending = false
-    @State private var openCodexBootstrapStarted = false
     @AppStorage("codexUsageRecordV2") private var codexUsageRecordData = ""
     @AppStorage("codexUsageDayKey") private var legacyCodexUsageDayKey = ""
     @AppStorage("codexUsageSecondsToday") private var legacyCodexUsageSecondsToday = 0.0
     @AppStorage("appTheme") private var appTheme = "graphite"
-    @AppStorage("coldStorageRoot") private var coldStorageRoot = "/Volumes/ORICO/Agent Data/Codex/Cold Storage"
+    @AppStorage("rdSection") private var rdSection = "accounts"
+    @AppStorage("rdCompactRows") private var rdCompactRows = false
+    @State private var rdSelectedProfileID: String?
+    @State private var rdFilter = "all"
+    @State private var rdSearch = ""
+    @State private var rdRefreshingIDs: Set<String> = []
+    @State private var rdFailedRefreshIDs: Set<String> = []
+    @State private var rdLastRefreshAt: Date?
+    @Namespace private var rdNamespace
+    @FocusState private var rdSearchFocused: Bool
+    @State private var rdRevealed = false
+    @State private var rdToast: String?
+    @State private var rdAnalytics: RDAnalyticsSnapshot?
+    @State private var rdTokenData: RDTokenData?
+    @State private var rdTokenReport: RDTokenReport?
+    @State private var rdTokenOverallTotal = 0.0
+    @AppStorage("rdAnalysisScope") private var rdAnalysisScope = ""
+    @AppStorage("rdAnalysisDays") private var rdAnalysisDays = 7
+    @AppStorage("rdTokenChartMode") private var rdTokenChartMode = "all"
+    @State private var rdAnalyticsLoading = false
+    @State private var rdChartProfileID: String?
+    @State private var rdPreviousProfiles: [CodexProfile] = []
+    @AppStorage("rdNotifyEnabled") private var rdNotifyEnabled = false
+    @AppStorage("rdAppearance") private var rdAppearance = "dark"
+    @AppStorage("rdGroupByTier") private var rdGroupByTier = true
+    @AppStorage("rdCollapsedGroups") private var rdCollapsedGroups = ""
+    @State private var rdMeta: [String: RDAccountMeta] = [:]
+    @State private var rdApiPlans: [String: String] = [:]
+    @State private var rdListScrolled = false
+    @State private var rdBackdropPicture: NSImage? = RDBackdropStore.load()
+    @State private var rdMissingTools: [String] = []
+    @AppStorage("rdBackdropStrength") private var rdBackdropStrength = 0.2
+    @AppStorage("rdSidebarWidth") private var rdSidebarWidth = 220.0
+    @AppStorage("rdKeepAwakeLastMode") private var rdKeepAwakeLastMode = KeepAwakeMode.display.rawValue
+    @State private var rdSidebarLive: Double?       // Width during a drag; saved when the drag ends.
+    @State private var rdSidebarDragBase: Double?
+    @State private var rdSidebarHandleHot = false
+    @State private var rdHoverRowID: String?
+    @Environment(\.colorScheme) private var rdSystemScheme
     @Namespace private var languageNamespace
 
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-    private let autoQuotaLiveRefreshInterval: TimeInterval = 900
+    private let autoQuotaLiveRefreshInterval: TimeInterval = 55     // Every timer tick, allowing for timer drift.
     private let resetCreditLiveBackfillInterval: TimeInterval = 90
     private let liveUsageParallelism = 10
     private let liveUsageStatusTimeout: TimeInterval = 60
     private let autoSyncStartupDelay: TimeInterval = 90
     private let autoSyncInterval: TimeInterval = 600
-    private let autoChildTaskPruneCooldown: TimeInterval = 600
-    private let autoChildTaskPruneThresholdBytes: Int64 = 10_000_000_000
-    private let autoChildTaskPruneTargetBytes: Int64 = 20_000_000_000
 
     var body: some View {
         ZStack {
-            appBackground
+            rdBackground
+                .ignoresSafeArea()
 
-            HStack(spacing: 0) {
-                if !sidebarCollapsed {
-                    sidebar
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-                mainPane
-            }
+            redesignedWorkspace
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea(.container, edges: .top)
             .opacity(hasEntered ? 1 : 0)
@@ -2638,7 +2640,7 @@ struct AccountsRootView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
-        .frame(minWidth: 860, minHeight: 560)
+        .frame(minWidth: 1000, minHeight: 640)
         .animation(.spring(response: 0.36, dampingFraction: 0.82), value: sidebarCollapsed)
         .animation(.easeInOut(duration: 0.22), value: selectedLanguage.id)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: languageTransitionActive)
@@ -2656,6 +2658,9 @@ struct AccountsRootView: View {
             launchedAt = Date()
             if lastHistorySyncTimestamp > 0 {
                 lastAutoSyncAt = Date(timeIntervalSince1970: lastHistorySyncTimestamp)
+            }
+            if UserDefaults.standard.object(forKey: "language") == nil {
+                language = AppLanguage.systemDefault.rawValue
             }
             let normalizedLanguage = AppLanguage.normalized(language).rawValue
             if normalizedLanguage != language {
@@ -2684,17 +2689,15 @@ struct AccountsRootView: View {
             reconcileUsageSession()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 refreshProfiles(showLoading: false)
-                refreshOpenCodexStatus()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                prepareBundledOpenCodexIfNeeded()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
                 keepAwake.refreshState(force: true)
             }
+            #if !UI_PREVIEW
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                 updater.checkForUpdates(presentNoUpdate: false, notifyIfAvailable: false)
             }
+            #endif
         }
         .sheet(isPresented: $showIntro) {
             introView
@@ -2719,9 +2722,7 @@ struct AccountsRootView: View {
             reconcileUsageSession()
             runPeriodicMaintenance()
             keepAwake.refreshState()
-            if sidebarOpenCodexExpanded || openCodexStatus.running {
-                refreshOpenCodexStatus()
-            }
+            if autoRefresh { rdRecordQuota() }
             usageTicker = Date()
         }
     }
@@ -3065,7 +3066,9 @@ struct AccountsRootView: View {
         case "indigo": return "violet"
         case "glacier": return "ocean"
         case "slate": return "graphite"
-        default: return themeOptions.contains(where: { $0.id == rawValue }) ? rawValue : "graphite"
+        default:
+            let known = RDTheme.all.contains { $0.id == rawValue } || themeOptions.contains { $0.id == rawValue }
+            return known ? rawValue : "graphite"
         }
     }
 
@@ -3074,15 +3077,15 @@ struct AccountsRootView: View {
     }
 
     private var themePrimary: Color {
-        selectedThemeOption.primary
+        rdPalette.accent
     }
 
     private var themeSecondary: Color {
-        selectedThemeOption.secondary
+        rdPalette.accent2
     }
 
     private var themeWarm: Color {
-        selectedThemeOption.warm
+        rdPalette.warm
     }
 
     private var themeBackgroundColors: [Color] {
@@ -3290,10 +3293,6 @@ struct AccountsRootView: View {
         guard activeOperationCount == 0 else { return }
         let now = Date()
 
-        if startAutoChildTaskPruneIfNeeded(now: now) {
-            return
-        }
-
         if autoSync,
            !isSyncing,
            now.timeIntervalSince(launchedAt) >= autoSyncStartupDelay,
@@ -3307,53 +3306,6 @@ struct AccountsRootView: View {
         }
     }
 
-    private func availableInternalStorageBytes() -> Int64? {
-        guard let attributes = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
-              let freeSize = attributes[.systemFreeSize] as? NSNumber
-        else {
-            return nil
-        }
-        return freeSize.int64Value
-    }
-
-    @discardableResult
-    private func startAutoChildTaskPruneIfNeeded(now: Date) -> Bool {
-        guard autoPruneChildTasksLowDisk,
-              !isAutoPruningChildTasks,
-              now.timeIntervalSince1970 - lastAutoChildTaskPruneTimestamp >= autoChildTaskPruneCooldown,
-              let freeBytes = availableInternalStorageBytes(),
-              freeBytes < autoChildTaskPruneThresholdBytes
-        else {
-            return false
-        }
-
-        isAutoPruningChildTasks = true
-        lastAutoChildTaskPruneTimestamp = now.timeIntervalSince1970
-        runBackground(nil) {
-            var environment = ProcessInfo.processInfo.environment
-            environment["CODEX_AUTO_PRUNE_THRESHOLD_BYTES"] = String(autoChildTaskPruneThresholdBytes)
-            environment["CODEX_AUTO_PRUNE_TARGET_BYTES"] = String(autoChildTaskPruneTargetBytes)
-            return runCodexScript(
-                scriptPath,
-                ["auto-prune-child-tasks"],
-                wait: true,
-                timeout: 240,
-                environment: environment
-            )
-        } completion: { result in
-            isAutoPruningChildTasks = false
-            let output = result.1
-            if result.0 == 0, output.contains("status=deleted") {
-                statusText = tr("內置空間不足，已自動清理完成子 task", "Low disk space: completed child tasks were cleaned automatically")
-            } else if result.0 == 0, output.contains("status=no-safe-candidates") {
-                statusText = tr("內置空間不足，但未有可安全刪除嘅子 task", "Low disk space, but no child tasks are safe to delete")
-            } else if result.0 != 0 {
-                statusText = tr("自動清理子 task 暫時未能完成", "Automatic child-task cleanup could not finish")
-            }
-        }
-        return true
-    }
-
     private func refreshProfilesForAutoQuota() {
         let shouldUseLiveQuota = Date().timeIntervalSince(lastAutoQuotaRefreshAt) >= autoQuotaLiveRefreshInterval
         if shouldUseLiveQuota {
@@ -3365,7 +3317,8 @@ struct AccountsRootView: View {
             replayQuota: false,
             liveUsage: shouldUseLiveQuota,
             liveParallelism: shouldUseLiveQuota ? liveUsageParallelism : 2,
-            statusTimeout: shouldUseLiveQuota ? liveUsageStatusTimeout : 8
+            statusTimeout: shouldUseLiveQuota ? liveUsageStatusTimeout : 8,
+            respectBackoff: true
         )
     }
 
@@ -3937,7 +3890,6 @@ struct AccountsRootView: View {
 
                 sidebarToggle(tr("每分鐘重新整理", "Auto refresh"), isOn: $autoRefresh, tint: Color(red: 0.20, green: 0.64, blue: 1.00))
                 sidebarToggle(tr("每 10 分鐘同步", "Sync every 10 min"), isOn: $autoSync, tint: syncAccent)
-                sidebarToggle(tr("低空間自動清理子 task", "Auto-clean child tasks on low disk"), isOn: $autoPruneChildTasksLowDisk, tint: Color(red: 1.00, green: 0.56, blue: 0.20))
 
                 HStack(spacing: scaled(8)) {
                     miniButton(tr("立即同步", "Sync now")) { syncMemories() }
@@ -3964,24 +3916,6 @@ struct AccountsRootView: View {
                         cleanupSidebarProjects()
                     }
                 }
-                HStack(spacing: scaled(8)) {
-                    miniButton(isManagingColdStorage ? tr("處理中", "Working") : tr("冷藏 task", "Archive task")) {
-                        archiveConversationToColdStorage()
-                    }
-                    miniButton(isManagingColdStorage ? tr("處理中", "Working") : tr("還原 task", "Restore task")) {
-                        restoreConversationFromColdStorage()
-                    }
-                }
-            }
-
-            sidebarDisclosureSection(
-                title: tr("OpenCodex 模型", "OpenCodex Models"),
-                systemName: "server.rack",
-                subtitle: openCodexSummaryText,
-                accent: openCodexAccent,
-                expanded: $sidebarOpenCodexExpanded
-            ) {
-                openCodexPanel
             }
 
             sidebarDisclosureSection(
@@ -4030,285 +3964,6 @@ struct AccountsRootView: View {
         }
         let clean = keyboardClean.isLocked ? tr("清潔開", "Clean on") : tr("清潔關", "Clean off")
         return "\(awake) · \(clean)"
-    }
-
-    private var openCodexAccent: Color {
-        if openCodexStatus.installed && !openCodexVersionReady {
-            return Color(red: 1.00, green: 0.66, blue: 0.18)
-        }
-        if openCodexStatus.running {
-            return Color(red: 0.08, green: 0.90, blue: 0.72)
-        }
-        if openCodexStatus.installed {
-            return Color(red: 0.30, green: 0.68, blue: 1.00)
-        }
-        return Color(red: 0.62, green: 0.66, blue: 0.74)
-    }
-
-    private var openCodexSummaryText: String {
-        if openCodexOperationInFlight {
-            return tr("處理中", "Working")
-        }
-        if openCodexStatus.installed && !openCodexVersionReady {
-            return tr("需要修復版本", "Version repair needed")
-        }
-        if openCodexStatus.running {
-            return tr("只限 OpenCodex Lab", "OpenCodex Lab only")
-        }
-        if openCodexStatus.installed {
-            return tr("已內置 · Lab 獨立使用", "Bundled · isolated Lab only")
-        }
-        return tr("準備內置功能", "Preparing bundled feature")
-    }
-
-    private var openCodexVersionReady: Bool {
-        openCodexStatus.installed && openCodexStatus.version == "2.29.0"
-    }
-
-    private var openCodexPanel: some View {
-        VStack(alignment: .leading, spacing: scaled(8)) {
-            HStack(spacing: scaled(7)) {
-                Circle()
-                    .fill(openCodexAccent)
-                    .frame(width: scaled(7), height: scaled(7))
-                    .shadow(color: openCodexStatus.running ? openCodexAccent.opacity(0.72) : .clear, radius: scaled(5))
-
-                VStack(alignment: .leading, spacing: scaled(1)) {
-                    Text(openCodexStatus.running
-                        ? tr("OpenCodex Lab 已連接固定本機代理", "OpenCodex Lab is connected to its fixed local proxy")
-                        : tr("普通 Profile 保持原有直連或自訂路由", "Regular profiles keep direct or existing custom routes"))
-                        .font(appFont(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.68))
-                        .lineLimit(2)
-
-                    if openCodexStatus.installed {
-                        Text("OpenCodex \(openCodexStatus.version)")
-                            .font(appFont(size: 9, weight: .medium, monospaced: true))
-                            .foregroundStyle(.white.opacity(0.38))
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer(minLength: scaled(4))
-
-                if openCodexOperationInFlight || openCodexStatusRefreshInFlight {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.78)
-                        .tint(openCodexAccent)
-                }
-            }
-
-            if openCodexVersionReady {
-                HStack(spacing: scaled(8)) {
-                    miniButton(openCodexStatus.running ? tr("停止", "Stop") : tr("啟動", "Start")) {
-                        if openCodexStatus.running {
-                            stopOpenCodexLab()
-                        } else {
-                            startOpenCodexLab()
-                        }
-                    }
-                    .disabled(openCodexOperationInFlight)
-
-                    miniButton(tr("Dashboard", "Dashboard")) {
-                        openOpenCodexDashboard()
-                    }
-                    .disabled(openCodexOperationInFlight || !openCodexStatus.running)
-                    .opacity(openCodexStatus.running ? 1 : 0.52)
-                }
-
-                miniButton(tr("用 OpenCodex 打開 Codex", "Open Codex with OpenCodex")) {
-                    launchOpenCodexLab()
-                }
-                .disabled(openCodexOperationInFlight || !openCodexStatus.running)
-                .opacity(openCodexStatus.running ? 1 : 0.52)
-            } else if openCodexStatus.installed {
-                miniButton(tr("修復內置版本 2.29.0", "Repair bundled 2.29.0")) {
-                    installOpenCodexLab()
-                }
-                .disabled(openCodexOperationInFlight)
-            } else {
-                miniButton(tr("準備內置 OpenCodex", "Prepare bundled OpenCodex")) {
-                    installOpenCodexLab()
-                }
-                .disabled(openCodexOperationInFlight)
-            }
-
-            Button {
-                NSWorkspace.shared.open(URL(string: "https://github.com/lidge-jun/opencodex")!)
-            } label: {
-                Label(tr("查看開源項目", "View open-source project"), systemImage: "arrow.up.right.square")
-                    .font(appFont(size: 9, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.44))
-            }
-            .buttonStyle(.plain)
-        }
-        .help(tr(
-            "OpenCodex 只會喺獨立 opencodex-lab Profile 使用固定 loopback port。Lab 可選擇共享本機對話，但登入、設定同代理路由保持獨立；普通 Profile 保持 OpenAI 直連或原有自訂路由。",
-            "OpenCodex uses a fixed loopback port only inside the isolated opencodex-lab profile. The Lab may share local chats, while sign-in, settings, and proxy routing remain isolated; regular profiles keep direct OpenAI access or their existing custom route."
-        ))
-    }
-
-    private func prepareBundledOpenCodexIfNeeded() {
-        guard !openCodexBootstrapStarted else { return }
-        openCodexBootstrapStarted = true
-
-        #if arch(arm64)
-        let runtimeArchitecture = "arm64"
-        #elseif arch(x86_64)
-        let runtimeArchitecture = "x86_64"
-        #else
-        let runtimeArchitecture = "unsupported"
-        #endif
-
-        guard let resources = Bundle.main.resourceURL else { return }
-        let seedManifest = resources
-            .appendingPathComponent("opencodex-runtime", isDirectory: true)
-            .appendingPathComponent("2.29.0", isDirectory: true)
-            .appendingPathComponent(runtimeArchitecture, isDirectory: true)
-            .appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: seedManifest.path) else { return }
-
-        openCodexOperationInFlight = true
-        DispatchQueue.global(qos: .utility).async {
-            let result = runCodexScript(scriptPath, ["opencodex-install"], wait: true, timeout: 180)
-            DispatchQueue.main.async {
-                openCodexOperationInFlight = false
-                if result.0 == 0 {
-                    statusText = tr("內置 OpenCodex 2.29.0 已準備好", "Bundled OpenCodex 2.29.0 is ready")
-                } else {
-                    let detail = trimmedToolOutput(result.1, maxLength: 500)
-                    statusText = detail.isEmpty
-                        ? tr("OpenCodex 暫時未能準備", "OpenCodex could not be prepared")
-                        : detail
-                }
-                refreshOpenCodexStatus()
-            }
-        }
-    }
-
-    private func refreshOpenCodexStatus() {
-        guard !openCodexStatusRefreshInFlight else {
-            openCodexStatusRefreshPending = true
-            return
-        }
-        openCodexStatusRefreshInFlight = true
-
-        DispatchQueue.global(qos: .utility).async {
-            let result = runCodexScript(scriptPath, ["opencodex-status"], wait: true, timeout: 8)
-            let statusLine = result.1
-                .split(separator: "\n", omittingEmptySubsequences: true)
-                .map(String.init)
-                .last { $0.components(separatedBy: "\t").count >= 4 }
-            let fields = statusLine?.components(separatedBy: "\t") ?? []
-            let status: OpenCodexLabStatus
-
-            if result.0 == 0, fields.count >= 4 {
-                status = OpenCodexLabStatus(
-                    installed: fields[0] == "1",
-                    running: fields[1] == "1",
-                    version: fields[2].isEmpty ? "unknown" : fields[2],
-                    dashboardURL: fields[3]
-                )
-            } else {
-                status = .unavailable
-            }
-
-            DispatchQueue.main.async {
-                let shouldRefreshAgain = openCodexStatusRefreshPending
-                openCodexStatusRefreshPending = false
-                openCodexStatusRefreshInFlight = false
-                if !shouldRefreshAgain {
-                    withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
-                        openCodexStatus = status
-                    }
-                } else {
-                    refreshOpenCodexStatus()
-                }
-            }
-        }
-    }
-
-    private func runOpenCodexAction(
-        command: String,
-        loading: String,
-        success: String,
-        timeout: TimeInterval,
-        refreshProfilesAfterward: Bool = false
-    ) {
-        guard !openCodexOperationInFlight else { return }
-        openCodexOperationInFlight = true
-
-        runBackground(loading) {
-            runCodexScript(scriptPath, [command], wait: true, timeout: timeout)
-        } completion: { result in
-            openCodexOperationInFlight = false
-            if result.0 == 0 {
-                statusText = success
-                if refreshProfilesAfterward {
-                    refreshProfiles(showLoading: false)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    refreshOpenCodexStatus()
-                }
-                return
-            }
-
-            let detail = trimmedToolOutput(result.1, maxLength: 1_100)
-            alertMessage(
-                tr("OpenCodex 操作失敗", "OpenCodex action failed"),
-                detail.isEmpty ? tr("請稍後再試。", "Please try again.") : detail
-            )
-            refreshOpenCodexStatus()
-        }
-    }
-
-    private func installOpenCodexLab() {
-        runOpenCodexAction(
-            command: "opencodex-install",
-            loading: tr("準備內置 OpenCodex...", "Preparing bundled OpenCodex..."),
-            success: tr("內置 OpenCodex 2.29.0 已準備好", "Bundled OpenCodex 2.29.0 is ready"),
-            timeout: 300
-        )
-    }
-
-    private func startOpenCodexLab() {
-        runOpenCodexAction(
-            command: "opencodex-start",
-            loading: tr("啟動 OpenCodex 實驗代理...", "Starting OpenCodex Lab proxy..."),
-            success: tr("OpenCodex 實驗代理已啟動", "OpenCodex Lab proxy started"),
-            timeout: 60,
-            refreshProfilesAfterward: true
-        )
-    }
-
-    private func stopOpenCodexLab() {
-        runOpenCodexAction(
-            command: "opencodex-stop",
-            loading: tr("停止並還原 OpenCodex Lab...", "Stopping and restoring OpenCodex Lab..."),
-            success: tr("OpenCodex Lab 已停止並還原", "OpenCodex Lab stopped and restored"),
-            timeout: 60,
-            refreshProfilesAfterward: true
-        )
-    }
-
-    private func openOpenCodexDashboard() {
-        runOpenCodexAction(
-            command: "opencodex-dashboard",
-            loading: tr("打開 OpenCodex Dashboard...", "Opening OpenCodex Dashboard..."),
-            success: tr("已打開 OpenCodex Dashboard", "OpenCodex Dashboard opened"),
-            timeout: 15
-        )
-    }
-
-    private func launchOpenCodexLab() {
-        runOpenCodexAction(
-            command: "opencodex-launch",
-            loading: tr("用 OpenCodex 打開獨立 Codex...", "Opening isolated Codex with OpenCodex..."),
-            success: tr("已打開 OpenCodex Lab Profile", "OpenCodex Lab profile opened"),
-            timeout: 75,
-            refreshProfilesAfterward: true
-        )
     }
 
     private func sidebarDisclosureSection<Content: View>(
@@ -6140,6 +5795,11 @@ struct AccountsRootView: View {
         let calendar = Calendar.current
         let now = Date()
 
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedText.hasPrefix("@"), let epoch = TimeInterval(trimmedText.dropFirst()) {
+            return Date(timeIntervalSince1970: epoch > 10_000_000_000 ? epoch / 1000 : epoch)
+        }
+
         if text.contains("/") {
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -6817,7 +6477,8 @@ struct AccountsRootView: View {
         replayQuota: Bool = false,
         liveUsage: Bool = false,
         liveParallelism: Int? = nil,
-        statusTimeout: TimeInterval? = nil
+        statusTimeout: TimeInterval? = nil,
+        respectBackoff: Bool = false
     ) {
         guard !isRefreshing else {
             if showLoading {
@@ -6916,7 +6577,8 @@ struct AccountsRootView: View {
                 replayQuota: replayQuota,
                 liveUsage: liveUsage,
                 liveParallelism: liveParallelism,
-                statusTimeout: statusTimeout
+                statusTimeout: statusTimeout,
+                respectBackoff: respectBackoff
             )
         }
     }
@@ -6928,7 +6590,8 @@ struct AccountsRootView: View {
         replayQuota: Bool,
         liveUsage: Bool,
         liveParallelism: Int?,
-        statusTimeout: TimeInterval?
+        statusTimeout: TimeInterval?,
+        respectBackoff: Bool
     ) {
         let loading = showLoading ? tr("更新用量...", "Updating usage...") : nil
         let previousProfiles = profiles
@@ -6938,6 +6601,7 @@ struct AccountsRootView: View {
             let resolvedParallelism = max(1, liveParallelism ?? (liveUsage ? liveUsageParallelism : 2))
             let resolvedTimeout = statusTimeout ?? (liveUsage ? liveUsageStatusTimeout : 8)
             environment["CODEX_USAGE_LIVE_LOOKUP"] = liveUsage ? "1" : "0"
+            environment["CODEX_USAGE_RESPECT_BACKOFF"] = respectBackoff ? "1" : "0"
             environment["STATUS_PARALLELISM"] = "\(resolvedParallelism)"
             if liveUsage {
                 environment["USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS"] = "3"
@@ -7797,404 +7461,6 @@ struct AccountsRootView: View {
         }
     }
 
-    private func preferredColdStorageProfile() -> CodexProfile? {
-        profiles.first(where: { $0.id == "account1" })
-            ?? profiles.first(where: { $0.id != "opencodex-lab" })
-    }
-
-    private func archiveConversationToColdStorage() {
-        guard !isManagingColdStorage else { return }
-        guard let profile = preferredColdStorageProfile() else {
-            alertMessage(tr("未搵到共享 Profile", "No Shared Profile"), tr("請先建立或重新整理 Codex profile。", "Create or refresh a Codex profile first."))
-            return
-        }
-        isManagingColdStorage = true
-        runBackground(tr("讀取可冷藏 task...", "Loading tasks for cold storage...")) {
-            runCodexScript(scriptPath, ["list-exportable-threads", profile.id, "200"], wait: true, timeout: 60)
-        } completion: { result in
-            guard result.0 == 0 else {
-                isManagingColdStorage = false
-                alertMessage(tr("讀取 task 失敗", "Could Not Load Tasks"), result.1)
-                return
-            }
-            let threads = parsedExportableThreads(result.1).sorted { $0.sizeBytes > $1.sizeBytes }
-            guard !threads.isEmpty else {
-                isManagingColdStorage = false
-                alertMessage(tr("未搵到可冷藏 task", "No Tasks to Archive"), tr("目前冇可安全匯出嘅本機 rollout。", "No local rollout is currently available for safe export."))
-                return
-            }
-            presentBulkColdArchivePicker(profile: profile, threads: threads)
-        }
-    }
-
-    private func presentColdArchivePicker(profile: CodexProfile, threads: [ExportableThread]) {
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 680, height: 30), pullsDown: false)
-        for thread in threads {
-            let compactTitle = String(thread.title.prefix(72))
-            popup.addItem(withTitle: "\(humanFileSize(thread.sizeBytes))  ·  \(compactTitle)")
-        }
-        let note = NSTextField(wrappingLabelWithString: tr(
-            "已按 rollout 大小排列。只會冷藏你揀嘅一條 task；外置包完成 checksum 後先移除內置 rollout。所有 Codex profile 視窗必須先關閉。",
-            "Sorted by rollout size. Only the selected task is archived; the local rollout is removed only after the external package passes checksum verification. Close every Codex profile window first."
-        ))
-        note.frame = NSRect(x: 0, y: 76, width: 680, height: 64)
-        note.maximumNumberOfLines = 5
-        note.textColor = .secondaryLabelColor
-        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 680, height: 145))
-        accessory.addSubview(popup)
-        accessory.addSubview(note)
-
-        let alert = NSAlert()
-        alert.messageText = tr("冷藏一條 task", "Archive One Task")
-        alert.informativeText = tr("第一版係手動模式，唔會自動搬任何 task。", "The first release is manual and never moves tasks automatically.")
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: tr("選擇外置位置", "Choose External Location"))
-        alert.addButton(withTitle: tr("取消", "Cancel"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-        let selectedIndex = max(popup.indexOfSelectedItem, 0)
-        guard selectedIndex < threads.count else {
-            isManagingColdStorage = false
-            return
-        }
-        let thread = threads[selectedIndex]
-
-        let panel = NSOpenPanel()
-        panel.title = tr("選擇 ORICO 冷藏資料夾", "Choose ORICO Cold Storage Folder")
-        panel.prompt = tr("使用此資料夾", "Use This Folder")
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        let configuredURL = URL(fileURLWithPath: coldStorageRoot)
-        let oricoURL = URL(fileURLWithPath: "/Volumes/ORICO")
-        if FileManager.default.fileExists(atPath: configuredURL.path) {
-            panel.directoryURL = configuredURL
-        } else if FileManager.default.fileExists(atPath: oricoURL.path) {
-            panel.directoryURL = oricoURL
-        }
-        guard panel.runModal() == .OK, let rootURL = panel.url else {
-            isManagingColdStorage = false
-            return
-        }
-        coldStorageRoot = rootURL.path
-
-        let confirmation = NSAlert()
-        confirmation.messageText = tr("確認冷藏？", "Confirm Cold Archive?")
-        confirmation.informativeText = tr(
-            "\(thread.title)\n\n內置可釋放約 \(humanFileSize(thread.sizeBytes))。外置封存包及 recovery 會保留；登入、Token、設定、task 索引同 Codex Accounts 核心資料唔會搬。",
-            "\(thread.title)\n\nAbout \(humanFileSize(thread.sizeBytes)) can be released internally. The external package and recovery data remain; login, tokens, settings, task index, and Codex Accounts core data stay internal."
-        )
-        confirmation.addButton(withTitle: tr("開始冷藏", "Archive"))
-        confirmation.addButton(withTitle: tr("取消", "Cancel"))
-        guard confirmation.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-
-        runBackground(tr("驗證並冷藏 task...", "Verifying and archiving task...")) {
-            runCodexScript(
-                scriptPath,
-                ["archive-thread-cold", profile.id, thread.id, rootURL.path, "--include-generated-images", "--include-local-assets"],
-                wait: true,
-                timeout: 1800
-            )
-        } completion: { result in
-            isManagingColdStorage = false
-            if result.0 == 0 {
-                statusText = tr("task 已冷藏到 ORICO", "Task archived to cold storage")
-                refreshProfiles(showLoading: false)
-                alertMessage(tr("冷藏完成", "Archive Complete"), trimmedToolOutput(result.1, maxLength: 1800))
-            } else {
-                alertMessage(tr("冷藏未完成", "Archive Not Completed"), trimmedToolOutput(result.1, maxLength: 1800))
-            }
-        }
-    }
-
-    private func restoreConversationFromColdStorage() {
-        guard !isManagingColdStorage else { return }
-        isManagingColdStorage = true
-        runBackground(tr("讀取冷藏索引...", "Loading cold storage index...")) {
-            runCodexScript(scriptPath, ["list-cold-archives"], wait: true, timeout: 45)
-        } completion: { result in
-            guard result.0 == 0 else {
-                isManagingColdStorage = false
-                alertMessage(tr("讀取冷藏索引失敗", "Could Not Load Cold Storage"), result.1)
-                return
-            }
-            let entries = parsedColdArchives(result.1)
-            guard !entries.isEmpty else {
-                isManagingColdStorage = false
-                alertMessage(tr("未有冷藏 task", "No Archived Tasks"), tr("目前冷藏索引入面冇待還原 task。", "The cold storage index has no task waiting to be restored."))
-                return
-            }
-            presentBulkColdRestorePicker(entries: entries)
-        }
-    }
-
-    private func presentBulkColdArchivePicker(profile: CodexProfile, threads: [ExportableThread]) {
-        let controller = BulkColdTaskTableController(threads: threads)
-        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 760, height: 310))
-        let columns: [(String, String, CGFloat)] = [
-            ("selected", "", 34),
-            ("task", tr("Task", "Task"), 390),
-            ("updated", tr("最後更新", "Last Updated"), 190),
-            ("size", tr("大小", "Size"), 120),
-        ]
-        for (identifier, title, width) in columns {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
-            column.title = title
-            column.width = width
-            table.addTableColumn(column)
-        }
-        table.delegate = controller
-        table.dataSource = controller
-        table.rowHeight = 28
-        table.usesAlternatingRowBackgroundColors = true
-        controller.tableView = table
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 42, width: 760, height: 310))
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        let olderButton = NSButton(title: tr("選擇超過 7 日", "Select Older Than 7 Days"), target: controller, action: #selector(BulkColdTaskTableController.selectOlderThanWeek(_:)))
-        olderButton.frame = NSRect(x: 0, y: 0, width: 150, height: 30)
-        let allButton = NSButton(title: tr("全選", "Select All"), target: controller, action: #selector(BulkColdTaskTableController.selectAll(_:)))
-        allButton.frame = NSRect(x: 158, y: 0, width: 90, height: 30)
-        let clearButton = NSButton(title: tr("全部取消", "Clear"), target: controller, action: #selector(BulkColdTaskTableController.clearSelection(_:)))
-        clearButton.frame = NSRect(x: 256, y: 0, width: 100, height: 30)
-        let note = NSTextField(wrappingLabelWithString: tr(
-            "預設已勾選超過 7 日冇更新嘅 task。批量冷藏仍然逐條 checksum；Pinned、未完成 goal 同 automation 會由自動模式排除。",
-            "Tasks older than 7 days are selected by default. Batch archiving still checksums each task; automatic mode excludes pinned tasks, unfinished goals, and automations."
-        ))
-        note.frame = NSRect(x: 0, y: 362, width: 760, height: 48)
-        note.maximumNumberOfLines = 4
-        note.textColor = .secondaryLabelColor
-        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 760, height: 415))
-        accessory.addSubview(olderButton)
-        accessory.addSubview(allButton)
-        accessory.addSubview(clearButton)
-        accessory.addSubview(scroll)
-        accessory.addSubview(note)
-
-        let alert = NSAlert()
-        alert.messageText = tr("批量冷藏 task", "Batch Archive Tasks")
-        alert.informativeText = tr("可以勾選多條、全選，或者只選超過 7 日嘅 task。", "Select multiple tasks, select all, or keep only tasks older than 7 days.")
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: tr("下一步", "Continue"))
-        alert.addButton(withTitle: tr("取消", "Cancel"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-        let selected = controller.selectedThreads()
-        guard !selected.isEmpty else {
-            isManagingColdStorage = false
-            alertMessage(tr("未選擇 task", "No Tasks Selected"), tr("請至少勾選一條 task。", "Select at least one task."))
-            return
-        }
-
-        let panel = NSOpenPanel()
-        panel.title = tr("選擇 ORICO 冷藏資料夾", "Choose ORICO Cold Storage Folder")
-        panel.prompt = tr("使用此資料夾", "Use This Folder")
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        let configuredURL = URL(fileURLWithPath: coldStorageRoot)
-        let oricoURL = URL(fileURLWithPath: "/Volumes/ORICO")
-        panel.directoryURL = FileManager.default.fileExists(atPath: configuredURL.path) ? configuredURL : oricoURL
-        guard panel.runModal() == .OK, let rootURL = panel.url else {
-            isManagingColdStorage = false
-            return
-        }
-        coldStorageRoot = rootURL.path
-        let totalBytes = selected.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        let confirmation = NSAlert()
-        confirmation.messageText = tr("確認批量冷藏？", "Confirm Batch Archive?")
-        confirmation.informativeText = tr(
-            "已選擇 \(selected.count) 條 task，rollout 約 \(humanFileSize(totalBytes))。所有 Codex profile 視窗必須先關閉。",
-            "Selected \(selected.count) tasks totaling about \(humanFileSize(totalBytes)) of rollout data. Close every Codex profile window first."
-        )
-        confirmation.addButton(withTitle: tr("開始冷藏", "Archive"))
-        confirmation.addButton(withTitle: tr("取消", "Cancel"))
-        guard confirmation.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-
-        let arguments = ["archive-threads-cold", profile.id, rootURL.path] + selected.map(\.id)
-        runBackground(tr("批量驗證並冷藏 task...", "Verifying and archiving tasks...")) {
-            runCodexScript(scriptPath, arguments, wait: true, timeout: 14_400)
-        } completion: { result in
-            isManagingColdStorage = false
-            refreshProfiles(showLoading: false)
-            if result.0 == 0 {
-                statusText = tr("批量冷藏完成", "Batch archive complete")
-                alertMessage(tr("冷藏完成", "Archive Complete"), trimmedToolOutput(result.1, maxLength: 2400))
-            } else {
-                alertMessage(tr("部分 task 未完成", "Some Tasks Were Not Archived"), trimmedToolOutput(result.1, maxLength: 2400))
-            }
-        }
-    }
-
-    private func presentBulkColdRestorePicker(entries: [ColdArchiveEntry]) {
-        let controller = BulkColdArchiveTableController(entries: entries)
-        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 760, height: 310))
-        let columns: [(String, String, CGFloat)] = [
-            ("selected", "", 34),
-            ("task", tr("Task", "Task"), 350),
-            ("archived", tr("冷藏日期", "Archived"), 180),
-            ("size", tr("大小", "Size"), 110),
-            ("status", tr("狀態", "Status"), 80),
-        ]
-        for (identifier, title, width) in columns {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
-            column.title = title
-            column.width = width
-            table.addTableColumn(column)
-        }
-        table.delegate = controller
-        table.dataSource = controller
-        table.rowHeight = 28
-        table.usesAlternatingRowBackgroundColors = true
-        controller.tableView = table
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 42, width: 760, height: 310))
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        let allButton = NSButton(title: tr("全選可用項目", "Select All Online"), target: controller, action: #selector(BulkColdArchiveTableController.selectAllAvailable(_:)))
-        allButton.frame = NSRect(x: 0, y: 0, width: 140, height: 30)
-        let clearButton = NSButton(title: tr("全部取消", "Clear"), target: controller, action: #selector(BulkColdArchiveTableController.clearSelection(_:)))
-        clearButton.frame = NSRect(x: 148, y: 0, width: 100, height: 30)
-        let note = NSTextField(wrappingLabelWithString: tr(
-            "可以批量還原或全選；ORICO 離線嘅項目唔可以勾選。外置封存包還原後仍會保留。",
-            "Restore multiple tasks or select all. Offline ORICO entries cannot be selected, and external packages remain after restore."
-        ))
-        note.frame = NSRect(x: 0, y: 362, width: 760, height: 44)
-        note.maximumNumberOfLines = 3
-        note.textColor = .secondaryLabelColor
-        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 760, height: 410))
-        accessory.addSubview(allButton)
-        accessory.addSubview(clearButton)
-        accessory.addSubview(scroll)
-        accessory.addSubview(note)
-        let alert = NSAlert()
-        alert.messageText = tr("批量還原冷藏 task", "Batch Restore Archived Tasks")
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: tr("還原所選", "Restore Selected"))
-        alert.addButton(withTitle: tr("取消", "Cancel"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-        let selected = controller.selectedEntries()
-        guard !selected.isEmpty else {
-            isManagingColdStorage = false
-            alertMessage(tr("未選擇 task", "No Tasks Selected"), tr("請至少勾選一條可用 task。", "Select at least one available task."))
-            return
-        }
-        let totalBytes = selected.reduce(Int64(0)) { $0 + $1.rolloutSizeBytes }
-        let confirmation = NSAlert()
-        confirmation.messageText = tr("確認批量還原？", "Confirm Batch Restore?")
-        confirmation.informativeText = tr(
-            "將還原 \(selected.count) 條 task，內置大約需要 \(humanFileSize(totalBytes)) 加安全預留空間。",
-            "Restoring \(selected.count) tasks needs about \(humanFileSize(totalBytes)) internally, plus safety headroom."
-        )
-        confirmation.addButton(withTitle: tr("開始還原", "Restore"))
-        confirmation.addButton(withTitle: tr("取消", "Cancel"))
-        guard confirmation.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-        let arguments = ["restore-threads-cold"] + selected.map(\.id)
-        runBackground(tr("批量驗證並還原 task...", "Verifying and restoring tasks...")) {
-            runCodexScript(scriptPath, arguments, wait: true, timeout: 14_400)
-        } completion: { result in
-            isManagingColdStorage = false
-            refreshProfiles(showLoading: false)
-            if result.0 == 0 {
-                statusText = tr("批量還原完成", "Batch restore complete")
-                alertMessage(tr("還原完成", "Restore Complete"), trimmedToolOutput(result.1, maxLength: 2400))
-            } else {
-                alertMessage(tr("部分 task 未完成", "Some Tasks Were Not Restored"), trimmedToolOutput(result.1, maxLength: 2400))
-            }
-        }
-    }
-
-    private func presentColdRestorePicker(entries: [ColdArchiveEntry]) {
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 28, width: 680, height: 30), pullsDown: false)
-        for entry in entries {
-            let availability = entry.isAvailable ? tr("可用", "Online") : tr("ORICO 離線", "ORICO Offline")
-            popup.addItem(withTitle: "\(humanFileSize(entry.rolloutSizeBytes))  ·  \(availability)  ·  \(String(entry.title.prefix(64)))")
-        }
-        let note = NSTextField(wrappingLabelWithString: tr(
-            "還原前會重新驗證 package checksum；外置封存包唔會刪除。所有 Codex profile 視窗必須先關閉。",
-            "The package checksum is verified again before restore, and the external archive is retained. Close every Codex profile window first."
-        ))
-        note.frame = NSRect(x: 0, y: 68, width: 680, height: 48)
-        note.maximumNumberOfLines = 4
-        note.textColor = .secondaryLabelColor
-        let accessory = FlippedAccessoryView(frame: NSRect(x: 0, y: 0, width: 680, height: 120))
-        accessory.addSubview(popup)
-        accessory.addSubview(note)
-        let alert = NSAlert()
-        alert.messageText = tr("還原冷藏 task", "Restore Archived Task")
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: tr("還原", "Restore"))
-        alert.addButton(withTitle: tr("取消", "Cancel"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            isManagingColdStorage = false
-            return
-        }
-        let selectedIndex = max(popup.indexOfSelectedItem, 0)
-        guard selectedIndex < entries.count else {
-            isManagingColdStorage = false
-            return
-        }
-        let entry = entries[selectedIndex]
-        guard entry.isAvailable else {
-            isManagingColdStorage = false
-            alertMessage(tr("ORICO 未連接", "ORICO Is Offline"), tr("請重新連接外置磁碟，再按還原。\n\n\(entry.packagePath)", "Reconnect the external disk, then restore again.\n\n\(entry.packagePath)"))
-            return
-        }
-        runBackground(tr("驗證並還原 task...", "Verifying and restoring task...")) {
-            runCodexScript(scriptPath, ["restore-thread-cold", entry.id], wait: true, timeout: 1800)
-        } completion: { result in
-            isManagingColdStorage = false
-            if result.0 == 0 {
-                statusText = tr("冷藏 task 已還原", "Archived task restored")
-                refreshProfiles(showLoading: false)
-                alertMessage(tr("還原完成", "Restore Complete"), trimmedToolOutput(result.1, maxLength: 1800))
-            } else {
-                alertMessage(tr("還原未完成", "Restore Not Completed"), trimmedToolOutput(result.1, maxLength: 1800))
-            }
-        }
-    }
-
-    private func parsedColdArchives(_ output: String) -> [ColdArchiveEntry] {
-        output.split(separator: "\n").compactMap { rawLine in
-            let parts = rawLine.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-            guard parts.count >= 9, !parts[0].isEmpty else { return nil }
-            return ColdArchiveEntry(
-                id: parts[0],
-                title: parts[1].isEmpty ? tr("未命名 task", "Untitled task") : parts[1],
-                updatedAt: parts[2],
-                archivedAt: parts[3],
-                rolloutSizeBytes: Int64(parts[4]) ?? 0,
-                packageSizeBytes: Int64(parts[5]) ?? 0,
-                packagePath: parts[6],
-                isAvailable: parts[7] == "1"
-            )
-        }
-    }
-
     private func trimmedToolOutput(_ output: String, maxLength: Int) -> String {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count > maxLength else { return trimmed.isEmpty ? tr("完成", "Done") : trimmed }
@@ -8354,6 +7620,5305 @@ struct AccountsRootView: View {
                 statusText = tr("已刪除 \(profile.displayName)", "Deleted \(profile.displayName)")
             } else {
                 alertMessage(tr("刪除失敗", "Could Not Delete Profile"), result.1)
+            }
+        }
+    }
+}
+
+// MARK: - 3.2 Workspace redesign
+//
+// Minimal, data-first layout. The one number that matters (quota left) is the largest thing on each row; status
+// text only appears when something needs attention. Every action reuses the existing AccountsRootView logic, so only
+// presentation, analytics and reminders are new. Kept in this file because those members are file-private.
+//
+// Analytics data sources (read-only):
+// - <CODEX_HOME>/logs_2.sqlite, table logs: every Codex API response logs the x-codex-primary/secondary-used-percent,
+//   -window-minutes and -reset-at headers with a timestamp, per profile (logs are never shared between profiles).
+//   Codex prunes these logs after roughly ten days, so samples are copied into the app's own history file.
+// - The same table's ts column gives activity: log rows closer than 5 minutes form one session.
+// - Its thread_id column gives the conversations each profile actually ran.
+// - The app's own quota refreshes are added as samples too.
+
+private enum RDStatus {
+    case ready, api, checking, noData, waiting, login, failed
+}
+
+private struct RDHoverFill: ViewModifier {
+    let cornerRadius: CGFloat
+    let base: Color
+    let hover: Color
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(hovering ? hover : base)
+            )
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
+/// Whether focus is being moved with the keyboard. The system's blue focus ring is turned off for the whole
+/// window; a quiet ring in the text colour is drawn instead, and only while Tab is in use, never after a click.
+private final class RDKeyboardFocus: ObservableObject {
+    static let shared = RDKeyboardFocus()
+    @Published var active = false
+    private var monitor: Any?
+
+    private init() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            let wanted = event.type == .keyDown ? (event.keyCode == 48 ? true : self.active) : false
+            if wanted != self.active { self.active = wanted }
+            return event
+        }
+    }
+}
+
+private var rdReduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+private struct RDPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        RDPressBody(configuration: configuration)
+    }
+}
+
+private struct RDPressBody: View {
+    let configuration: ButtonStyleConfiguration
+    @Environment(\.isFocused) private var isFocused
+    @ObservedObject private var keyboard = RDKeyboardFocus.shared
+
+    var body: some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !rdReduceMotion ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .overlay {
+                if isFocused && keyboard.active {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.primary.opacity(0.55), lineWidth: 1.5)
+                        .padding(-2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(.spring(response: 0.22, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+/// Filled buttons brighten and pick up a soft glow under the pointer.
+private struct RDHoverLift: ViewModifier {
+    let tint: Color
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        let lit = hovering && isEnabled
+        content
+            .brightness(lit ? 0.07 : 0)
+            .shadow(color: tint.opacity(lit ? 0.38 : 0), radius: 9, y: 3)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.16), value: hovering)
+    }
+}
+
+/// Cards that can be picked rise slightly under the pointer.
+private struct RDHoverScale: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering && !rdReduceMotion ? 1.018 : 1)
+            .onHover { hovering = $0 }
+            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: hovering)
+    }
+}
+
+/// A slow breath for placeholders while something loads.
+private struct RDPulse: ViewModifier {
+    @State private var dim = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(dim ? 0.45 : 1)
+            .onAppear {
+                guard !rdReduceMotion else { return }
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { dim = true }
+            }
+    }
+}
+
+// MARK: 3.3 Themes, plans and pins
+//
+// A theme is a complete palette, designed twice: once for dark and once for light appearance. The appearance
+// (system / dark / light) and the theme are chosen separately, so every theme works in both. Quota colours are
+// shared by all themes so their meaning never changes: green is plenty left, red is nearly used up.
+
+private func rdHex(_ value: UInt32) -> Color {
+    Color(red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255, blue: Double(value & 0xFF) / 255)
+}
+
+private struct RDPalette {
+    let isDark: Bool
+    let canvas: Color       // main content background
+    let sidebar: Color      // navigation column
+    let surface: Color      // cards
+    let raised: Color       // selected and hovered surfaces
+    let inspector: Color    // right-hand detail column
+    let text: Color
+    let text2: Color
+    let text3: Color
+    let accent: Color       // primary actions, selection
+    let accent2: Color      // secondary emphasis, charts
+    let warm: Color         // third chart colour, highlights
+    let onAccent: Color     // text and icons on the accent
+    let ink: Color          // base for translucent fills and hairlines: white on dark, black on light
+
+    var line: Color { ink.opacity(isDark ? 0.07 : 0.09) }
+    /// Selected rows and navigation take a little of the theme's colour, so a theme is felt beyond its buttons.
+    var selection: Color { accent.opacity(isDark ? 0.15 : 0.11) }
+    var selectionLine: Color { accent.opacity(isDark ? 0.26 : 0.24) }
+    var track: Color { ink.opacity(isDark ? 0.09 : 0.07) }
+    var success: Color { isDark ? rdHex(0x34D399) : rdHex(0x15924F) }
+    var amber: Color { isDark ? rdHex(0xF5A524) : rdHex(0xB06C0A) }
+    var orange: Color { isDark ? rdHex(0xFF8A45) : rdHex(0xD0530C) }
+    var danger: Color { isDark ? rdHex(0xFF9B8A) : rdHex(0xC2312A) }
+    var ticket: Color { isDark ? rdHex(0xF5B14C) : rdHex(0xA8690B) }
+
+    /// Remaining quota, 0% to 100%, as five stops: red, orange, amber, lime, green. Brighter on dark,
+    /// deeper on light so a white label on the fill keeps its contrast.
+    var levelStops: [UInt32] {
+        isDark ? [0xFF4D5E, 0xFF8A3D, 0xFFC83D, 0xA3DE52, 0x2ED88A]
+               : [0xDB2A40, 0xE8670F, 0xE0A008, 0x5FA51E, 0x16A05A]
+    }
+
+    private func levelRGB(_ percent: Int) -> (Double, Double, Double) {
+        let stops = levelStops
+        let position = Double(min(max(percent, 0), 100)) / 100 * Double(stops.count - 1)
+        let lower = Int(position.rounded(.down))
+        let upper = min(lower + 1, stops.count - 1)
+        let t = position - Double(lower)
+        func channel(_ value: UInt32, _ shift: UInt32) -> Double { Double((value >> shift) & 0xFF) / 255 }
+        let a = stops[lower], b = stops[upper]
+        return (
+            channel(a, 16) + (channel(b, 16) - channel(a, 16)) * t,
+            channel(a, 8) + (channel(b, 8) - channel(a, 8)) * t,
+            channel(a, 0) + (channel(b, 0) - channel(a, 0)) * t
+        )
+    }
+
+    func level(_ percent: Int) -> Color {
+        let rgb = levelRGB(percent)
+        return Color(red: rgb.0, green: rgb.1, blue: rgb.2)
+    }
+
+    /// Label colour on a filled bar, from the fill's own brightness: near-black on light fills (amber, lime),
+    /// white on deep ones (red, deep green).
+    func onLevel(_ percent: Int) -> Color {
+        let (r, g, b) = levelRGB(percent)
+        func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        return luminance > 0.30 ? Color.black.opacity(0.80) : Color.white
+    }
+}
+
+private struct RDTheme: Identifiable {
+    let id: String
+    let zh: String
+    let en: String
+    let moodZh: String
+    let moodEn: String
+    let glow: Double        // strength of the ambient colour behind the content; 0 for the neutral themes
+    let dark: RDPalette
+    let light: RDPalette
+
+    func palette(dark isDark: Bool) -> RDPalette { isDark ? dark : light }
+
+    // swiftlint:disable function_body_length
+    static let all: [RDTheme] = {
+        func dark(_ canvas: UInt32, _ sidebar: UInt32, _ surface: UInt32, _ raised: UInt32, _ inspector: UInt32,
+                  _ text: UInt32, _ text2: UInt32, _ text3: UInt32,
+                  _ accent: UInt32, _ accent2: UInt32, _ warm: UInt32, _ onAccent: UInt32) -> RDPalette {
+            RDPalette(isDark: true, canvas: rdHex(canvas), sidebar: rdHex(sidebar), surface: rdHex(surface), raised: rdHex(raised),
+                      inspector: rdHex(inspector), text: rdHex(text), text2: rdHex(text2), text3: rdHex(text3),
+                      accent: rdHex(accent), accent2: rdHex(accent2), warm: rdHex(warm), onAccent: rdHex(onAccent), ink: .white)
+        }
+        func light(_ canvas: UInt32, _ sidebar: UInt32, _ surface: UInt32, _ raised: UInt32, _ inspector: UInt32,
+                   _ text: UInt32, _ text2: UInt32, _ text3: UInt32,
+                   _ accent: UInt32, _ accent2: UInt32, _ warm: UInt32, _ onAccent: UInt32 = 0xFFFFFF) -> RDPalette {
+            RDPalette(isDark: false, canvas: rdHex(canvas), sidebar: rdHex(sidebar), surface: rdHex(surface), raised: rdHex(raised),
+                      inspector: rdHex(inspector), text: rdHex(text), text2: rdHex(text2), text3: rdHex(text3),
+                      accent: rdHex(accent), accent2: rdHex(accent2), warm: rdHex(warm), onAccent: rdHex(onAccent), ink: rdHex(0x10131A))
+        }
+        // Thirteen themes, each designed twice. Every text and accent colour is checked against the surfaces it
+        // sits on (4.5:1 for text, 3:1 for chart colours); the light palettes were deepened until they passed.
+        return [
+            RDTheme(id: "violet", zh: "霓虹", en: "Neon",
+                    moodZh: "電光紫配粉紅同青色", moodEn: "Electric violet and pink", glow: 1.0,
+                    dark: dark(0x0F0E17, 0x14121F, 0x1A1828, 0x242036, 0x121019, 0xEEEDF5, 0xAAA6BF, 0x8B88A2, 0xA56DFF, 0xFF52B4, 0x55D2FF, 0x0E0B16),
+                    light: light(0xF6F4FC, 0xEEEAF9, 0xFFFFFF, 0xE8E1FA, 0xFAF8FE, 0x1D1830, 0x554F66, 0x6A6582, 0x7438EE, 0xD12F8A, 0x0A86BD, 0xFFFFFF)),
+            RDTheme(id: "graphite", zh: "石墨", en: "Graphite",
+                    moodZh: "中性灰階，突出額度", moodEn: "Neutral greys", glow: 0.0,
+                    dark: dark(0x111214, 0x16171A, 0x1C1D21, 0x26282D, 0x131416, 0xECEDEF, 0xA5A8AE, 0x878A91, 0xCDD5DE, 0x8A97A6, 0xF2F4F7, 0x111214),
+                    light: light(0xF4F4F3, 0xEAEAE8, 0xFFFFFF, 0xE3E3E1, 0xF9F9F8, 0x1B1C1E, 0x4E5157, 0x64676D, 0x2A2D33, 0x5F6670, 0x8C939C, 0xFFFFFF)),
+            RDTheme(id: "aurora", zh: "極光", en: "Aurora",
+                    moodZh: "極地夜空，薄荷同冰川青", moodEn: "Polar mint and cyan", glow: 1.0,
+                    dark: dark(0x08120F, 0x0B1814, 0x10201B, 0x172C25, 0x0A1512, 0xE6F4EF, 0x9DBDB2, 0x7F9D93, 0x2EE6A0, 0x2BD4E8, 0xC2F25E, 0x04120D),
+                    light: light(0xF0F8F5, 0xE3F1EB, 0xFFFFFF, 0xD6EDE3, 0xF6FBF9, 0x0F2A22, 0x395A52, 0x586E63, 0x0B7E59, 0x0786A6, 0x5A9810, 0xFFFFFF)),
+            RDTheme(id: "ocean", zh: "深海", en: "Ocean",
+                    moodZh: "深海藍，天藍同水色", moodEn: "Navy, azure and aqua", glow: 1.0,
+                    dark: dark(0x08101F, 0x0B1528, 0x101C33, 0x182841, 0x0A1324, 0xE7EEF9, 0x9DADC8, 0x7F8FAB, 0x4C9DFF, 0x2BDCEB, 0x8FA7FF, 0x061021),
+                    light: light(0xF1F5FB, 0xE5ECF7, 0xFFFFFF, 0xDAE5F5, 0xF7F9FD, 0x0F1E36, 0x425468, 0x5C6883, 0x1D67D8, 0x0890A6, 0x4458CF, 0xFFFFFF)),
+            RDTheme(id: "amber", zh: "日落", en: "Sunset",
+                    moodZh: "黃昏橘子、珊瑚同金色", moodEn: "Tangerine and coral", glow: 1.0,
+                    dark: dark(0x150D0B, 0x1C1210, 0x241815, 0x30211C, 0x170F0D, 0xF6ECE6, 0xC5ABA1, 0xA38B82, 0xFF9F2E, 0xFF5C5F, 0xFFD45C, 0x1A0D05),
+                    light: light(0xFBF5EF, 0xF5EAE0, 0xFFFFFF, 0xF0E0D1, 0xFDF9F5, 0x2E1A10, 0x614D3D, 0x7D625B, 0xA85510, 0xC93545, 0xA87800, 0xFFFFFF)),
+            RDTheme(id: "sakura", zh: "櫻花", en: "Sakura",
+                    moodZh: "夜櫻同花瓣，粉紅配淡紫", moodEn: "Petal pink and lilac", glow: 1.0,
+                    dark: dark(0x150D12, 0x1B1118, 0x241620, 0x301E2B, 0x170F14, 0xF7EAF1, 0xC7A7B9, 0xA5899B, 0xFF7EB6, 0xC792FF, 0xFFC2D9, 0x1A0811),
+                    light: light(0xFDF4F7, 0xF9E8EF, 0xFFFFFF, 0xF4D9E5, 0xFEF8FA, 0x33121F, 0x644857, 0x81606D, 0xBA3872, 0x8650DA, 0xD06B96, 0xFFFFFF)),
+            RDTheme(id: "forest", zh: "森林", en: "Forest",
+                    moodZh: "苔蘚同松林，晨光蜜糖色", moodEn: "Moss, pine and honey", glow: 1.0,
+                    dark: dark(0x0C110A, 0x10170E, 0x162014, 0x202C1C, 0x0E140C, 0xEBF2E6, 0xAABBA1, 0x8B9D83, 0x9BDB4D, 0x46B978, 0xF5B83D, 0x0B1405),
+                    light: light(0xF4F7EF, 0xE9EFE1, 0xFFFFFF, 0xDEE8D1, 0xF8FAF5, 0x18240F, 0x455839, 0x5F6E57, 0x437919, 0x1F7044, 0xA4710A, 0xFFFFFF)),
+            RDTheme(id: "midnight", zh: "午夜", en: "Midnight",
+                    moodZh: "墨黑同鋼藍，金箔點綴", moodEn: "Ink, steel and gold", glow: 0.8,
+                    dark: dark(0x07080D, 0x0B0D15, 0x10131E, 0x1A1E2D, 0x090B11, 0xF1EEE4, 0xADA99B, 0x8D8B81, 0xFFC53D, 0x8FA8E0, 0xFFE7A3, 0x120D00),
+                    light: light(0xFAF8F2, 0xF1EDE1, 0xFFFFFF, 0xE9E2CF, 0xFCFBF7, 0x1C1A14, 0x555143, 0x6D695F, 0x906404, 0x3A53A0, 0xB08C1C, 0xFFFFFF)),
+            RDTheme(id: "crimson", zh: "緋紅", en: "Crimson",
+                    moodZh: "朱紅橙金，襯線稿", moodEn: "Vermilion and gold", glow: 1.0,
+                    dark: dark(0x140A0B, 0x1B0F10, 0x241415, 0x321C1D, 0x170C0D, 0xF8EBE8, 0xC9A9A4, 0xA78A86, 0xFF5A4D, 0xFF9B3D, 0xFFD08A, 0x1C0503),
+                    light: light(0xFCF4F2, 0xF7E8E4, 0xFFFFFF, 0xF3DAD4, 0xFEF9F8, 0x33110E, 0x644843, 0x81605D, 0xC8281E, 0xC25A06, 0xA8790A, 0xFFFFFF)),
+            RDTheme(id: "mocha", zh: "摩卡", en: "Mocha",
+                    moodZh: "咖啡奶泡，焦糖玫瑰", moodEn: "Coffee and caramel", glow: 0.8,
+                    dark: dark(0x14100D, 0x1A1511, 0x221C17, 0x2E2620, 0x16120F, 0xF3EBE2, 0xBFAE9E, 0x9C8D7F, 0xE2A46B, 0xC98F8F, 0xF0DDB8, 0x1E1206),
+                    light: light(0xF8F3EC, 0xEFE7DB, 0xFFFFFF, 0xE8DCCB, 0xFBF8F3, 0x2B1F16, 0x5A4C40, 0x72625C, 0x8F5A2B, 0xA24E57, 0x97761E, 0xFFFFFF)),
+            RDTheme(id: "frost", zh: "霜雪", en: "Frost",
+                    moodZh: "冰面藍灰，冰青紫藍", moodEn: "Blue-grey ice and cyan", glow: 0.9,
+                    dark: dark(0x0C1114, 0x10171B, 0x161F24, 0x1F2B32, 0x0E1417, 0xE9F3F7, 0xA3B8C2, 0x8499A3, 0x7FDDF2, 0xA7B4FF, 0xE2F4FB, 0x06171C),
+                    light: light(0xF3F8FA, 0xE6F0F4, 0xFFFFFF, 0xD8E8EE, 0xF8FBFC, 0x10242C, 0x3D575D, 0x5B6D77, 0x0E7791, 0x4A5BCB, 0x5B8799, 0xFFFFFF)),
+            RDTheme(id: "cyber", zh: "電馭", en: "Cyber",
+                    moodZh: "螢光青檸撞洋紅", moodEn: "Acid lime on black", glow: 1.0,
+                    dark: dark(0x08090A, 0x0C0E10, 0x121518, 0x1B2024, 0x0A0B0D, 0xF0F5EC, 0xA8B3A6, 0x889387, 0xC8FF3D, 0xFF45C8, 0x3DE8FF, 0x0E1500),
+                    light: light(0xF5F7F2, 0xEAEEE4, 0xFFFFFF, 0xDFE6D4, 0xFAFBF8, 0x151A10, 0x4B5443, 0x626B5E, 0x4D7800, 0xC2188F, 0x067F96, 0xFFFFFF)),
+            RDTheme(id: "onyx", zh: "純黑", en: "Onyx",
+                    moodZh: "OLED 全黑，一點紅", moodEn: "True black for OLED", glow: 0.0,
+                    dark: dark(0x000000, 0x070708, 0x0E0E10, 0x1A1A1D, 0x040405, 0xF5F5F7, 0xA9A9B0, 0x86868D, 0xFFFFFF, 0xFF453A, 0xFFD60A, 0x000000),
+                    light: light(0xFFFFFF, 0xF5F5F7, 0xFAFAFB, 0xE8E8ED, 0xFBFBFD, 0x0A0A0B, 0x545459, 0x6E6E74, 0x0A0A0B, 0xD70015, 0xB28700, 0xFFFFFF))
+        ]
+    }()
+    // swiftlint:enable function_body_length
+
+    static func theme(_ id: String) -> RDTheme {
+        all.first(where: { $0.id == id }) ?? all[0]
+    }
+}
+
+/// Plans an account can be tagged with by hand. Highest first; each has its own colour in every theme.
+private enum RDTier: String, CaseIterable, Codable, Identifiable {
+    case pro50, pro20, pro10, plus, free
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .pro50: return "Pro 50x"
+        case .pro20: return "Pro 20x"
+        case .pro10: return "Pro 10x"
+        case .plus: return "Plus"
+        case .free: return "Free"
+        }
+    }
+
+    /// For the inspector's row of five chips, where "Pro" is implied by the crown, bolt and sparkles.
+    var shortTitle: String {
+        switch self {
+        case .pro50: return "50x"
+        case .pro20: return "20x"
+        case .pro10: return "10x"
+        case .plus: return "Plus"
+        case .free: return "Free"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .pro50: return "crown.fill"
+        case .pro20: return "bolt.fill"
+        case .pro10: return "sparkles"
+        case .plus: return "plus.circle.fill"
+        case .free: return "leaf.fill"
+        }
+    }
+
+    /// Gold for the top plan, then magenta, violet and sky blue; free accounts are a quiet slate.
+    func color(dark: Bool) -> Color {
+        switch self {
+        case .pro50: return dark ? rdHex(0xF7C548) : rdHex(0xA67708)
+        case .pro20: return dark ? rdHex(0xFF6FB5) : rdHex(0xC22E79)
+        case .pro10: return dark ? rdHex(0xA987FF) : rdHex(0x6A40D6)
+        case .plus: return dark ? rdHex(0x52C6F7) : rdHex(0x0A7DB0)
+        case .free: return dark ? rdHex(0x9FB0C4) : rdHex(0x56657A)
+        }
+    }
+}
+
+/// The user's own background picture. It lives in Application Support, never inside the app or its source.
+private enum RDBackdropStore {
+    static var url: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Codex Accounts/Appearance", isDirectory: true)
+            .appendingPathComponent("backdrop.png")
+    }
+
+    static func load() -> NSImage? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return NSImage(data: data)
+    }
+
+    static func remove() {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Saves a copy no larger than 2400 px. A drawing on white paper becomes its lines on transparency; a picture
+    /// that already has transparency, or a photo, is kept as it is.
+    static func importPicture(from source: URL) -> Bool {
+        guard let image = NSImage(contentsOf: source),
+              let original = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return false }
+        let scale = min(1, 2400 / CGFloat(max(original.width, original.height)))
+        let width = max(1, Int(CGFloat(original.width) * scale)), height = max(1, Int(CGFloat(original.height) * scale))
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let base = context.data else { return false }
+        context.interpolationQuality = .high
+        context.draw(original, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let pixels = base.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        let count = width * height
+
+        var seeThrough = 0, paper = 0
+        for index in 0..<count {
+            let i = index * 4
+            if pixels[i + 3] < 250 { seeThrough += 1 } else if min(pixels[i], pixels[i + 1], pixels[i + 2]) > 235 { paper += 1 }
+        }
+        if seeThrough * 50 < count, paper * 20 > count * 9 {
+            // Mostly white and fully opaque: treat the white as paper. Faint paper noise goes, solid pen stays.
+            let floor = 0.07, full = 0.62
+            for index in 0..<count {
+                let i = index * 4
+                let r = Double(pixels[i]) / 255, g = Double(pixels[i + 1]) / 255, b = Double(pixels[i + 2]) / 255
+                let ink = 1 - min(r, g, b)
+                let alpha = max(0, min(1, (ink - floor) / (full - floor)))
+                guard alpha > 0 else {
+                    pixels[i] = 0; pixels[i + 1] = 0; pixels[i + 2] = 0; pixels[i + 3] = 0
+                    continue
+                }
+                let amount = max(ink, 0.001)
+                func lift(_ channel: Double) -> Double { min(1, max(0, (channel - (1 - amount)) / amount)) }
+                pixels[i] = UInt8(lift(r) * alpha * 255)
+                pixels[i + 1] = UInt8(lift(g) * alpha * 255)
+                pixels[i + 2] = UInt8(lift(b) * alpha * 255)
+                pixels[i + 3] = UInt8(alpha * 255)
+            }
+        }
+        guard let result = context.makeImage(),
+              let data = NSBitmapImageRep(cgImage: result).representation(using: .png, properties: [:]) else { return false }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
+/// Command-line tools the helper script relies on. jq has shipped with macOS since version 15; python3 comes with
+/// Apple's Command Line Tools. Without them quota and sync quietly do nothing, so the app says so instead.
+private enum RDRequirements {
+    static func missing() -> [String] {
+        #if UI_PREVIEW
+        if let forced = ProcessInfo.processInfo.environment["PREVIEW_MISSING_TOOLS"] {
+            return forced.split(separator: ",").map(String.init)
+        }
+        #endif
+        let files = FileManager.default
+        var missing: [String] = []
+        if !["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq"].contains(where: files.isExecutableFile(atPath:)) {
+            missing.append("jq")
+        }
+        var developerFolders = ["/Library/Developer/CommandLineTools", "/Applications/Xcode.app/Contents/Developer"]
+        let select = Process()
+        let output = Pipe()
+        select.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        select.arguments = ["-p"]
+        select.standardOutput = output
+        select.standardError = Pipe()
+        if (try? select.run()) != nil {
+            select.waitUntilExit()
+            let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let folder = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if select.terminationStatus == 0, !folder.isEmpty { developerFolders.append(folder) }
+        }
+        if !developerFolders.contains(where: { files.isExecutableFile(atPath: $0 + "/usr/bin/python3") }) {
+            missing.append("python3")
+        }
+        return missing
+    }
+}
+
+/// The strip you drag to resize the sidebar. AppKit rather than a SwiftUI gesture: it gets the real resize cursor
+/// and takes the first click even when the app is in the background.
+private struct RDResizeHandle: NSViewRepresentable {
+    var tooltip: String
+    var onHover: (Bool) -> Void
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (CGFloat) -> Void
+    var onReset: () -> Void
+
+    final class HandleView: NSView {
+        var parent: RDResizeHandle?
+        private var startX: CGFloat?
+        private var moved = false
+
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        }
+        override func mouseEntered(with event: NSEvent) { parent?.onHover(true) }
+        override func mouseExited(with event: NSEvent) { parent?.onHover(false) }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                parent?.onReset()
+                return
+            }
+            startX = event.locationInWindow.x
+            moved = false
+            NSCursor.resizeLeftRight.push()   // Keeps the cursor when the pointer runs past the width limits.
+        }
+        override func mouseDragged(with event: NSEvent) {
+            guard let startX else { return }
+            moved = true
+            parent?.onChanged(event.locationInWindow.x - startX)
+        }
+        override func mouseUp(with event: NSEvent) {
+            guard let start = startX else { return }
+            startX = nil
+            NSCursor.pop()
+            if moved { parent?.onEnded(event.locationInWindow.x - start) }
+        }
+    }
+
+    func makeNSView(context: Context) -> HandleView {
+        let view = HandleView()
+        view.setAccessibilityRole(.splitter)
+        return view
+    }
+
+    func updateNSView(_ view: HandleView, context: Context) {
+        view.parent = self
+        view.toolTip = tooltip
+        view.setAccessibilityLabel(tooltip)
+    }
+}
+
+/// Whether the account list has scrolled, so a pinned group header only paints a background once it covers rows.
+private struct RDListScrolledKey: PreferenceKey {
+    static var defaultValue: Bool { false }
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
+/// The account script writes the plan the usage API reports (free, plus, prolite, pro...) beside each
+/// account's quota cache as `<id>.status.plan`. Only the plan name is stored there.
+private enum RDPlanDetector {
+    static func load(_ ids: [String]) -> [String: String] {
+        var plans: [String: String] = [:]
+        for id in ids {
+            let url = codexUsageCacheFolder.appendingPathComponent("\(id).status.plan")
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let plan = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !plan.isEmpty { plans[id] = plan }
+        }
+        return plans
+    }
+
+    /// The exact reset time of each quota window, as the script last saw it: profile -> window label -> time.
+    static func exactResets(_ ids: [String]) -> [String: [String: TimeInterval]] {
+        var result: [String: [String: TimeInterval]] = [:]
+        for id in ids {
+            let url = codexUsageCacheFolder.appendingPathComponent("\(id).status.resets")
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            var windows: [String: TimeInterval] = [:]
+            for part in text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: " / ") {
+                let pieces = part.split(separator: " ")
+                if pieces.count == 2, let time = TimeInterval(pieces[1]) { windows[String(pieces[0])] = time }
+            }
+            if !windows.isEmpty { result[id] = windows }
+        }
+        return result
+    }
+
+    /// Pro comes at $100, $200 and $500 a month. The API calls the $100 plan "prolite" and the $200 plan
+    /// "pro"; any other Pro plan name is taken to be the $500 one.
+    static func tier(forPlan plan: String) -> RDTier? {
+        switch plan {
+        case "free": return .free
+        case "plus": return .plus
+        case "prolite", "pro_lite", "pro-lite": return .pro10
+        case "pro": return .pro20
+        default: return plan.hasPrefix("pro") ? .pro50 : nil
+        }
+    }
+}
+
+/// Per-account choices that only this app knows about: the plan tag and the pin.
+private struct RDAccountMeta: Codable, Equatable {
+    var tier: RDTier?
+    var pinnedAt: Double?   // pin order: smaller is higher
+
+    var isEmpty: Bool { tier == nil && pinnedAt == nil }
+}
+
+private enum RDMetaStore {
+    static let key = "rdAccountMeta.v1"
+
+    static func load() -> [String: RDAccountMeta] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([String: RDAccountMeta].self, from: data) else { return [:] }
+        return decoded
+    }
+
+    static func save(_ meta: [String: RDAccountMeta]) {
+        let trimmed = meta.filter { !$0.value.isEmpty }
+        if let data = try? JSONEncoder().encode(trimmed) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+}
+
+/// One block of the account list.
+private struct RDGroup: Identifiable {
+    let id: String
+    let title: String
+    let icon: String
+    let tint: Color?
+    let profiles: [CodexProfile]
+}
+
+// MARK: Analytics engine
+
+private struct RDQuotaSample: Codable, Hashable {
+    let t: TimeInterval      // when it was observed
+    let p: String            // profile id
+    let w: Int               // window minutes: 300 = 5 hours, 10080 = 1 week, 43200 = 1 month
+    let u: Double            // used percent
+    let r: TimeInterval?     // reset at
+}
+
+private struct RDHistoryFile: Codable {
+    var samples: [RDQuotaSample] = []
+    var usage: [String: [String: Double]] = [:]     // day -> profile -> active seconds
+    var threads: [String: [String: Int]] = [:]      // day -> profile -> conversations
+    var lastLogTS: [String: Int64] = [:]            // profile -> last log row scanned for quota headers
+}
+
+private struct RDAccountInsight: Identifiable {
+    let id: String
+    let name: String
+    let left: Int?
+    let windowMinutes: Int?
+    let used24h: Double?
+    let used7d: Double?
+    let perDay: Double?
+    let resetAt: Date?
+    let emptyAt: Date?
+    let activeSeconds7d: Double
+    let threads7d: Int
+}
+
+private struct RDDailyUsage: Identifiable {
+    let id: String
+    let day: Date
+    let name: String
+    let hours: Double
+}
+
+private struct RDChartPoint: Identifiable {
+    let id: String
+    let date: Date
+    let left: Double
+    let series: String
+}
+
+private struct RDAnalyticsSnapshot {
+    let insights: [RDAccountInsight]
+    let daily: [RDDailyUsage]
+    let samplesByProfile: [String: [RDQuotaSample]]
+    let scannedAt: Date
+    let profilesWithLogs: Int
+}
+
+// MARK: Token analytics
+
+/// Published standard API prices, US$ per 1M tokens (developers.openai.com/api/docs/pricing, read 2026-11-09).
+/// The long prices apply above 272K input tokens in one request. Only used for an "API equivalent" estimate.
+private struct RDModelRate {
+    let input, cached, output, longInput, longCached, longOutput: Double
+}
+
+private let rdModelRates: [String: RDModelRate] = [
+    "gpt-5.5": RDModelRate(input: 5, cached: 0.5, output: 30, longInput: 10, longCached: 1, longOutput: 45),
+    "gpt-5.6-sol": RDModelRate(input: 4, cached: 0.4, output: 20, longInput: 8, longCached: 0.8, longOutput: 30),
+    "gpt-5.6-terra": RDModelRate(input: 2, cached: 0.2, output: 12, longInput: 4, longCached: 0.4, longOutput: 18),
+    "gpt-6-astra": RDModelRate(input: 10, cached: 1, output: 50, longInput: 20, longCached: 2, longOutput: 75),
+    "gpt-6-sol": RDModelRate(input: 2, cached: 0.2, output: 10, longInput: 4, longCached: 0.4, longOutput: 15),
+    "gpt-6-luna": RDModelRate(input: 0.1, cached: 0.01, output: 0.5, longInput: 0.2, longCached: 0.02, longOutput: 0.75),
+    "gpt-6.1-sol": RDModelRate(input: 2, cached: 0.1, output: 10, longInput: 4, longCached: 0.2, longOutput: 15),
+    "gpt-6.1-terra": RDModelRate(input: 1, cached: 0.05, output: 5, longInput: 2, longCached: 0.1, longOutput: 7.5)
+]
+
+/// Token use added up per conversation, hour, model and quota window. Numbers and ids only.
+private struct RDTokenRow: Codable {
+    var d: String           // local day
+    var h: Int              // hour of the week, Monday 00:00 = 0
+    var t: String           // conversation id
+    var m: String           // model
+    var e: String           // reasoning effort
+    var q: Int64            // reset time of the quota window it used: this is what identifies the account
+    var i: Double = 0       // fresh input
+    var c: Double = 0       // cached input
+    var x: Double = 0       // output, including reasoning
+    var r: Double = 0       // reasoning output
+    var u: Double = 0       // API equivalent, US$
+    var n: Int = 0          // requests
+    var s: Double = 0       // sum of each request's input size
+
+    var total: Double { i + c + x }
+}
+
+private struct RDTokenCursor: Codable {
+    var o: UInt64 = 0       // bytes read so far
+    var i: Double = 0, c: Double = 0, x: Double = 0, r: Double = 0, t: Double = 0   // running totals at that point
+    var m: String?, e: String?
+}
+
+private struct RDQuotaSpan: Codable {
+    var lo: Double, hi: Double
+    var tokens: Double = 0, usd: Double = 0
+    var w: Int
+}
+
+private struct RDTokenLedger: Codable {
+    var rows: [String: RDTokenRow] = [:]
+    var cursors: [String: RDTokenCursor] = [:]
+    var resetOwners: [String: [String]] = [:]   // reset time -> profiles seen with it; quota samples expire, this does not
+    var threadOwners: [String: String] = [:]    // conversation -> the profile whose own logs show it running
+    var spans: [String: RDQuotaSpan] = [:]      // reset time -> how far that window moved and what it took
+}
+
+private struct RDThreadFact {
+    let id: String
+    var tokens: Double
+    var updated: TimeInterval
+    let model: String
+    let effort: String
+    let isSubAgent: Bool
+    let folder: String
+    let title: String?
+    var path: String?
+    var pathSize: UInt64 = 0
+}
+
+private struct RDTurnFact {
+    let thread: String
+    let at: TimeInterval
+    let seconds: Double
+    let status: String
+}
+
+private struct RDTokenPool: Identifiable {
+    let id: String
+    let members: [String]
+    let name: String
+    let tokensPerPercent: Double?
+    let usdPerFullWindow: Double?
+    let windowMinutes: Int?
+}
+
+private struct RDTokenData {
+    let rows: [(row: RDTokenRow, pool: String)]
+    let threads: [String: RDThreadFact]
+    let turns: [RDTurnFact]
+    let threadPool: [String: String]
+    let pools: [RDTokenPool]
+}
+
+private struct RDTokenTotals {
+    var fresh = 0.0, cached = 0.0, output = 0.0, reasoning = 0.0, unsplit = 0.0, usd = 0.0, requestInput = 0.0
+    var requests = 0
+
+    var detailed: Double { fresh + cached + output }
+    var total: Double { detailed + unsplit }
+
+    mutating func add(_ row: RDTokenRow) {
+        fresh += row.i
+        cached += row.c
+        output += row.x
+        reasoning += row.r
+        usd += row.u
+        requests += row.n
+        requestInput += row.s
+    }
+}
+
+private struct RDTokenDayPoint: Identifiable {
+    var id: String { "\(day)|\(kind)" }
+    let day: String
+    let date: Date
+    let kind: String        // fresh, cached, output, unsplit
+    let value: Double
+}
+
+private struct RDTokenShare: Identifiable {
+    let id: String
+    let label: String
+    let detail: String?
+    let tokens: Double
+    let usd: Double
+}
+
+private struct RDAccountShare: Identifiable {
+    let id: String          // pool id; empty when no account could be matched
+    let name: String
+    let totals: RDTokenTotals
+    let pool: RDTokenPool?
+}
+
+private struct RDThreadShare: Identifiable {
+    let id: String
+    let fact: RDThreadFact
+    let tokens: Double
+}
+
+private struct RDTokenReport {
+    let totals: RDTokenTotals
+    let previousTotal: Double?
+    let days: [RDTokenDayPoint]
+    let accounts: [RDAccountShare]
+    let models: [RDTokenShare]
+    let efforts: [RDTokenShare]
+    let projects: [RDTokenShare]
+    let top: [RDThreadShare]
+    let heat: [Int: Double]
+    let mainTokens: Double
+    let subTokens: Double
+    let mainCount: Int
+    let subCount: Int
+    let workSeconds: Double
+    let turnsCompleted: Int
+    let turnsFailed: Int
+    let turnsInterrupted: Int
+}
+
+private enum RDTokenEngine {
+    private static let lock = NSLock()
+    private static let tokenNeedle = Array("\"type\":\"token_count\"".utf8)
+    private static let contextNeedle = Array("\"type\":\"turn_context\"".utf8)
+    // These markers sit at the start of a record, before any message text could begin.
+    private static let headLength = 170
+    private static let maxTokenLine = 64 * 1024
+    private static let maxContextLine = 512 * 1024
+
+    static var storeURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Codex Accounts/Analytics", isDirectory: true)
+            .appendingPathComponent("tokens-v1.json")
+    }
+
+    private static func load() -> RDTokenLedger {
+        guard let data = try? Data(contentsOf: storeURL),
+              let ledger = try? JSONDecoder().decode(RDTokenLedger.self, from: data) else { return RDTokenLedger() }
+        return ledger
+    }
+
+    private static func save(_ ledger: RDTokenLedger) {
+        let url = storeURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(ledger) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private static func number(_ dictionary: [String: Any], _ key: String) -> Double {
+        (dictionary[key] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    /// Reads only what was added to a conversation's record since last time. Only token-count and turn-settings
+    /// records are ever decoded, and only their numbers, model and effort are kept.
+    @discardableResult
+    private static func ingest(_ fact: RDThreadFact, path: String, into ledger: inout RDTokenLedger, dates: ISO8601DateFormatter) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attributes[.size] as? NSNumber)?.uint64Value,
+              let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        var cursor = ledger.cursors[fact.id] ?? RDTokenCursor()
+        if size < cursor.o {     // The file was rewritten: start this conversation again.
+            ledger.rows = ledger.rows.filter { $0.value.t != fact.id }
+            cursor = RDTokenCursor()
+        }
+        guard size > cursor.o else { return false }
+        do { try handle.seek(toOffset: cursor.o) } catch { return false }
+
+        func absorbContext(_ data: Data) {
+            guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let payload = object["payload"] as? [String: Any] else { return }
+            if let model = payload["model"] as? String { cursor.m = model }
+            if let effort = payload["effort"] as? String { cursor.e = effort }
+        }
+
+        func absorbToken(_ data: Data) {
+            guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  object["type"] as? String == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "token_count",
+                  let info = payload["info"] as? [String: Any],
+                  let running = info["total_token_usage"] as? [String: Any] else { return }
+            let total = number(running, "total_tokens")
+            guard total > cursor.t else { return }     // The same reading is often sent more than once.
+            let input = number(running, "input_tokens"), cached = number(running, "cached_input_tokens")
+            let output = number(running, "output_tokens"), reasoning = number(running, "reasoning_output_tokens")
+            let addedCached = max(0, cached - cursor.c)
+            let addedFresh = max(0, max(0, input - cursor.i) - addedCached)
+            let addedOutput = max(0, output - cursor.x)
+            let addedReasoning = max(0, reasoning - cursor.r)
+            let addedTotal = max(0, total - cursor.t)
+            cursor.i = input; cursor.c = cached; cursor.x = output; cursor.r = reasoning; cursor.t = total
+
+            guard let stamp = object["timestamp"] as? String, let date = dates.date(from: stamp) else { return }
+            let parts = Calendar.current.dateComponents([.year, .month, .day, .hour, .weekday], from: date)
+            let day = String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+            let slot = (((parts.weekday ?? 2) + 5) % 7) * 24 + (parts.hour ?? 0)
+
+            let model = cursor.m ?? fact.model
+            let effort = cursor.e ?? fact.effort
+            let requestInput = (info["last_token_usage"] as? [String: Any]).map { number($0, "input_tokens") } ?? 0
+            var usd = 0.0
+            if let rate = rdModelRates[model] {
+                let long = requestInput > 272_000
+                usd = addedFresh * (long ? rate.longInput : rate.input)
+                usd += addedCached * (long ? rate.longCached : rate.cached)
+                usd += addedOutput * (long ? rate.longOutput : rate.output)
+                usd /= 1_000_000
+            }
+
+            var resetKey: Int64 = 0
+            var windowMinutes = 0
+            var usedPercent: Double?
+            if let limits = payload["rate_limits"] as? [String: Any] {
+                for slotName in ["primary", "secondary"] {
+                    guard let window = limits[slotName] as? [String: Any],
+                          let reset = (window["resets_at"] as? NSNumber)?.int64Value,
+                          let minutes = (window["window_minutes"] as? NSNumber)?.intValue,
+                          minutes >= windowMinutes else { continue }
+                    windowMinutes = minutes
+                    resetKey = reset
+                    usedPercent = (window["used_percent"] as? NSNumber)?.doubleValue
+                }
+            }
+
+            let key = "\(fact.id)|\(day)|\(slot)|\(model)|\(effort)|\(resetKey)"
+            var row = ledger.rows[key] ?? RDTokenRow(d: day, h: slot, t: fact.id, m: model, e: effort, q: resetKey)
+            row.i += addedFresh
+            row.c += addedCached
+            row.x += addedOutput
+            row.r += addedReasoning
+            row.u += usd
+            row.n += 1
+            row.s += requestInput
+            ledger.rows[key] = row
+
+            if resetKey != 0, let usedPercent {
+                let spanKey = String(resetKey)
+                var span = ledger.spans[spanKey] ?? RDQuotaSpan(lo: usedPercent, hi: usedPercent, w: windowMinutes)
+                span.lo = min(span.lo, usedPercent)
+                span.hi = max(span.hi, usedPercent)
+                span.tokens += addedTotal
+                span.usd += usd
+                ledger.spans[spanKey] = span
+            }
+        }
+
+        func consider(_ bytes: UnsafeRawBufferPointer) {
+            guard let base = bytes.baseAddress, bytes.count > 20 else { return }
+            let head = min(bytes.count, headLength)
+            if bytes.count <= maxTokenLine, memmem(base, head, tokenNeedle, tokenNeedle.count) != nil {
+                absorbToken(Data(bytes: base, count: bytes.count))
+            } else if bytes.count <= maxContextLine, memmem(base, head, contextNeedle, contextNeedle.count) != nil {
+                absorbContext(Data(bytes: base, count: bytes.count))
+            }
+        }
+
+        var chunkStart = cursor.o
+        var consumed = cursor.o
+        var pending = Data()
+        var skipping = false
+        while true {
+            let chunk: Data = autoreleasepool { (try? handle.read(upToCount: 4 << 20)) ?? Data() }
+            if chunk.isEmpty { break }
+            chunk.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+                guard let base = buffer.baseAddress else { return }
+                var position = 0
+                while position < buffer.count {
+                    let start = base + position
+                    let remaining = buffer.count - position
+                    guard let newline = memchr(start, 10, remaining) else {
+                        if !skipping {
+                            if pending.count + remaining > maxContextLine {
+                                skipping = true     // Too long to be a record we want; drop it unread.
+                                pending.removeAll(keepingCapacity: true)
+                            } else {
+                                pending.append(start.assumingMemoryBound(to: UInt8.self), count: remaining)
+                            }
+                        }
+                        position = buffer.count
+                        break
+                    }
+                    let length = UnsafeRawPointer(newline) - start
+                    if skipping {
+                        skipping = false
+                    } else if pending.isEmpty {
+                        consider(UnsafeRawBufferPointer(start: start, count: length))
+                    } else {
+                        if pending.count + length <= maxContextLine {
+                            pending.append(start.assumingMemoryBound(to: UInt8.self), count: length)
+                            pending.withUnsafeBytes { consider($0) }
+                        }
+                        pending.removeAll(keepingCapacity: true)
+                    }
+                    position += length + 1
+                    consumed = chunkStart + UInt64(position)
+                }
+            }
+            chunkStart += UInt64(chunk.count)
+        }
+        cursor.o = consumed
+        ledger.cursors[fact.id] = cursor
+        return true
+    }
+
+    private static func readThreads(home: String, into threads: inout [String: RDThreadFact]) {
+        let folder = home as NSString
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: home) else { return }
+        let states = names.filter { $0.hasPrefix("state_") && $0.hasSuffix(".sqlite") }.sorted { $0.count != $1.count ? $0.count < $1.count : $0 < $1 }
+        guard let latest = states.last, let reader = RDSQLiteReader(path: folder.appendingPathComponent(latest)) else { return }
+        var columns = Set<String>()
+        reader.rows("PRAGMA table_info(threads)") { statement in
+            if let name = RDSQLiteReader.text(statement, 1) { columns.insert(name) }
+        }
+        guard columns.contains("tokens_used") else { return }
+        func pick(_ name: String) -> String { columns.contains(name) ? name : "NULL" }
+        #if UI_PREVIEW
+        let titleColumn = "NULL"    // Test renders never load conversation titles.
+        #else
+        let titleColumn = pick("title")
+        #endif
+        let sql = "SELECT id, tokens_used, updated_at, \(pick("model")), \(pick("reasoning_effort")), source, cwd, rollout_path, \(titleColumn) FROM threads"
+        reader.rows(sql) { statement in
+            guard let id = RDSQLiteReader.text(statement, 0) else { return }
+            let tokens = Double(sqlite3_column_int64(statement, 1))
+            let updated = TimeInterval(sqlite3_column_int64(statement, 2))
+            // Profiles can hold different copies of one conversation's record; the longest is the most complete.
+            let path = RDSQLiteReader.text(statement, 7)
+            let size = path.flatMap { (try? FileManager.default.attributesOfItem(atPath: $0))?[.size] as? NSNumber }?.uint64Value
+            let usablePath = size == nil ? nil : path
+            if var known = threads[id] {
+                known.tokens = max(known.tokens, tokens)
+                known.updated = max(known.updated, updated)
+                if let size, size > known.pathSize {
+                    known.path = usablePath
+                    known.pathSize = size
+                }
+                threads[id] = known
+                return
+            }
+            let cwd = RDSQLiteReader.text(statement, 6) ?? ""
+            threads[id] = RDThreadFact(
+                id: id,
+                tokens: tokens,
+                updated: updated,
+                model: RDSQLiteReader.text(statement, 3) ?? "unknown",
+                effort: RDSQLiteReader.text(statement, 4) ?? "—",
+                isSubAgent: (RDSQLiteReader.text(statement, 5) ?? "").contains("subagent"),
+                folder: cwd.isEmpty ? "—" : (cwd as NSString).lastPathComponent,
+                title: RDSQLiteReader.text(statement, 8),
+                path: usablePath,
+                pathSize: size ?? 0
+            )
+        }
+    }
+
+    private static func readTurns(home: String, into turns: inout [String: RDTurnFact]) {
+        guard let reader = RDSQLiteReader(path: (home as NSString).appendingPathComponent("thread_history_1.sqlite")) else { return }
+        reader.rows("SELECT thread_id, turn_id, status, started_at, duration_ms FROM thread_turns") { statement in
+            guard let thread = RDSQLiteReader.text(statement, 0), let turn = RDSQLiteReader.text(statement, 1) else { return }
+            let key = "\(thread)|\(turn)"
+            guard turns[key] == nil else { return }
+            var started = Double(sqlite3_column_int64(statement, 3))
+            if started > 100_000_000_000 { started /= 1000 }
+            turns[key] = RDTurnFact(
+                thread: thread,
+                at: started,
+                seconds: Double(sqlite3_column_int64(statement, 4)) / 1000,
+                status: RDSQLiteReader.text(statement, 2) ?? ""
+            )
+        }
+    }
+
+    static func scan(profiles: [(id: String, name: String, home: String)]) -> RDTokenData {
+        lock.lock()
+        defer { lock.unlock() }
+        var ledger = load()
+
+        // A quota window's reset time is unique to one ChatGPT account, so it says who used the tokens. An unused
+        // window has no fixed reset (it is always "now + window"), and times landing exactly on a minute came from
+        // the app's own rounded text; either could match another account by chance, so both are skipped.
+        for sample in RDAnalyticsEngine.load().samples {
+            guard sample.u > 0, let reset = sample.r, Int64(reset) % 60 != 0 else { continue }
+            let key = String(Int64(reset))
+            var owners = ledger.resetOwners[key] ?? []
+            if !owners.contains(sample.p) { owners.append(sample.p) }
+            ledger.resetOwners[key] = owners
+        }
+
+        var threads: [String: RDThreadFact] = [:]
+        var turnsByKey: [String: RDTurnFact] = [:]
+        for profile in profiles {
+            readThreads(home: profile.home, into: &threads)
+            readTurns(home: profile.home, into: &turnsByKey)
+            if let reader = RDSQLiteReader(path: (profile.home as NSString).appendingPathComponent("logs_2.sqlite")) {
+                reader.rows("SELECT DISTINCT thread_id FROM logs WHERE thread_id IS NOT NULL AND thread_id <> ''") { statement in
+                    guard let thread = RDSQLiteReader.text(statement, 0), ledger.threadOwners[thread] == nil else { return }
+                    ledger.threadOwners[thread] = profile.id
+                }
+            }
+        }
+
+        let dates = ISO8601DateFormatter()
+        dates.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        for fact in threads.values {
+            guard let path = fact.path else { continue }
+            autoreleasepool { _ = ingest(fact, path: path, into: &ledger, dates: dates) }
+        }
+        save(ledger)
+
+        // Profiles seen with the same reset time are one ChatGPT account signed in more than once.
+        var parent: [String: String] = [:]
+        func find(_ value: String) -> String {
+            var current = value
+            while let next = parent[current], next != current { current = next }
+            return current
+        }
+        var ownersByReset: [Int64: Set<String>] = [:]
+        var clusters: [(lo: Int64, hi: Int64, owners: Set<String>)] = []
+        for key in ledger.resetOwners.keys.compactMap({ Int64($0) }).sorted() {
+            let owners = Set(ledger.resetOwners[String(key)] ?? [])
+            if var last = clusters.last, key - last.hi <= 5 {
+                last.hi = key
+                last.owners.formUnion(owners)
+                clusters[clusters.count - 1] = last
+            } else {
+                clusters.append((key, key, owners))
+            }
+        }
+        for cluster in clusters {
+            for offset in (cluster.lo - 5)...(cluster.hi + 5) { ownersByReset[offset, default: []].formUnion(cluster.owners) }
+            guard let first = cluster.owners.first else { continue }
+            for owner in cluster.owners { parent[find(owner)] = find(first) }
+        }
+
+        let names = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0.name) })
+        var members: [String: [String]] = [:]
+        for profile in profiles { members[find(profile.id), default: []].append(profile.id) }
+        var poolOf: [String: String] = [:]
+        for (_, group) in members {
+            let id = group.sorted().joined(separator: "+")
+            for profile in group { poolOf[profile] = id }
+        }
+
+        func pool(forReset reset: Int64) -> String {
+            guard let owner = ownersByReset[reset]?.first else { return "" }
+            return poolOf[owner] ?? ""
+        }
+
+        var tokensByThreadPool: [String: [String: Double]] = [:]
+        var resolved: [(row: RDTokenRow, pool: String)] = []
+        resolved.reserveCapacity(ledger.rows.count)
+        for row in ledger.rows.values {
+            let owner = pool(forReset: row.q)
+            resolved.append((row, owner))
+            if !owner.isEmpty { tokensByThreadPool[row.t, default: [:]][owner, default: 0] += row.total }
+        }
+        var threadPool: [String: String] = [:]
+        for (thread, shares) in tokensByThreadPool {
+            threadPool[thread] = shares.max { $0.value < $1.value }?.key
+        }
+        for (thread, profile) in ledger.threadOwners where threadPool[thread] == nil {
+            threadPool[thread] = poolOf[profile]
+        }
+
+        // How much one percent of the long quota window buys, from windows that moved enough to measure.
+        // One window reports reset times a few seconds apart, so neighbouring times are merged first.
+        var windows: [(reset: Int64, last: Int64, span: RDQuotaSpan)] = []
+        for key in ledger.spans.keys.compactMap({ Int64($0) }).sorted() {
+            guard let span = ledger.spans[String(key)] else { continue }
+            if var open = windows.last, key - open.last <= 5, open.span.w == span.w {
+                open.last = key
+                open.span.lo = min(open.span.lo, span.lo)
+                open.span.hi = max(open.span.hi, span.hi)
+                open.span.tokens += span.tokens
+                open.span.usd += span.usd
+                windows[windows.count - 1] = open
+            } else {
+                windows.append((key, key, span))
+            }
+        }
+        // Records can be missing but never extra, so the window that shows the most per percent is closest to true.
+        var conversion: [String: (tokens: Double, usd: Double, percent: Double, minutes: Int)] = [:]
+        for (reset, _, span) in windows where span.hi - span.lo >= 30 {
+            let owner = pool(forReset: reset)
+            guard !owner.isEmpty else { continue }
+            let percent = span.hi - span.lo
+            if let best = conversion[owner], best.usd / best.percent >= span.usd / percent { continue }
+            conversion[owner] = (span.tokens, span.usd, percent, span.w)
+        }
+
+        let order = profiles.map(\.id)
+        var pools: [RDTokenPool] = []
+        for (_, group) in members {
+            let sorted = group.sorted { (order.firstIndex(of: $0) ?? 0) < (order.firstIndex(of: $1) ?? 0) }
+            let id = group.sorted().joined(separator: "+")
+            let entry = conversion[id]
+            pools.append(RDTokenPool(
+                id: id,
+                members: sorted,
+                name: sorted.map { names[$0] ?? $0 }.joined(separator: " · "),
+                tokensPerPercent: entry.flatMap { $0.percent > 0 ? $0.tokens / $0.percent : nil },
+                usdPerFullWindow: entry.flatMap { $0.percent > 0 ? $0.usd / $0.percent * 100 : nil },
+                windowMinutes: entry?.minutes
+            ))
+        }
+
+        return RDTokenData(
+            rows: resolved,
+            threads: threads,
+            turns: Array(turnsByKey.values),
+            threadPool: threadPool,
+            pools: pools.sorted { $0.name < $1.name }
+        )
+    }
+
+    /// One view of the data. `scope` is a pool id, or nil for every account; `days` of 0 means all time.
+    /// Tokens with no per-request record are kept as "unsplit" on the conversation's last active day, so
+    /// every total still adds up to what Codex counted.
+    static func report(_ data: RDTokenData, scope: String?, days: Int) -> RDTokenReport {
+        let now = Date()
+        let start = days > 0 ? RDAnalyticsEngine.dayKey(now.addingTimeInterval(-Double(days - 1) * 86_400)) : ""
+        let previousStart = days > 0 ? RDAnalyticsEngine.dayKey(now.addingTimeInterval(-Double(2 * days - 1) * 86_400)) : ""
+        let startTime = days > 0 ? (RDAnalyticsEngine.dayDate(start)?.timeIntervalSince1970 ?? 0) : 0
+
+        var totals = RDTokenTotals()
+        var previous = 0.0
+        var perDay: [String: RDTokenTotals] = [:]
+        var perPool: [String: RDTokenTotals] = [:]
+        var perModel: [String: (tokens: Double, usd: Double)] = [:]
+        var perEffort: [String: (tokens: Double, usd: Double)] = [:]
+        var perThread: [String: Double] = [:]
+        var threadUSD: [String: Double] = [:]
+        var heat: [Int: Double] = [:]
+        var detailedAllTime: [String: Double] = [:]
+
+        for (row, pool) in data.rows { detailedAllTime[row.t, default: 0] += row.total
+            if row.d < start {
+                if days > 0, row.d >= previousStart, scope == nil || pool == scope { previous += row.total }
+                continue
+            }
+            perPool[pool, default: RDTokenTotals()].add(row)
+            guard scope == nil || pool == scope else { continue }
+            totals.add(row)
+            perDay[row.d, default: RDTokenTotals()].add(row)
+            perModel[row.m, default: (0, 0)].tokens += row.total
+            perModel[row.m, default: (0, 0)].usd += row.u
+            perEffort[row.e, default: (0, 0)].tokens += row.total
+            perEffort[row.e, default: (0, 0)].usd += row.u
+            perThread[row.t, default: 0] += row.total
+            threadUSD[row.t, default: 0] += row.u
+            heat[row.h, default: 0] += row.total
+        }
+
+        for fact in data.threads.values {
+            let rest = fact.tokens - (detailedAllTime[fact.id] ?? 0)
+            guard rest > 0, fact.updated > 0 else { continue }
+            let pool = data.threadPool[fact.id] ?? ""
+            let day = RDAnalyticsEngine.dayKey(Date(timeIntervalSince1970: fact.updated))
+            if day < start {
+                if days > 0, day >= previousStart, scope == nil || pool == scope { previous += rest }
+                continue
+            }
+            perPool[pool, default: RDTokenTotals()].unsplit += rest
+            guard scope == nil || pool == scope else { continue }
+            totals.unsplit += rest
+            perDay[day, default: RDTokenTotals()].unsplit += rest
+            perModel[fact.model, default: (0, 0)].tokens += rest
+            perEffort[fact.effort, default: (0, 0)].tokens += rest
+            perThread[fact.id, default: 0] += rest
+        }
+
+        var dayPoints: [RDTokenDayPoint] = []
+        let chartStart = days > 0 ? start : RDAnalyticsEngine.dayKey(now.addingTimeInterval(-89 * 86_400))
+        for (day, value) in perDay where day >= chartStart {
+            guard let date = RDAnalyticsEngine.dayDate(day) else { continue }
+            for (kind, amount) in [("cached", value.cached), ("fresh", value.fresh), ("output", value.output), ("unsplit", value.unsplit), ("usd", value.usd)] where amount > 0 {
+                dayPoints.append(RDTokenDayPoint(day: day, date: date, kind: kind, value: amount))
+            }
+        }
+
+        var mainTokens = 0.0, subTokens = 0.0, mainCount = 0, subCount = 0
+        var projectTokens: [String: (tokens: Double, usd: Double)] = [:]
+        for (thread, tokens) in perThread {
+            guard let fact = data.threads[thread] else { continue }
+            if fact.isSubAgent { subTokens += tokens; subCount += 1 } else { mainTokens += tokens; mainCount += 1 }
+            projectTokens[fact.folder, default: (0, 0)].tokens += tokens
+            projectTokens[fact.folder, default: (0, 0)].usd += threadUSD[thread] ?? 0
+        }
+
+        var workSeconds = 0.0, completed = 0, failed = 0, interrupted = 0
+        for turn in data.turns where turn.at >= startTime {
+            guard scope == nil || (data.threadPool[turn.thread] ?? "") == scope else { continue }
+            workSeconds += turn.seconds
+            switch turn.status {
+            case "completed": completed += 1
+            case "failed": failed += 1
+            case "interrupted": interrupted += 1
+            default: break
+            }
+        }
+
+        let poolsByID = Dictionary(uniqueKeysWithValues: data.pools.map { ($0.id, $0) })
+        let accounts = perPool
+            .map { RDAccountShare(id: $0.key, name: poolsByID[$0.key]?.name ?? "", totals: $0.value, pool: poolsByID[$0.key]) }
+            .filter { $0.totals.total > 0 }
+            .sorted { $0.totals.total > $1.totals.total }
+
+        func shares(_ source: [String: (tokens: Double, usd: Double)], limit: Int) -> [RDTokenShare] {
+            source.filter { $0.value.tokens > 0 }
+                .sorted { $0.value.tokens > $1.value.tokens }
+                .prefix(limit)
+                .map { RDTokenShare(id: $0.key, label: $0.key, detail: nil, tokens: $0.value.tokens, usd: $0.value.usd) }
+        }
+        let top = perThread
+            .compactMap { entry -> RDThreadShare? in data.threads[entry.key].map { RDThreadShare(id: entry.key, fact: $0, tokens: entry.value) } }
+            .sorted { $0.tokens > $1.tokens }
+
+        return RDTokenReport(
+            totals: totals,
+            previousTotal: days > 0 && previous > 0 ? previous : nil,
+            days: dayPoints.sorted { $0.date < $1.date },
+            accounts: accounts,
+            models: shares(perModel, limit: 7),
+            efforts: shares(perEffort, limit: 7),
+            projects: shares(projectTokens, limit: 7),
+            top: Array(top.prefix(8)),
+            heat: heat,
+            mainTokens: mainTokens,
+            subTokens: subTokens,
+            mainCount: mainCount,
+            subCount: subCount,
+            workSeconds: workSeconds,
+            turnsCompleted: completed,
+            turnsFailed: failed,
+            turnsInterrupted: interrupted
+        )
+    }
+}
+
+private final class RDSQLiteReader {
+    private var db: OpaquePointer?
+
+    init?(path: String) {
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK, let handle else {
+            sqlite3_close(handle)
+            return nil
+        }
+        sqlite3_busy_timeout(handle, 1500)
+        db = handle
+    }
+
+    deinit {
+        sqlite3_close(db)
+    }
+
+    func rows(_ sql: String, bind: [Int64] = [], each: (OpaquePointer) -> Void) {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return }
+        defer { sqlite3_finalize(statement) }
+        for (index, value) in bind.enumerated() {
+            sqlite3_bind_int64(statement, Int32(index + 1), value)
+        }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            each(statement)
+        }
+    }
+
+    static func text(_ statement: OpaquePointer, _ column: Int32) -> String? {
+        guard let raw = sqlite3_column_text(statement, column) else { return nil }
+        return String(cString: raw)
+    }
+}
+
+private enum RDAnalyticsEngine {
+    static let queue = DispatchQueue(label: "local.codex.accounts.analytics", qos: .utility)
+    static let sessionGap: TimeInterval = 300
+    private static let lock = NSLock()
+
+    static var storeURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Codex Accounts/Analytics", isDirectory: true)
+            .appendingPathComponent("history-v1.json")
+    }
+
+    static func load() -> RDHistoryFile {
+        guard let data = try? Data(contentsOf: storeURL),
+              let file = try? JSONDecoder().decode(RDHistoryFile.self, from: data) else { return RDHistoryFile() }
+        return file
+    }
+
+    static func save(_ file: RDHistoryFile) {
+        let url = storeURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(file) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    static func dayKey(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    static func dayDate(_ key: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: key)
+    }
+
+    private static let headerPattern = try? NSRegularExpression(
+        pattern: "x-codex-(primary|secondary)-(used-percent|window-minutes|reset-at)\\\"?\\s*[:=]\\s*\\\"?([0-9.]+)"
+    )
+
+    private static func quotaHeaders(in body: String) -> [String: Double] {
+        guard let regex = headerPattern else { return [:] }
+        var values: [String: Double] = [:]
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        for match in regex.matches(in: body, range: range) {
+            guard let slotRange = Range(match.range(at: 1), in: body),
+                  let fieldRange = Range(match.range(at: 2), in: body),
+                  let valueRange = Range(match.range(at: 3), in: body),
+                  let value = Double(body[valueRange]) else { continue }
+            let key = "\(body[slotRange]).\(body[fieldRange])"
+            if values[key] == nil {
+                values[key] = value
+            }
+        }
+        return values
+    }
+
+    /// A reading whose reset time had already passed when it was taken is stale cache, not a real value.
+    static func isStale(_ sample: RDQuotaSample) -> Bool {
+        guard let reset = sample.r else { return false }
+        return reset < sample.t - 60
+    }
+
+    /// Merges samples in time order (older log readings can arrive after newer app readings), keeps a sample
+    /// only when the value moved or an hour passed, and drops stale or 35-day-old readings.
+    static func merge(_ incoming: [RDQuotaSample], into file: inout RDHistoryFile) {
+        guard !incoming.isEmpty else { return }
+        let cutoff = Date().timeIntervalSince1970 - 35 * 86_400
+        let all = (file.samples + incoming.filter { !isStale($0) && $0.u >= 0 && $0.u <= 100 })
+            .filter { $0.t >= cutoff }
+            .sorted { ($0.p, $0.w, $0.t) < ($1.p, $1.w, $1.t) }
+        var kept: [RDQuotaSample] = []
+        kept.reserveCapacity(all.count)
+        for sample in all {
+            if let last = kept.last, last.p == sample.p, last.w == sample.w {
+                if sample.t == last.t { continue }
+                if abs(sample.u - last.u) < 0.5 && sample.t - last.t < 3600 { continue }
+            }
+            kept.append(sample)
+        }
+        file.samples = kept
+    }
+
+    /// Records the app's own quota refresh for every profile.
+    static func record(_ samples: [RDQuotaSample]) {
+        guard !samples.isEmpty else { return }
+        queue.async {
+            lock.lock()
+            defer { lock.unlock() }
+            var file = load()
+            merge(samples, into: &file)
+            save(file)
+        }
+    }
+
+    static func scan(profiles: [(id: String, name: String, home: String)], current: [String: (left: Int, minutes: Int, reset: Date?)]) -> RDAnalyticsSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        var file = load()
+        let now = Date()
+        let activitySince = Int64(now.timeIntervalSince1970 - 14 * 86_400)
+        var profilesWithLogs = 0
+
+        for profile in profiles {
+            guard let reader = RDSQLiteReader(path: (profile.home as NSString).appendingPathComponent("logs_2.sqlite")) else { continue }
+            profilesWithLogs += 1
+
+            // Quota headers logged with every API response.
+            let since = file.lastLogTS[profile.id] ?? 0
+            var newest = since
+            var samples: [RDQuotaSample] = []
+            reader.rows(
+                "SELECT ts, feedback_log_body FROM logs WHERE ts > ? AND target = 'codex_http_client::client' AND feedback_log_body LIKE '%x-codex-primary-used-percent%' ORDER BY ts",
+                bind: [since]
+            ) { statement in
+                let ts = sqlite3_column_int64(statement, 0)
+                newest = max(newest, ts)
+                guard let body = RDSQLiteReader.text(statement, 1) else { return }
+                let headers = quotaHeaders(in: body)
+                for slot in ["primary", "secondary"] {
+                    guard let used = headers["\(slot).used-percent"],
+                          let minutes = headers["\(slot).window-minutes"], minutes > 0 else { continue }
+                    let reset = headers["\(slot).reset-at"].flatMap { $0 > 0 ? $0 : nil }
+                    samples.append(RDQuotaSample(t: TimeInterval(ts), p: profile.id, w: Int(minutes), u: used, r: reset))
+                }
+            }
+            merge(samples, into: &file)
+            file.lastLogTS[profile.id] = newest
+
+            // Activity: sessions split by 5-minute gaps, counted on the day they start; conversations per day.
+            var seconds: [String: Double] = [:]
+            var threads: [String: Set<String>] = [:]
+            var sessionStart: TimeInterval?
+            var previous: TimeInterval = 0
+            reader.rows("SELECT ts, thread_id FROM logs WHERE ts > ? ORDER BY ts", bind: [activitySince]) { statement in
+                let ts = TimeInterval(sqlite3_column_int64(statement, 0))
+                if let thread = RDSQLiteReader.text(statement, 1), !thread.isEmpty {
+                    threads[dayKey(Date(timeIntervalSince1970: ts)), default: []].insert(thread)
+                }
+                if let start = sessionStart, ts - previous <= sessionGap {
+                    _ = start
+                } else {
+                    if let start = sessionStart {
+                        seconds[dayKey(Date(timeIntervalSince1970: start)), default: 0] += previous - start + 60
+                    }
+                    sessionStart = ts
+                }
+                previous = ts
+            }
+            if let start = sessionStart {
+                seconds[dayKey(Date(timeIntervalSince1970: start)), default: 0] += previous - start + 60
+            }
+            // Logs get pruned, so never let a day shrink once it has been counted.
+            for (day, value) in seconds {
+                file.usage[day, default: [:]][profile.id] = max(file.usage[day]?[profile.id] ?? 0, min(value, 86_400))
+            }
+            for (day, set) in threads {
+                file.threads[day, default: [:]][profile.id] = max(file.threads[day]?[profile.id] ?? 0, set.count)
+            }
+        }
+
+        // The app's current reading is the freshest sample of all.
+        merge(current.map { id, value in
+            RDQuotaSample(t: now.timeIntervalSince1970, p: id, w: value.minutes, u: Double(100 - value.left), r: value.reset?.timeIntervalSince1970)
+        }, into: &file)
+
+        let oldestDay = dayKey(now.addingTimeInterval(-60 * 86_400))
+        file.usage = file.usage.filter { $0.key >= oldestDay }
+        file.threads = file.threads.filter { $0.key >= oldestDay }
+        save(file)
+
+        let samplesByProfile = Dictionary(grouping: file.samples, by: { $0.p })
+        let names = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0.name) })
+        let weekAgo = dayKey(now.addingTimeInterval(-6 * 86_400))
+
+        let insights: [RDAccountInsight] = profiles.map { profile in
+            let samples = samplesByProfile[profile.id] ?? []
+            let longMinutes = [10080, 43200].first { minutes in samples.contains { $0.w == minutes } }
+                ?? current[profile.id]?.minutes
+            let series = samples.filter { $0.w == longMinutes }.sorted { $0.t < $1.t }
+            let used24h = used(series, since: now.addingTimeInterval(-86_400).timeIntervalSince1970)
+            let used7d = used(series, since: now.addingTimeInterval(-7 * 86_400).timeIntervalSince1970)
+            var perDay: Double?
+            if let used7d, let first = series.first(where: { $0.t >= now.addingTimeInterval(-7 * 86_400).timeIntervalSince1970 }) {
+                let span = max(1, (now.timeIntervalSince1970 - first.t) / 86_400)
+                perDay = used7d / span
+            }
+            let latest = series.last
+            let left = current[profile.id]?.left ?? latest.map { Int((100 - $0.u).rounded()) }
+            let resetAt = current[profile.id]?.reset ?? latest?.r.map { Date(timeIntervalSince1970: $0) }
+            var emptyAt: Date?
+            if let left, let perDay, perDay >= 0.5, left > 0 {
+                emptyAt = now.addingTimeInterval(Double(left) / perDay * 86_400)
+            }
+            let active = file.usage.filter { $0.key >= weekAgo }.reduce(0.0) { $0 + ($1.value[profile.id] ?? 0) }
+            let conversations = file.threads.filter { $0.key >= weekAgo }.reduce(0) { $0 + ($1.value[profile.id] ?? 0) }
+            return RDAccountInsight(
+                id: profile.id,
+                name: profile.name,
+                left: left,
+                windowMinutes: longMinutes,
+                used24h: used24h,
+                used7d: used7d,
+                perDay: perDay,
+                resetAt: resetAt,
+                emptyAt: emptyAt,
+                activeSeconds7d: active,
+                threads7d: conversations
+            )
+        }
+
+        var daily: [RDDailyUsage] = []
+        let fortnight = dayKey(now.addingTimeInterval(-13 * 86_400))
+        for (day, perProfile) in file.usage where day >= fortnight {
+            guard let date = dayDate(day) else { continue }
+            for (profileID, value) in perProfile where value >= 60 {
+                daily.append(RDDailyUsage(id: "\(day)|\(profileID)", day: date, name: names[profileID] ?? profileID, hours: value / 3600))
+            }
+        }
+
+        return RDAnalyticsSnapshot(
+            insights: insights,
+            daily: daily.sorted { $0.day < $1.day },
+            samplesByProfile: samplesByProfile,
+            scannedAt: now,
+            profilesWithLogs: profilesWithLogs
+        )
+    }
+
+    /// Percent used since a time: rises are usage, a drop means a reset, after which usage starts again from zero.
+    static func used(_ series: [RDQuotaSample], since: TimeInterval) -> Double? {
+        let window = series.filter { $0.t >= since }
+        guard !window.isEmpty else { return nil }
+        var baseline = series.last(where: { $0.t < since }) ?? window[0]
+        var total = 0.0
+        for sample in window where sample.t > baseline.t {
+            let delta = sample.u - baseline.u
+            total += delta >= 0 ? delta : sample.u
+            baseline = sample
+        }
+        return total
+    }
+}
+
+extension AccountsRootView {
+    // MARK: Palette
+
+    /// Dark unless the appearance setting says light, or follows a light system.
+    private var rdIsDark: Bool {
+        switch rdAppearance {
+        case "light": return false
+        case "system": return rdSystemScheme == .dark
+        default: return true
+        }
+    }
+    private var rdTheme: RDTheme { RDTheme.theme(canonicalThemeID(appTheme)) }
+    private var rdPalette: RDPalette { rdTheme.palette(dark: rdIsDark) }
+    private var rdBackground: Color { rdPalette.canvas }
+    private var rdSidebarFill: Color { rdPalette.sidebar }
+    private var rdSurface: Color { rdPalette.surface }
+    private var rdRaised: Color { rdPalette.raised }
+    private var rdInspectorFill: Color { rdPalette.inspector }
+    private var rdBackdropOn: Bool { rdBackdropStrength > 0.005 && rdBackdropPicture != nil }
+    /// Panels let the drawing show through when it is on.
+    private var rdInspectorPanel: Color { rdInspectorFill.opacity(rdLayered ? 0.55 : 1) }
+    private var rdCardFill: Color { rdSurface.opacity(rdLayered ? 0.72 : 1) }
+    private var rdInk: Color { rdPalette.ink }
+    private var rdLine: Color { rdPalette.line }
+    private var rdText: Color { rdPalette.text }
+    private var rdText2: Color { rdPalette.text2 }
+    private var rdText3: Color { rdPalette.text3 }
+    private var rdAmber: Color { rdPalette.amber }
+    private var rdOrange: Color { rdPalette.orange }
+    private var rdDanger: Color { rdPalette.danger }
+    private var rdTicket: Color { rdPalette.ticket }
+    private var rdSuccess: Color { rdPalette.success }
+    private var rdOnAccent: Color { rdPalette.onAccent }
+
+    private func rdApplyAppearance() {
+        switch rdAppearance {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "system": NSApp.appearance = nil
+        default: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+    private var rdSpring: Animation {
+        rdReduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.42, dampingFraction: 0.86)
+    }
+
+    /// Headings, names and anything read at a glance: SF Rounded, to match the numerals used everywhere.
+    private func rdDisplay(_ size: CGFloat, weight: Font.Weight = .semibold) -> Font {
+        .system(size: scaled(size), weight: weight, design: .rounded)
+    }
+
+    /// The app's own language, so Chinese and Japanese text use that region's letterforms whatever the
+    /// system's language order is.
+    private var rdTypesettingLanguage: Locale.Language {
+        switch selectedLanguage {
+        case .zhHK: return Locale.Language(identifier: "zh-Hant-HK")
+        case .zhHant: return Locale.Language(identifier: "zh-Hant-TW")
+        case .zhCN: return Locale.Language(identifier: "zh-Hans-CN")
+        case .en: return Locale.Language(identifier: "en")
+        case .ja: return Locale.Language(identifier: "ja")
+        }
+    }
+
+    private var rdLayered: Bool { rdBackdropOn || rdTheme.glow > 0 }
+
+    /// Each theme's own light: its accent glows in from the top, its second colour from the far corner.
+    @ViewBuilder
+    private var rdAmbient: some View {
+        let strength = rdTheme.glow * (rdIsDark ? 0.17 : 0.11)
+        if strength > 0 {
+            GeometryReader { geometry in
+                let reach = max(geometry.size.width, geometry.size.height)
+                ZStack {
+                    RadialGradient(colors: [rdPalette.accent.opacity(strength), rdPalette.accent.opacity(0)],
+                                   center: UnitPoint(x: 0.3, y: -0.08), startRadius: 0, endRadius: reach * 0.62)
+                    RadialGradient(colors: [rdPalette.accent2.opacity(strength * 0.75), rdPalette.accent2.opacity(0)],
+                                   center: UnitPoint(x: 1.05, y: 1.08), startRadius: 0, endRadius: reach * 0.55)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var rdVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+    }
+
+    private var rdLogoImage: NSImage {
+        NSImage(named: "AccountsLogo") ?? NSImage(named: "AppIcon") ?? NSImage()
+    }
+
+    private func rdNumber(_ size: CGFloat, weight: Font.Weight = .semibold) -> Font {
+        .system(size: size, weight: weight, design: .rounded)
+    }
+
+    // MARK: Root
+
+    /// A folder shown the short way, with the home folder written as "~".
+    private func rdHomeRelative(_ path: String) -> String {
+        // Both sides are resolved first, so a home reached through a symlink (such as /tmp) still shortens.
+        let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        if resolved == home { return "~" }
+        return resolved.hasPrefix(home + "/") ? "~" + resolved.dropFirst(home.count) : (path as NSString).abbreviatingWithTildeInPath
+    }
+
+    private func rdChooseBackdrop() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = tr("揀一張圖做背景", "Choose a background picture")
+        guard panel.runModal() == .OK, let source = panel.url else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let saved = RDBackdropStore.importPicture(from: source)
+            let picture = saved ? RDBackdropStore.load() : nil
+            DispatchQueue.main.async {
+                guard let picture else {
+                    statusText = tr("呢張圖讀唔到，請試另一張", "That picture could not be read; try another")
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    rdBackdropPicture = picture
+                    if rdBackdropStrength <= 0.005 { rdBackdropStrength = 0.2 }
+                }
+                statusText = tr("已設定背景圖片", "Background picture set")
+            }
+        }
+    }
+
+    private func rdRemoveBackdrop() {
+        RDBackdropStore.remove()
+        withAnimation(.easeInOut(duration: 0.35)) { rdBackdropPicture = nil }
+        statusText = tr("已移除背景圖片", "Background picture removed")
+    }
+
+    private func rdCheckRequirements() {
+        DispatchQueue.global(qos: .utility).async {
+            let missing = RDRequirements.missing()
+            DispatchQueue.main.async {
+                withAnimation(rdSpring) { rdMissingTools = missing }
+            }
+        }
+    }
+
+    /// Shown on the Accounts page when a tool the helper needs is not on this Mac.
+    private var rdRequirementsBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(rdAmber)
+                Text(tr("呢部 Mac 仲差少少工具", "This Mac is missing a tool or two"))
+                    .font(rdDisplay(14, weight: .semibold))
+                Spacer(minLength: 8)
+                rdSecondaryButton(tr("再檢查", "Check Again"), icon: "arrow.clockwise") { rdCheckRequirements() }
+            }
+            if rdMissingTools.contains("python3") {
+                HStack(alignment: .center, spacing: 12) {
+                    Text(tr("Python 3：同步對話同匯出對話包要用。裝 Apple 嘅 Command Line Tools 就有（免費，幾分鐘）。", "Python 3: needed to sync conversations and export them. It comes with Apple's Command Line Tools (free, a few minutes)."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText2)
+                        .lineSpacing(2.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    rdPrimaryButton(tr("安裝…", "Install…")) {
+                        let install = Process()
+                        install.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+                        install.arguments = ["--install"]
+                        try? install.run()
+                    }
+                }
+            }
+            if rdMissingTools.contains("jq") {
+                HStack(alignment: .center, spacing: 12) {
+                    Text(tr("jq：顯示額度要用。macOS 15 或以上已經內置；macOS 14 可以用 Homebrew 裝：brew install jq", "jq: needed to show quota. macOS 15 and later include it; on macOS 14 install it with Homebrew: brew install jq"))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText2)
+                        .lineSpacing(2.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    rdSecondaryButton(tr("複製指令", "Copy Command"), icon: "doc.on.doc") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("brew install jq", forType: .string)
+                        statusText = tr("已複製：brew install jq", "Copied: brew install jq")
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(rdAmber.opacity(rdIsDark ? 0.10 : 0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(rdAmber.opacity(0.35), lineWidth: 1))
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// The drawing sits at the right, as it was composed, leaving the blank side under the sidebar and names.
+    @ViewBuilder
+    private var rdBackdrop: some View {
+        if rdBackdropOn, let image = rdBackdropPicture {
+            GeometryReader { geometry in
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topTrailing)
+                    .clipped()
+            }
+            .opacity(rdBackdropStrength * (rdIsDark ? 1 : 0.62))   // Orange on white reads stronger than on black.
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    var redesignedWorkspace: some View {
+        GeometryReader { geometry in
+            let sidebarWidth = rdClampedSidebar(rdSidebarLive ?? rdSidebarWidth, window: geometry.size.width)
+            HStack(spacing: 0) {
+                rdSidebar(width: sidebarWidth)
+                rdSidebarHandle(width: sidebarWidth, window: geometry.size.width)
+                ZStack {
+                    rdContent(width: max(geometry.size.width - sidebarWidth - 1, 0))
+                        .id(rdSection)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(y: 12)),
+                            removal: .opacity
+                        ))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+            }
+        }
+        .background {
+            ZStack {
+                rdBackground
+                rdAmbient
+                rdBackdrop
+            }
+        }
+        .foregroundStyle(rdText)
+        .typesettingLanguage(rdTypesettingLanguage)
+        .focusEffectDisabled()
+        .overlay(alignment: .bottom) { rdToastView }
+        .background(rdShortcutButtons)
+        .onChange(of: isRefreshing) { _, refreshing in
+            if !refreshing {
+                rdLastRefreshAt = Date()
+            }
+        }
+        .onChange(of: rdProfilesSignature) { _, _ in
+            rdProfilesChanged()
+        }
+        .onChange(of: statusText) { _, text in
+            rdShowToast(text)
+        }
+        .onAppear {
+            rdMeta = RDMetaStore.load()
+            rdApiPlans = RDPlanDetector.load(profiles.map(\.id))
+            rdApplyAppearance()
+            rdCheckRequirements()
+        }
+        .onChange(of: rdAppearance) { _, _ in
+            rdApplyAppearance()
+        }
+        .onChange(of: keepAwake.mode) { _, mode in
+            if mode != .off { rdKeepAwakeLastMode = mode.rawValue }
+        }
+        .animation(.easeInOut(duration: 0.35), value: appTheme)
+        .animation(.easeInOut(duration: 0.35), value: rdAppearance)
+    }
+
+    @ViewBuilder
+    private func rdContent(width: CGFloat) -> some View {
+        switch rdSection {
+        case "insights": rdInsightsPage
+        case "conversations": rdConversationsPage
+        case "tools": rdToolsPage
+        case "models": rdModelsPage
+        case "settings": rdSettingsPage
+        default: rdAccountsPage(width: width)
+        }
+    }
+
+    private func rdGo(_ section: String) {
+        guard rdSection != section else { return }
+        withAnimation(rdSpring) {
+            rdSection = section
+        }
+    }
+
+    private var rdSections: [(id: String, icon: String, title: String)] {
+        [
+            ("accounts", "person.2", tr("帳戶", "Accounts")),
+            ("insights", "chart.xyaxis.line", tr("分析", "Insights")),
+            ("conversations", "bubble.left.and.bubble.right", tr("對話與項目", "Chats & Projects")),
+            ("tools", "wrench.and.screwdriver", tr("工作工具", "Tools")),
+            ("models", "cpu", tr("模型與代理", "Models & Proxy")),
+            ("settings", "gearshape", tr("設定", "Settings"))
+        ]
+    }
+
+    /// ⌘1–⌘6 switch sections, ⌘F focuses search.
+    private var rdShortcutButtons: some View {
+        ZStack {
+            ForEach(Array(rdSections.enumerated()), id: \.offset) { index, section in
+                Button("") { rdGo(section.id) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command])
+            }
+            Button("") {
+                rdGo("accounts")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { rdSearchFocused = true }
+            }
+            .keyboardShortcut("f", modifiers: [.command])
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+
+    // MARK: Toast
+
+    private func rdShowToast(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "就緒",
+              !trimmed.contains("個 profile 就緒"), !trimmed.contains("profiles ready") else { return }
+        withAnimation(rdSpring) {
+            rdToast = trimmed
+        }
+        let shown = trimmed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            guard rdToast == shown else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                rdToast = nil
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rdToastView: some View {
+        if let toast = rdToast {
+            Text(toast)
+                .font(appFont(size: 13, weight: .medium))
+                .lineLimit(2)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(Capsule().fill(rdRaised))
+                .overlay(Capsule().stroke(rdInk.opacity(0.10), lineWidth: 1))
+                .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+                .padding(.bottom, 18)
+                .padding(.leading, CGFloat(rdSidebarLive ?? rdSidebarWidth) + 1)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: Profile change tracking (history samples + reminders)
+
+    private var rdProfilesSignature: String {
+        profiles.map { "\($0.id)|\($0.quota)|\($0.reset)|\($0.resetCredits)|\($0.authStatus)" }.joined(separator: ";")
+    }
+
+    private func rdCurrentQuota(_ profile: CodexProfile, exact: [String: TimeInterval]? = nil) -> [RDQuotaSample] {
+        let now = Date().timeIntervalSince1970
+        return quotaWindows(for: profile).compactMap { window in
+            guard let percent = window.percent else { return nil }
+            let minutes: Int
+            switch window.id {
+            case "5h": minutes = 300
+            case "7d": minutes = 10080
+            case "30d": minutes = 43200
+            default: return nil
+            }
+            let reset = window.reset.flatMap { resetDate(from: $0) }
+            if let reset, reset.timeIntervalSince1970 < now - 60 { return nil }
+            return RDQuotaSample(t: now, p: profile.id, w: minutes, u: Double(100 - percent), r: exact?[window.id] ?? reset?.timeIntervalSince1970)
+        }
+    }
+
+    /// Called on every refresh, so accounts nobody is using still leave a record. Unchanged values are thinned out
+    /// when they are merged, so this stays small.
+    private func rdRecordQuota() {
+        let tracked = profiles.filter { !isExternalProvider($0) }
+        guard !tracked.isEmpty else { return }
+        let exact = RDPlanDetector.exactResets(tracked.map(\.id))
+        RDAnalyticsEngine.record(tracked.flatMap { rdCurrentQuota($0, exact: exact[$0.id]) })
+    }
+
+    private func rdProfilesChanged() {
+        let previous = rdPreviousProfiles
+        rdPreviousProfiles = profiles
+        guard !profiles.isEmpty else { return }
+        let plans = RDPlanDetector.load(profiles.map(\.id))
+        if plans != rdApiPlans { withAnimation(rdSpring) { rdApiPlans = plans } }
+        rdRecordQuota()
+        if rdSection == "insights", rdAnalytics?.insights.isEmpty ?? true {
+            rdRefreshAnalytics()
+        }
+        guard rdNotifyEnabled, !previous.isEmpty else { return }
+        rdNotifyChanges(previous: previous)
+    }
+
+    private func rdNotifyChanges(previous: [CodexProfile]) {
+        let before = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        for profile in profiles {
+            if let old = before[profile.id], isWaitingForRecovery(old), !isWaitingForRecovery(profile), !isLoginNeeded(profile), profile.quota != "unknown" {
+                rdPostNotification(
+                    id: "reset-\(profile.id)-\(Int(Date().timeIntervalSince1970 / 3600))",
+                    title: tr("\(profile.displayName) 嘅額度已經重設", "\(profile.displayName) has quota again"),
+                    body: tr("可以用返。", "Ready to use.")
+                )
+            }
+        }
+        var notified = Set(UserDefaults.standard.stringArray(forKey: "rdNotifiedTicketKeys") ?? [])
+        for profile in profiles {
+            guard let summary = resetCreditSummary(for: profile) else { continue }
+            for expiry in summary.expiries {
+                guard let date = resetCreditExpiryDate(from: expiry) else { continue }
+                let hours = date.timeIntervalSinceNow / 3600
+                guard hours > 0, hours <= 48 else { continue }
+                let key = "\(profile.id)|\(expiry)"
+                guard !notified.contains(key) else { continue }
+                notified.insert(key)
+                rdPostNotification(
+                    id: "ticket-\(key)",
+                    title: tr("\(profile.displayName) 有重設券快到期", "A reset ticket for \(profile.displayName) expires soon"),
+                    body: tr("\(fullResetCreditExpiryText(expiry))，記得喺之前用。", "\(fullResetCreditExpiryText(expiry)). Use it before then.")
+                )
+            }
+        }
+        UserDefaults.standard.set(Array(notified.suffix(200)), forKey: "rdNotifiedTicketKeys")
+    }
+
+    private func rdPostNotification(id: String, title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+    }
+
+    private func rdSetNotifications(_ enabled: Bool) {
+        guard enabled else {
+            rdNotifyEnabled = false
+            return
+        }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            DispatchQueue.main.async {
+                rdNotifyEnabled = granted
+                if !granted {
+                    statusText = tr("macOS 未允許通知；可以喺系統設定 > 通知打開。", "Notifications are off for this app in System Settings > Notifications.")
+                }
+            }
+        }
+    }
+
+    // MARK: Sidebar
+
+    private static let rdSidebarDefault = 220.0
+
+    /// 200 still fits the logo and name; the page beside it always keeps 720.
+    private func rdClampedSidebar(_ width: Double, window: CGFloat) -> CGFloat {
+        CGFloat(max(200, min(width, 340, Double(window) - 721)))
+    }
+
+    /// The small grip sitting on the sidebar's edge. It stays visible so the edge can be found; hovering only
+    /// brightens its dots, and the line itself never changes.
+    private func rdSidebarGrip(hot: Bool, dragging: Bool) -> some View {
+        VStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { _ in
+                Circle()
+                    .fill(dragging ? themePrimary : (hot ? rdText : rdText3))
+                    .frame(width: 2.5, height: 2.5)
+            }
+        }
+        .frame(width: 11, height: 36)
+        .background(Capsule().fill(rdRaised))
+        .overlay(Capsule().stroke(hot ? rdInk.opacity(0.22) : rdLine, lineWidth: 1))
+        .shadow(color: .black.opacity(rdIsDark ? 0.35 : 0.12), radius: 3, y: 1)
+        .scaleEffect(hot ? 1.08 : 1)
+        .animation(.easeOut(duration: 0.15), value: hot)
+        .animation(.easeOut(duration: 0.15), value: dragging)
+        .allowsHitTesting(false)
+    }
+
+    /// The line between the sidebar and the page: drag to resize, double-click for the default width.
+    private func rdSidebarHandle(width: CGFloat, window: CGFloat) -> some View {
+        let dragging = rdSidebarLive != nil
+        return Rectangle()
+            .fill(rdLine)
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .overlay { rdSidebarGrip(hot: rdSidebarHandleHot || dragging, dragging: dragging) }
+            .overlay {
+                RDResizeHandle(
+                    tooltip: tr("拖動調整闊度，撳兩下還原", "Drag to resize; double-click to reset"),
+                    onHover: { rdSidebarHandleHot = $0 },
+                    onChanged: { translation in
+                        let base = rdSidebarDragBase ?? Double(width)
+                        rdSidebarDragBase = base
+                        rdSidebarLive = base + Double(translation)
+                    },
+                    onEnded: { translation in
+                        let base = rdSidebarDragBase ?? Double(width)
+                        rdSidebarWidth = Double(rdClampedSidebar(base + Double(translation), window: window))
+                        rdSidebarLive = nil
+                        rdSidebarDragBase = nil
+                    },
+                    onReset: {
+                        withAnimation(rdSpring) { rdSidebarWidth = Self.rdSidebarDefault }
+                    }
+                )
+                .frame(width: 11)
+            }
+            .zIndex(1)
+    }
+
+    private func rdSidebar(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: 34)
+
+            HStack(spacing: 10) {
+                Image(nsImage: rdLogoImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 30, height: 30)
+                Text("Codex Accounts")
+                    .font(rdDisplay(15, weight: .bold))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 20)
+
+            VStack(spacing: 2) {
+                ForEach(rdSections.filter { $0.id != "settings" }, id: \.id) { section in
+                    rdNavItem(section.id, icon: section.icon, title: section.title, badge: section.id == "accounts" && !profiles.isEmpty ? "\(profiles.count)" : nil)
+                }
+            }
+
+            Text(tr("這部 Mac", "This Mac"))
+                .font(appFont(size: 11, weight: .semibold))
+                .foregroundStyle(rdText3)
+                .padding(.horizontal, 10)
+                .padding(.top, 22)
+                .padding(.bottom, 6)
+
+            rdQuickRow(
+                icon: "cup.and.saucer", title: tr("防睡眠", "Keep Awake"),
+                detail: keepAwake.mode == .off ? nil : keepAwakeModeTitle,
+                active: keepAwake.mode != .off, busy: keepAwake.isSwitching
+            ) {
+                // Turning it on returns to the mode used last (screen on, or lid closed).
+                keepAwake.setMode(keepAwake.mode == .off ? (KeepAwakeMode(rawValue: rdKeepAwakeLastMode) ?? .display) : .off)
+            }
+            rdQuickRow(
+                icon: "keyboard", title: tr("鍵盤清潔", "Keyboard"),
+                detail: keyboardClean.isLocked ? tr("鍵盤已鎖定", "Keyboard locked") : nil,
+                active: keyboardClean.isLocked, busy: keyboardClean.isSwitching
+            ) {
+                keyboardClean.toggle()
+            }
+
+            Spacer(minLength: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tr("今日使用", "Today"))
+                    .font(appFont(size: 11))
+                    .foregroundStyle(rdText3)
+                Text(usageDurationText(currentUsageSeconds()))
+                    .font(rdNumber(17))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 12)
+
+            rdNavItem("settings", icon: "gearshape", title: tr("設定", "Settings"), trailing: rdVersion)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 14)
+        .frame(width: width)
+        .frame(maxHeight: .infinity)
+        .background(rdSidebarFill)
+    }
+
+    private func rdNavItem(_ id: String, icon: String, title: String, badge: String? = nil, trailing: String? = nil) -> some View {
+        let selected = rdSection == id
+        return Button {
+            rdGo(id)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: selected ? .semibold : .medium))
+                    .frame(width: 20)
+                    .foregroundStyle(selected ? themePrimary : rdText2)
+                    .scaleEffect(selected && !rdReduceMotion ? 1.1 : 1)
+                    .animation(.spring(response: 0.34, dampingFraction: 0.55), value: selected)
+                Text(title)
+                    .font(appFont(size: 13, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? rdText : rdText2)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let badge {
+                    Text(badge)
+                        .font(appFont(size: 11, weight: .medium))
+                        .foregroundStyle(rdText3)
+                        .monospacedDigit()
+                }
+                if let trailing, !trailing.isEmpty {
+                    Text(trailing)
+                        .font(appFont(size: 11))
+                        .foregroundStyle(rdText3)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(rdPalette.selection)
+                        .matchedGeometryEffect(id: "rdNavSelection", in: rdNamespace)
+                }
+            }
+            .modifier(RDHoverFill(cornerRadius: 8, base: .clear, hover: selected ? .clear : rdInk.opacity(0.04)))
+        }
+        .buttonStyle(RDPressStyle())
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// A small switch whose position and colour are the state; no "on" or "off" wording.
+    private func rdMiniSwitch(isOn: Bool) -> some View {
+        Capsule()
+            .fill(isOn ? themePrimary : rdInk.opacity(0.16))
+            .frame(width: 30, height: 18)
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle()
+                    .fill(isOn ? rdOnAccent : rdText2)
+                    .frame(width: 14, height: 14)
+                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+                    .padding(2)
+            }
+            .shadow(color: themePrimary.opacity(isOn ? 0.45 : 0), radius: 5)
+            .animation(rdSpring, value: isOn)
+    }
+
+    /// A sidebar shortcut: the name opens the Tools page, the switch turns the feature on or off in place.
+    private func rdQuickRow(icon: String, title: String, detail: String?, active: Bool, busy: Bool, toggle: @escaping () -> Void) -> some View {
+        #if UI_PREVIEW
+        let active = active || ProcessInfo.processInfo.environment["PREVIEW_SWITCH_ON"] == title
+        #endif
+        return HStack(spacing: 6) {
+            Button {
+                rdGo("tools")
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: icon)
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 20)
+                        .foregroundStyle(active ? themePrimary : rdText3)
+                    Text(title)
+                        .font(appFont(size: 13, weight: active ? .medium : .regular))
+                        .foregroundStyle(active ? rdText : rdText2)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(RDPressStyle())
+            Button(action: toggle) {
+                rdMiniSwitch(isOn: active)
+                    .frame(width: 34, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(RDPressStyle())
+            .disabled(busy)
+            .opacity(busy ? 0.5 : 1)
+            .help(detail ?? (active ? tr("撳一下關閉", "Click to turn off") : tr("撳一下開啟", "Click to turn on")))
+            .accessibilityLabel(title)
+            .accessibilityValue(active ? tr("開", "On") : tr("關", "Off"))
+            .accessibilityAddTraits(.isToggle)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .modifier(RDHoverFill(cornerRadius: 8, base: .clear, hover: rdInk.opacity(0.04)))
+    }
+
+    // MARK: Building blocks
+
+    private func rdPageHeader<Trailing: View>(_ title: String, subtitle: String? = nil, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(title)
+                    .font(rdDisplay(24, weight: .bold))
+                    .tracking(-0.2)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .lineLimit(1)
+                        .contentTransition(.numericText())
+                }
+            }
+            Spacer(minLength: 12)
+            trailing()
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 32)
+        .padding(.bottom, 14)
+    }
+
+    private func rdPrimaryButton(_ title: String, icon: String? = nil, busy: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if busy {
+                    ProgressView().controlSize(.small)
+                } else if let icon {
+                    Image(systemName: icon).font(.system(size: 12, weight: .bold))
+                }
+                Text(title).font(appFont(size: 13, weight: .semibold)).lineLimit(1)
+            }
+            .foregroundStyle(rdOnAccent)
+            .padding(.horizontal, 13)
+            .frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(themePrimary))
+            .contentShape(Rectangle())
+            .modifier(RDHoverLift(tint: themePrimary))
+        }
+        .buttonStyle(RDPressStyle())
+        .disabled(busy)
+    }
+
+    private func rdSecondaryButton(_ title: String, icon: String? = nil, busy: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if busy {
+                    ProgressView().controlSize(.small)
+                } else if let icon {
+                    Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                }
+                Text(title).font(appFont(size: 13, weight: .medium)).lineLimit(1)
+            }
+            .foregroundStyle(rdText)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(rdInk.opacity(0.12), lineWidth: 1))
+            .contentShape(Rectangle())
+            .modifier(RDHoverFill(cornerRadius: 8, base: .clear, hover: rdInk.opacity(0.06)))
+        }
+        .buttonStyle(RDPressStyle())
+        .disabled(busy)
+    }
+
+    private func rdIconButton(_ icon: String, help: String, busy: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                if busy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: icon).font(.system(size: 13, weight: .semibold))
+                }
+            }
+            .foregroundStyle(rdText2)
+            .frame(width: 30, height: 30)
+            .contentShape(Rectangle())
+            .modifier(RDHoverFill(cornerRadius: 8, base: rdInk.opacity(0.05), hover: rdInk.opacity(0.10)))
+        }
+        .buttonStyle(RDPressStyle())
+        .disabled(busy)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private func rdCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(rdCardFill))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(rdLine, lineWidth: 1))
+    }
+
+    private func rdCardTitle(_ title: String, subtitle: String? = nil, icon: String? = nil) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(themePrimary)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(themePrimary.opacity(0.12)))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(rdDisplay(15, weight: .semibold))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func rdSegmented<Value: Equatable>(_ options: [(Value, String)], selection: Value, key: String, disabled: Bool = false, onSelect: @escaping (Value) -> Void) -> some View {
+        HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                let isOn = option.0 == selection
+                Button {
+                    withAnimation(rdSpring) { onSelect(option.0) }
+                } label: {
+                    Text(option.1)
+                        .font(appFont(size: 12, weight: .semibold))
+                        .hidden()       // Reserves the bold width, so choosing a segment never shifts the others.
+                        .overlay {
+                            Text(option.1)
+                                .font(appFont(size: 12, weight: isOn ? .semibold : .regular))
+                                .foregroundStyle(isOn ? rdOnAccent : rdText2)
+                                .fixedSize()
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background {
+                            if isOn {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(themePrimary)
+                                    .matchedGeometryEffect(id: "rdSeg-\(key)", in: rdNamespace)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .modifier(RDHoverFill(cornerRadius: 6, base: .clear, hover: isOn ? .clear : rdInk.opacity(0.07)))
+                }
+                .buttonStyle(RDPressStyle())
+                .accessibilityAddTraits(isOn ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.06)))
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
+    }
+
+    private func rdIconSegmented<Value: Equatable>(_ options: [(Value, String, String)], selection: Value, key: String, disabled: Bool = false, onSelect: @escaping (Value) -> Void) -> some View {
+        HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                let isOn = option.0 == selection
+                Button {
+                    withAnimation(rdSpring) { onSelect(option.0) }
+                } label: {
+                    Image(systemName: option.2)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(isOn ? rdOnAccent : rdText3)
+                        .frame(width: 32, height: 24)
+                        .background {
+                            if isOn {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(themePrimary)
+                                    .matchedGeometryEffect(id: "rdISeg-\(key)", in: rdNamespace)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(RDPressStyle())
+                .help(option.1)
+                .accessibilityLabel(option.1)
+                .accessibilityAddTraits(isOn ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.06)))
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
+    }
+
+    private var rdHistoryOptions: [(Bool, String, String)] {
+        [(true, tr("共享本機對話", "Shared local chats"), "person.2.fill"), (false, tr("私人本機對話", "Private local chats"), "lock.fill")]
+    }
+
+    private func rdToggleRow(_ title: String, subtitle: String? = nil, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(appFont(size: 13, weight: .medium))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(themePrimary)
+        }
+    }
+
+    /// What is left, as a colour: green when there is plenty, through lime, amber and orange, to red near zero.
+    private func rdLevelColor(_ percent: Int) -> Color {
+        rdPalette.level(percent)
+    }
+
+    /// A level bar without a label (charts, secondary windows).
+    private func rdBar(_ percent: Int, height: CGFloat = 8) -> some View {
+        rdQuotaBar(percent, height: height, label: false)
+    }
+
+    /// The quota bar: thick, filled in the level colour, with the number printed inside. The number is drawn
+    /// twice, once over the track and once clipped to the fill, so it stays readable where the fill ends.
+    /// An empty bar's track turns faintly red so a used-up account reads at a glance.
+    private func rdQuotaBar(_ percent: Int, height: CGFloat, label: Bool = true) -> some View {
+        let clamped = min(max(percent, 0), 100)
+        let palette = rdPalette
+        let color = palette.level(clamped)
+        let revealed = rdRevealed
+        return GeometryReader { geometry in
+            let full = geometry.size.width * CGFloat(clamped) / 100
+            let fill = (clamped > 0 ? max(height, full) : 0) * (revealed ? 1 : 0)
+            ZStack(alignment: .leading) {
+                Capsule().fill(palette.canvas)   // Keeps the background drawing out of the bar.
+                Capsule()
+                    .fill(clamped == 0 ? palette.level(0).opacity(palette.isDark ? 0.20 : 0.14) : palette.track)
+                Capsule()
+                    .fill(LinearGradient(colors: [color.opacity(palette.isDark ? 0.78 : 0.86), color], startPoint: .leading, endPoint: .trailing))
+                    .overlay(
+                        Capsule().fill(LinearGradient(colors: [Color.white.opacity(palette.isDark ? 0.28 : 0.22), Color.white.opacity(0)], startPoint: .top, endPoint: .center))
+                    )
+                    .frame(width: fill)
+                    .shadow(color: color.opacity(palette.isDark ? 0.38 : 0.18), radius: palette.isDark ? 6 : 3)
+                if label {
+                    let text = Text("\(clamped)%")
+                        .font(.system(size: max(9, height * 0.58), weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    text
+                        .foregroundStyle(clamped == 0 ? palette.level(0) : palette.text)
+                        .padding(.leading, height * 0.42)
+                    text
+                        .foregroundStyle(palette.onLevel(clamped))
+                        .padding(.leading, height * 0.42)
+                        .frame(width: geometry.size.width, alignment: .leading)
+                        .mask(alignment: .leading) { Rectangle().frame(width: fill) }
+                }
+            }
+        }
+        .frame(height: height)
+        .animation(.spring(response: 0.7, dampingFraction: 0.85), value: clamped)
+        .animation(.spring(response: 0.8, dampingFraction: 0.86), value: rdRevealed)
+        .accessibilityElement()
+        .accessibilityLabel(label ? tr("剩餘 \(clamped)%", "\(clamped)% left") : "")
+        .accessibilityHidden(!label)
+    }
+
+    // MARK: Plans and pins
+
+    /// A manual tag wins; otherwise the plan comes from the usage API, and an account whose only quota is a
+    /// 30-day window is a free account.
+    private func rdTier(_ profile: CodexProfile) -> RDTier? { rdMeta[profile.id]?.tier ?? rdDetectedTier(profile) }
+    private func rdTierIsManual(_ profile: CodexProfile) -> Bool { rdMeta[profile.id]?.tier != nil }
+
+    private func rdDetectedTier(_ profile: CodexProfile) -> RDTier? {
+        guard !isExternalProvider(profile) else { return nil }
+        if let plan = rdApiPlans[profile.id], let tier = RDPlanDetector.tier(forPlan: plan) { return tier }
+        let windows = Set(quotaWindows(for: profile).filter { $0.percent != nil }.map(\.id))
+        return windows == ["30d"] ? .free : nil
+    }
+    private func rdIsPinned(_ profile: CodexProfile) -> Bool { rdMeta[profile.id]?.pinnedAt != nil }
+    private func rdTierColor(_ tier: RDTier) -> Color { tier.color(dark: rdIsDark) }
+
+    private func rdUpdateMeta(_ id: String, _ change: (inout RDAccountMeta) -> Void) {
+        var entry = rdMeta[id] ?? RDAccountMeta()
+        change(&entry)
+        withAnimation(rdSpring) {
+            if entry.isEmpty { rdMeta.removeValue(forKey: id) } else { rdMeta[id] = entry }
+        }
+        RDMetaStore.save(rdMeta)
+    }
+
+    /// New pins go to the bottom of the pinned block; unpinning returns the account to its plan group.
+    private func rdTogglePin(_ profile: CodexProfile) {
+        let pinned = rdIsPinned(profile)
+        let next = (rdMeta.values.compactMap(\.pinnedAt).max() ?? 0) + 1
+        rdUpdateMeta(profile.id) { $0.pinnedAt = pinned ? nil : next }
+        statusText = pinned ? tr("已取消置頂 \(profile.displayName)", "Unpinned \(profile.displayName)")
+                            : tr("已置頂 \(profile.displayName)", "Pinned \(profile.displayName)")
+    }
+
+    private var rdPinnedOrder: [CodexProfile] {
+        profiles.filter(rdIsPinned).sorted { (rdMeta[$0.id]?.pinnedAt ?? 0) < (rdMeta[$1.id]?.pinnedAt ?? 0) }
+    }
+
+    private func rdMovePin(_ profile: CodexProfile, by offset: Int) {
+        let order = rdPinnedOrder
+        guard let index = order.firstIndex(where: { $0.id == profile.id }) else { return }
+        let target = index + offset
+        guard order.indices.contains(target) else { return }
+        let mine = rdMeta[order[index].id]?.pinnedAt
+        let theirs = rdMeta[order[target].id]?.pinnedAt
+        rdUpdateMeta(order[index].id) { $0.pinnedAt = theirs }
+        rdUpdateMeta(order[target].id) { $0.pinnedAt = mine }
+    }
+
+    /// nil, or the plan that was detected anyway, means "follow detection": nothing manual is stored.
+    private func rdSetTier(_ profile: CodexProfile, _ tier: RDTier?) {
+        let detected = rdDetectedTier(profile)
+        let manual = tier == detected ? nil : tier
+        rdUpdateMeta(profile.id) { $0.tier = manual }
+        if let manual {
+            statusText = tr("\(profile.displayName) 手動設為 \(manual.title)", "\(profile.displayName) set to \(manual.title)")
+        } else {
+            statusText = detected.map { tr("\(profile.displayName) 跟返自動偵測：\($0.title)", "\(profile.displayName) follows detection: \($0.title)") }
+                ?? tr("\(profile.displayName) 冇方案", "\(profile.displayName) has no plan")
+        }
+    }
+
+    /// Where the plan shown for this account came from, for the inspector.
+    private func rdPlanSource(_ profile: CodexProfile) -> (icon: String, text: String) {
+        let detected = rdDetectedTier(profile)
+        if rdTierIsManual(profile) {
+            return ("hand.point.up.left.fill", detected.map { tr("手動設定（偵測到 \($0.title)）", "Set by hand (detected \($0.title))") }
+                ?? tr("手動設定", "Set by hand"))
+        }
+        if let plan = rdApiPlans[profile.id] {
+            if let detected { return ("wand.and.stars", tr("自動偵測：帳戶方案 \(plan) → \(detected.title)", "Detected: account plan \(plan) → \(detected.title)")) }
+            return ("questionmark.circle", tr("帳戶方案 \(plan)，未有對應分類", "Account plan \(plan) has no matching group"))
+        }
+        if detected == .free {
+            return ("wand.and.stars", tr("自動偵測：只有 30 日額度，即免費帳戶", "Detected: only a 30-day quota, so a free account"))
+        }
+        return ("questionmark.circle", tr("未偵測到方案，下次成功刷新後會自動分類", "No plan detected yet; it is filled in after the next successful refresh"))
+    }
+
+    private func rdTierChip(_ tier: RDTier, compact: Bool = true) -> some View {
+        let color = rdTierColor(tier)
+        return HStack(spacing: 3) {
+            Image(systemName: tier.symbol)
+                .font(.system(size: compact ? 8.5 : 10, weight: .bold))
+            Text(tier.title)
+                .font(.system(size: compact ? 10.5 : 12, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, compact ? 6 : 8)
+        .padding(.vertical, compact ? 2 : 3.5)
+        .background(Capsule().fill(color.opacity(rdIsDark ? 0.15 : 0.11)))
+        .overlay(Capsule().stroke(color.opacity(rdIsDark ? 0.32 : 0.28), lineWidth: 1))
+        .fixedSize()
+        .accessibilityLabel(tr("方案 \(tier.title)", "Plan \(tier.title)"))
+    }
+
+    @ViewBuilder
+    private func rdPlanMenu(_ profile: CodexProfile) -> some View {
+        let current = rdTier(profile)
+        let manual = rdTierIsManual(profile)
+        let detected = rdDetectedTier(profile)
+        Menu(tr("方案", "Plan")) {
+            Button {
+                rdSetTier(profile, nil)
+            } label: {
+                let title = tr("自動偵測", "Detect Automatically") + (detected.map { "（\($0.title)）" } ?? "")
+                if !manual { Label(title, systemImage: "checkmark") } else { Text(title) }
+            }
+            Divider()
+            ForEach(RDTier.allCases) { tier in
+                Button {
+                    rdSetTier(profile, tier)
+                } label: {
+                    if manual && current == tier { Label(tier.title, systemImage: "checkmark") } else { Text(tier.title) }
+                }
+            }
+        }
+    }
+
+    /// Plan chips in the inspector. The current plan is filled, whether detected or set by hand; clicking a
+    /// hand-set plan again goes back to detection. A line underneath says where the plan came from.
+    private func rdPlanPicker(_ profile: CodexProfile) -> some View {
+        let current = rdTier(profile)
+        let manual = rdTierIsManual(profile)
+        let source = rdPlanSource(profile)
+        return VStack(alignment: .leading, spacing: 7) {
+        HStack(spacing: 3) {
+            ForEach(RDTier.allCases) { tier in
+                let isOn = current == tier
+                let color = rdTierColor(tier)
+                Button {
+                    rdSetTier(profile, isOn && manual ? nil : tier)
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: tier.symbol)
+                            .font(.system(size: 8, weight: .bold))
+                        Text(tier.shortTitle)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                    }
+                    .padding(.horizontal, 4)
+                    .foregroundStyle(isOn ? (rdIsDark ? Color.black.opacity(0.82) : Color.white) : color)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 25)
+                    .background(Capsule().fill(isOn ? color : color.opacity(rdIsDark ? 0.10 : 0.08)))
+                    .overlay(Capsule().stroke(color.opacity(isOn ? 0 : 0.30), lineWidth: 1))
+                    .shadow(color: isOn ? color.opacity(rdIsDark ? 0.40 : 0.25) : .clear, radius: 6)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(RDPressStyle())
+                .help(isOn ? (manual ? tr("再撳一下改返自動偵測", "Click again to go back to detection") : tr("自動偵測到嘅方案", "Detected plan"))
+                           : tr("手動設為 \(tier.title)", "Set to \(tier.title)"))
+                .accessibilityLabel(tier.title)
+                .accessibilityAddTraits(isOn ? .isSelected : [])
+            }
+        }
+            HStack(spacing: 5) {
+                Image(systemName: source.icon)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(manual ? themeWarm : themePrimary)
+                Text(source.text)
+                    .font(appFont(size: 11, weight: .medium))
+                    .foregroundStyle(rdText2)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                if manual {
+                    Button(tr("改返自動", "Use Detected")) { rdSetTier(profile, nil) }
+                        .buttonStyle(.plain)
+                        .font(appFont(size: 11, weight: .semibold))
+                        .foregroundStyle(themePrimary)
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .animation(rdSpring, value: current)
+        .animation(rdSpring, value: manual)
+    }
+
+    // MARK: Groups
+
+    private func rdIsCollapsed(_ id: String) -> Bool {
+        rdCollapsedGroups.split(separator: ",").contains(Substring(id))
+    }
+
+    private func rdToggleCollapsed(_ id: String) {
+        var set = Set(rdCollapsedGroups.split(separator: ",").map(String.init))
+        if set.contains(id) { set.remove(id) } else { set.insert(id) }
+        withAnimation(rdSpring) { rdCollapsedGroups = set.sorted().joined(separator: ",") }
+    }
+
+    /// Pinned accounts first, in their own order; then one block per plan (highest first), untagged accounts,
+    /// and external APIs. Inside a block the usual order applies: usable first, most quota left first.
+    private var rdGroups: [RDGroup] {
+        let visible = rdVisibleProfiles
+        let pinned = visible.filter(rdIsPinned).sorted { (rdMeta[$0.id]?.pinnedAt ?? 0) < (rdMeta[$1.id]?.pinnedAt ?? 0) }
+        let rest = visible.filter { !rdIsPinned($0) }
+        var groups: [RDGroup] = []
+        if !pinned.isEmpty {
+            groups.append(RDGroup(id: "pinned", title: tr("置頂", "Pinned"), icon: "pin.fill", tint: themePrimary, profiles: pinned))
+        }
+        guard rdGroupByTier else {
+            if !rest.isEmpty {
+                groups.append(RDGroup(id: "rest", title: pinned.isEmpty ? "" : tr("其他帳戶", "Other accounts"), icon: "person.2", tint: nil, profiles: rest))
+            }
+            return groups
+        }
+        for tier in RDTier.allCases {
+            let items = rest.filter { rdTier($0) == tier && !isExternalProvider($0) }
+            if !items.isEmpty {
+                groups.append(RDGroup(id: tier.rawValue, title: tier.title, icon: tier.symbol, tint: rdTierColor(tier), profiles: items))
+            }
+        }
+        let untagged = rest.filter { rdTier($0) == nil && !isExternalProvider($0) }
+        if !untagged.isEmpty {
+            groups.append(RDGroup(id: "untagged", title: tr("未分類", "No plan"), icon: "tag", tint: nil, profiles: untagged))
+        }
+        let api = rest.filter { isExternalProvider($0) }
+        if !api.isEmpty {
+            groups.append(RDGroup(id: "api", title: tr("外部 API", "External API"), icon: "network", tint: themeSecondary, profiles: api))
+        }
+        return groups
+    }
+
+    private func rdGroupHeader(_ group: RDGroup) -> some View {
+        let collapsed = rdIsCollapsed(group.id)
+        let lefts = group.profiles.compactMap { rdLongWindow($0)?.percent }
+        let average = lefts.isEmpty ? nil : lefts.reduce(0, +) / lefts.count
+        let tint = group.tint ?? rdText2
+        return Button {
+            rdToggleCollapsed(group.id)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(rdText3)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                Image(systemName: group.icon)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(tint)
+                    .rotationEffect(.degrees(group.id == "pinned" ? 45 : 0))
+                Text(group.title)
+                    .font(appFont(size: 13, weight: .bold))
+                    .foregroundStyle(group.tint ?? rdText)
+                Text("\(group.profiles.count)")
+                    .font(rdNumber(11, weight: .bold))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(tint.opacity(0.14)))
+                Rectangle()
+                    .fill(LinearGradient(colors: [tint.opacity(0.35), tint.opacity(0)], startPoint: .leading, endPoint: .trailing))
+                    .frame(height: 1)
+                    .padding(.leading, 4)
+                if let average {
+                    HStack(spacing: 6) {
+                        Text(tr("平均", "avg"))
+                            .font(appFont(size: 11))
+                            .foregroundStyle(rdText3)
+                        Text("\(average)%")
+                            .font(rdNumber(12, weight: .bold))
+                            .foregroundStyle(rdLevelColor(average))
+                            .monospacedDigit()
+                        rdBar(average, height: 6)
+                            .frame(width: 54)
+                    }
+                    .fixedSize()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(collapsed ? tr("展開", "Expand") : tr("收起", "Collapse"))
+        .accessibilityLabel("\(group.title) \(group.profiles.count)")
+    }
+
+    private func rdBadge(_ profile: CodexProfile, size: CGFloat) -> some View {
+        Image(nsImage: profileBadgeImage(for: profile))
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.27, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.27, style: .continuous).stroke(rdInk.opacity(0.10), lineWidth: 1))
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Account status and quota helpers
+
+    private func rdStatus(_ profile: CodexProfile) -> RDStatus {
+        if isExternalProvider(profile) { return .api }
+        if isLoginNeeded(profile) { return .login }
+        if rdFailedRefreshIDs.contains(profile.id) { return .failed }
+        if isWaitingForRecovery(profile) { return .waiting }
+        if profile.quota == "unknown" {
+            return (profile.authStatus == "checking" || profile.authMode == "checking") ? .checking : .noData
+        }
+        return .ready
+    }
+
+    /// Only statuses that need attention get a line of text; a healthy account shows just its numbers.
+    private func rdStatusNote(_ status: RDStatus, profile: CodexProfile) -> String? {
+        switch status {
+        case .ready: return nil
+        case .api: return tr("外部 API", "External API")
+        case .checking: return tr("讀取緊…", "Loading…")
+        case .noData: return tr("未取得額度", "No quota data")
+        case .waiting:
+            if let window = quotaWindows(for: profile).first(where: { $0.percent == 0 }), let text = rdResetRelative(window.reset) {
+                return tr("已用完 · \(text)", "Used up · \(text)")
+            }
+            return tr("已用完，等待重設", "Used up, waiting for reset")
+        case .login: return tr("需要登入", "Login needed")
+        case .failed: return tr("更新失敗，顯示上次資料", "Update failed · last data")
+        }
+    }
+
+    private func rdStatusColor(_ status: RDStatus) -> Color {
+        switch status {
+        case .ready: return themePrimary
+        case .api: return themeSecondary
+        case .checking, .login, .noData: return rdText3
+        case .waiting: return rdAmber
+        case .failed: return rdOrange
+        }
+    }
+
+    private func rdWindow(_ profile: CodexProfile, id: String) -> QuotaWindow? {
+        quotaWindows(for: profile).first { $0.id == id && $0.percent != nil }
+    }
+
+    /// The long-period limit: 1 week for most plans, 1 month for accounts that only have a monthly limit.
+    private func rdLongWindow(_ profile: CodexProfile) -> QuotaWindow? {
+        rdWindow(profile, id: "7d") ?? rdWindow(profile, id: "30d")
+    }
+
+    private func rdWeekly(_ profile: CodexProfile) -> QuotaWindow? {
+        rdLongWindow(profile) ?? rdWindow(profile, id: "5h")
+    }
+
+    private func rdRelative(_ date: Date) -> String {
+        let seconds = date.timeIntervalSinceNow
+        if seconds <= 60 { return tr("即將", "soon") }
+        if seconds < 3600 {
+            let minutes = Int(seconds / 60)
+            return tr("\(minutes) 分鐘後", "in \(minutes) min")
+        }
+        if seconds < 86_400 {
+            let hours = Int(seconds / 3600)
+            return tr("\(hours) 小時後", "in \(hours) h")
+        }
+        let days = Int(seconds / 86_400)
+        return tr("\(days) 日後", "in \(days) d")
+    }
+
+    private func rdResetRelative(_ reset: String?) -> String? {
+        guard let reset, reset != "unknown", reset != "none", !reset.isEmpty, let date = resetDate(from: reset) else { return nil }
+        return tr("\(rdRelative(date))重設", "resets \(rdRelative(date))")
+    }
+
+    private func rdResetShort(_ reset: String?) -> String {
+        guard let reset, reset != "unknown", reset != "none", !reset.isEmpty, let date = resetDate(from: reset) else { return "" }
+        return rdRelative(date)
+    }
+
+    private func rdResetFull(_ reset: String?) -> String? {
+        guard let reset, reset != "unknown", reset != "none", !reset.isEmpty, let date = resetDate(from: reset) else { return nil }
+        return tr("\(fullResetDateText(from: reset)) 重設 · \(rdRelative(date))", "Resets \(fullResetDateText(from: reset)) · \(rdRelative(date))")
+    }
+
+    private func rdTicketDate(_ raw: String) -> String {
+        guard let date = resetCreditExpiryDate(from: raw) else { return shortResetCreditExpiryText(raw) }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = selectedLanguage == .en ? "MMM d HH:mm" : "M月d日 HH:mm"
+        return formatter.string(from: date)
+    }
+
+    private func rdTicketExpiringSoon(_ profile: CodexProfile) -> Bool {
+        guard let first = resetCreditSummary(for: profile)?.expiries.first, let date = resetCreditExpiryDate(from: first) else { return false }
+        return date.timeIntervalSinceNow < 3 * 86_400
+    }
+
+    private func rdWindowName(_ id: String) -> String {
+        switch id {
+        case "5h": return tr("5 小時", "5 hours")
+        case "7d": return tr("1 星期", "1 week")
+        case "30d": return tr("1 個月", "1 month")
+        default:
+            let labels = quotaWindowLabels(for: id)
+            return tr(labels.zh, labels.en)
+        }
+    }
+
+    private func rdResetSoonness(_ profile: CodexProfile) -> TimeInterval {
+        guard let reset = rdWeekly(profile)?.reset, let date = resetDate(from: reset) else { return .greatestFiniteMagnitude }
+        return date.timeIntervalSinceNow
+    }
+
+    private func rdStatusRank(_ status: RDStatus) -> Int {
+        switch status {
+        case .ready: return 0
+        case .api: return 1
+        case .checking: return 2
+        case .waiting: return 3
+        case .noData: return 4
+        case .failed: return 5
+        case .login: return 6
+        }
+    }
+
+    private var rdSortedProfiles: [CodexProfile] {
+        profiles.sorted { lhs, rhs in
+            let leftStatus = rdStatus(lhs)
+            let rightStatus = rdStatus(rhs)
+            if rdStatusRank(leftStatus) != rdStatusRank(rightStatus) {
+                return rdStatusRank(leftStatus) < rdStatusRank(rightStatus)
+            }
+            if leftStatus == .waiting {
+                return rdResetSoonness(lhs) < rdResetSoonness(rhs)
+            }
+            let leftWeekly = rdWindow(lhs, id: "7d") != nil
+            let rightWeekly = rdWindow(rhs, id: "7d") != nil
+            if leftWeekly != rightWeekly {
+                return leftWeekly
+            }
+            let leftLeft = rdWeekly(lhs)?.percent ?? -1
+            let rightLeft = rdWeekly(rhs)?.percent ?? -1
+            if leftLeft != rightLeft {
+                return leftLeft > rightLeft
+            }
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
+    }
+
+    private func rdMatchesFilter(_ profile: CodexProfile, filter: String) -> Bool {
+        let status = rdStatus(profile)
+        switch filter {
+        case "available": return status == .ready || status == .api || status == .checking
+        case "waiting": return status == .waiting
+        case "login": return status == .login
+        case "unconfirmed": return status == .failed || status == .noData
+        default: return true
+        }
+    }
+
+    private var rdVisibleProfiles: [CodexProfile] {
+        let query = rdSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return rdSortedProfiles.filter { profile in
+            guard rdMatchesFilter(profile, filter: rdFilter) else { return false }
+            guard !query.isEmpty else { return true }
+            return profile.displayName.lowercased().contains(query)
+                || profile.id.lowercased().contains(query)
+                || profile.home.lowercased().contains(query)
+        }
+    }
+
+    /// The account to use now: weekly-limit accounts first, most quota left, then whichever resets soonest.
+    private var rdRecommended: CodexProfile? {
+        profiles
+            .filter { rdStatus($0) == .ready && (rdWeekly($0)?.percent ?? 0) > 0 }
+            .sorted { lhs, rhs in
+                let leftWeekly = rdWindow(lhs, id: "7d") != nil
+                let rightWeekly = rdWindow(rhs, id: "7d") != nil
+                if leftWeekly != rightWeekly { return leftWeekly }
+                let leftLeft = rdWeekly(lhs)?.percent ?? 0
+                let rightLeft = rdWeekly(rhs)?.percent ?? 0
+                if leftLeft != rightLeft { return leftLeft > rightLeft }
+                return rdResetSoonness(lhs) < rdResetSoonness(rhs)
+            }
+            .first
+    }
+
+    private var rdSelectedProfile: CodexProfile? {
+        if let id = rdSelectedProfileID, let match = profiles.first(where: { $0.id == id }) {
+            return match
+        }
+        return rdRecommended ?? rdSortedProfiles.first
+    }
+
+    private func rdOpen(_ profile: CodexProfile) {
+        if rdStatus(profile) == .failed {
+            rdRefreshSingle(profile)
+            return
+        }
+        openAccount(profile.id, displayName: profile.displayName)
+    }
+
+    private func rdPrimaryTitle(_ profile: CodexProfile) -> String {
+        switch rdStatus(profile) {
+        case .login: return tr("登入", "Log In")
+        case .failed: return tr("重試", "Retry")
+        default: return tr("打開", "Open")
+        }
+    }
+
+    /// Refreshes one account's quota without touching the others; a failure keeps the previous data.
+    private func rdRefreshSingle(_ profile: CodexProfile) {
+        let id = profile.id
+        guard !rdRefreshingIDs.contains(id) else { return }
+        rdRefreshingIDs.insert(id)
+        let names = displayNames
+        let script = scriptPath
+        runBackground(nil) {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_USAGE_LIVE_LOOKUP"] = "1"
+            environment["STATUS_PARALLELISM"] = "1"
+            environment["USAGE_DIRECT_CONNECT_TIMEOUT_SECONDS"] = "3"
+            environment["USAGE_DIRECT_TIMEOUT_SECONDS"] = "8"
+            environment["TOKEN_REFRESH_CONNECT_TIMEOUT_SECONDS"] = "2"
+            environment["TOKEN_REFRESH_TIMEOUT_SECONDS"] = "6"
+            environment["APP_SERVER_USAGE_TIMEOUT_SECONDS"] = "6"
+            let accounts = runCodexScript(script, ["list-accounts"], wait: true, timeout: 10)
+            guard accounts.0 == 0 else { return (accounts.0, "") }
+            let status = runCodexScript(script, ["account-status", id], wait: true, timeout: 40, environment: environment)
+            guard status.0 == 0 else { return (status.0, "") }
+            let parsed = parsedCodexProfiles(accountsOutput: accounts.1, statusOutput: status.1, displayNames: names)
+            guard let match = parsed.first(where: { $0.id == id }) else { return (1, "") }
+            return (0, profilePayloadText(from: [profileWithCachedUsageFallback(match)]))
+        } completion: { result in
+            rdRefreshingIDs.remove(id)
+            guard result.0 == 0,
+                  let incoming = profilePayload(from: result.1).first,
+                  incoming.quota != "unknown" || isExternalProvider(incoming) || incoming.authStatus == "login_needed"
+            else {
+                rdFailedRefreshIDs.insert(id)
+                statusText = tr("\(profile.displayName) 更新失敗，保留上次資料", "\(profile.displayName) update failed; last data kept")
+                return
+            }
+            rdFailedRefreshIDs.remove(id)
+            let previous = profiles
+            withAnimation(rdSpring) {
+                profiles = stabilizedProfilesAfterRefresh(previous.map { $0.id == id ? incoming : $0 }, previousProfiles: previous)
+            }
+            statusText = tr("已更新 \(incoming.displayName)", "Updated \(incoming.displayName)")
+        }
+    }
+
+    /// The black screen only ever starts from the confirmed branch here.
+    private func rdConfirmScreenClean() {
+        let alert = NSAlert()
+        alert.messageText = tr("黑屏 15 秒？", "Black out the screen for 15 seconds?")
+        alert.informativeText = tr(
+            "所有螢幕會全黑，螢幕觸控會暫停，方便你抹螢幕。15 秒後自動回復，想提早結束可以撳 Esc。",
+            "Every screen goes black and touch is paused so you can wipe the display. It comes back by itself after 15 seconds; press Esc to end early."
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: tr("開始黑屏", "Black Out"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        screenClean.start {
+            statusText = tr("螢幕清潔完成", "Screen clean finished")
+        }
+    }
+
+    private func rdConfirmCloseAll() {
+        let alert = NSAlert()
+        alert.messageText = tr("關閉全部 Codex 視窗？", "Close all Codex windows?")
+        alert.informativeText = tr("進行中嘅工作可能會中斷。", "Work in progress may be interrupted.")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: tr("關閉全部", "Close All"))
+        alert.addButton(withTitle: tr("取消", "Cancel"))
+        if alert.runModal() == .alertFirstButtonReturn {
+            closeAllAccounts()
+        }
+    }
+
+    private var rdRefreshLabel: String? {
+        if isRefreshing { return tr("更新緊…", "Updating…") }
+        guard let last = rdLastRefreshAt else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: selectedLanguage.localeIdentifier)
+        formatter.dateFormat = "HH:mm"
+        return tr("\(formatter.string(from: last)) 更新", "updated \(formatter.string(from: last))")
+    }
+
+    // MARK: Accounts page
+
+    private func rdAccountsPage(width: CGFloat) -> some View {
+        let showInspector = width >= 980
+        return VStack(spacing: 0) {
+            rdPageHeader(tr("帳戶", "Accounts"), subtitle: rdRefreshLabel) {
+                HStack(spacing: 8) {
+                    rdSearchField
+                    rdIconButton("arrow.clockwise", help: tr("更新全部額度（⌘R）", "Refresh all quota (⌘R)"), busy: isRefreshing) {
+                        refreshProfiles(showLoading: false, replayQuota: false, liveUsage: true)
+                    }
+                    .keyboardShortcut("r", modifiers: [.command])
+                    Menu {
+                        Button(tr("打開 Profile 資料夾", "Open Profiles Folder")) {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex-accounts"))
+                        }
+                        Divider()
+                        Button(tr("關閉全部 Codex 視窗…", "Close All Codex Windows…")) { rdConfirmCloseAll() }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(rdText2)
+                            .frame(width: 30, height: 30)
+                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.05)))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help(tr("更多", "More"))
+                    Button {
+                        createAccount()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(rdOnAccent)
+                            .frame(width: 30, height: 30)
+                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(themePrimary))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(RDPressStyle())
+                    .keyboardShortcut("n", modifiers: [.command])
+                    .help(tr("新增帳戶（⌘N）", "New account (⌘N)"))
+                    .accessibilityLabel(tr("新增帳戶", "New account"))
+                }
+            }
+
+            if !rdMissingTools.isEmpty {
+                rdRequirementsBanner
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            }
+            HStack(spacing: 0) {
+                rdAccountList
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if showInspector, let selected = rdSelectedProfile {
+                    Rectangle().fill(rdLine).frame(width: 1)
+                    ZStack {
+                        rdInspector(selected)
+                            .id(selected.id)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .offset(x: 14)),
+                                removal: .opacity
+                            ))
+                    }
+                    .frame(width: 320)
+                    .frame(maxHeight: .infinity)
+                    .background(rdInspectorPanel)
+                    .clipped()
+                }
+            }
+            .overlay(alignment: .top) { Rectangle().fill(rdLine).frame(height: 1) }
+        }
+        .onAppear {
+            rdRevealed = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                rdRevealed = true
+            }
+        }
+    }
+
+    private var rdSearchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(rdText3)
+            TextField(tr("搜尋", "Search"), text: $rdSearch)
+                .textFieldStyle(.plain)
+                .font(appFont(size: 13))
+                .focused($rdSearchFocused)
+            if !rdSearch.isEmpty {
+                Button {
+                    withAnimation(rdSpring) { rdSearch = "" }
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(rdText3)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tr("清除搜尋", "Clear search"))
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(width: rdSearchFocused || !rdSearch.isEmpty ? 220 : 160, height: 30)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.06)))
+        .animation(rdSpring, value: rdSearchFocused)
+    }
+
+    private var rdAccountList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if rdFilter == "all", rdSearch.isEmpty, let pick = rdRecommended {
+                rdRecommendationBar(pick)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            HStack(spacing: 10) {
+                rdFilterBar
+                Spacer(minLength: 8)
+                Button {
+                    withAnimation(rdSpring) { rdGroupByTier.toggle() }
+                } label: {
+                    Image(systemName: rdGroupByTier ? "square.stack.3d.up.fill" : "square.stack.3d.up")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(rdGroupByTier ? themePrimary : rdText3)
+                        .frame(width: 28, height: 26)
+                        .contentShape(Rectangle())
+                        .modifier(RDHoverFill(cornerRadius: 6, base: .clear, hover: rdInk.opacity(0.06)))
+                }
+                .buttonStyle(RDPressStyle())
+                .help(rdGroupByTier ? tr("唔按方案分組", "Don't group by plan") : tr("按方案分組", "Group by plan"))
+                Button {
+                    withAnimation(rdSpring) { rdCompactRows.toggle() }
+                } label: {
+                    Image(systemName: rdCompactRows ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(rdText3)
+                        .frame(width: 28, height: 26)
+                        .contentShape(Rectangle())
+                        .modifier(RDHoverFill(cornerRadius: 6, base: .clear, hover: rdInk.opacity(0.06)))
+                }
+                .buttonStyle(RDPressStyle())
+                .help(rdCompactRows ? tr("舒適間距", "Comfortable rows") : tr("緊湊間距", "Compact rows"))
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
+
+            rdColumnHeader
+                .padding(.horizontal, 20)
+
+            if profiles.isEmpty {
+                rdSkeletonList
+            } else if rdVisibleProfiles.isEmpty {
+                rdEmptyState(tr("冇符合嘅帳戶", "No matching accounts"))
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
+                        ForEach(rdGroups) { group in
+                            Section {
+                                if !rdIsCollapsed(group.id) {
+                                    ForEach(group.profiles) { profile in
+                                        rdRow(profile)
+                                            .id(rdRowKey(profile))
+                                            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                                    }
+                                }
+                            } header: {
+                                if !group.title.isEmpty {
+                                    rdGroupHeader(group)
+                                        .background {
+                                            GeometryReader { header in
+                                                rdBackground.opacity(rdListScrolled && header.frame(in: .named("rdList")).minY <= 0.5 ? 1 : 0)
+                                            }
+                                        }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+                    .animation(rdSpring, value: rdFilter)
+                    .animation(rdSpring, value: rdSearch)
+                    .animation(rdSpring, value: rdMeta)
+                    .animation(rdSpring, value: rdGroupByTier)
+                    .background {
+                        GeometryReader { list in
+                            Color.clear.preference(key: RDListScrolledKey.self, value: list.frame(in: .named("rdList")).minY < -0.5)
+                        }
+                    }
+                }
+                .coordinateSpace(name: "rdList")
+                .onPreferenceChange(RDListScrolledKey.self) { rdListScrolled = $0 }
+            }
+        }
+    }
+
+    /// Placeholder rows in the shape of the list, shown while the accounts are first read.
+    private var rdSkeletonList: some View {
+        VStack(spacing: 2) {
+            ForEach(0..<7, id: \.self) { index in
+                HStack(spacing: 11) {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.08)).frame(width: 30, height: 30)
+                    RoundedRectangle(cornerRadius: 4, style: .continuous).fill(rdInk.opacity(0.08)).frame(width: CGFloat(84 + (index * 37) % 76), height: 11)
+                    Spacer(minLength: 16)
+                    Capsule().fill(rdInk.opacity(0.06)).frame(width: 132, height: 22)
+                    RoundedRectangle(cornerRadius: 4, style: .continuous).fill(rdInk.opacity(0.05)).frame(width: 44, height: 9)
+                    Color.clear.frame(width: 150, height: 1)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.06)).frame(width: 44, height: 30)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
+            Spacer(minLength: 0)
+        }
+        .modifier(RDPulse())
+        .transition(.opacity)
+        .accessibilityElement()
+        .accessibilityLabel(tr("正在載入帳戶…", "Loading accounts…"))
+    }
+
+    private func rdEmptyState(_ title: String) -> some View {
+        Text(title)
+            .font(appFont(size: 13))
+            .foregroundStyle(rdText3)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func rdRecommendationBar(_ profile: CodexProfile) -> some View {
+        let weekly = rdWeekly(profile)
+        let left = weekly?.percent ?? 0
+        let reset = rdResetRelative(weekly?.reset)
+        return HStack(spacing: 12) {
+            Text(tr("建議", "Use now"))
+                .font(appFont(size: 11, weight: .semibold))
+                .foregroundStyle(themePrimary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(themePrimary.opacity(0.14)))
+            rdBadge(profile, size: 26)
+            Text(profile.displayName)
+                .font(rdDisplay(15, weight: .semibold))
+                .lineLimit(1)
+            Text("\(left)%")
+                .font(rdNumber(16))
+                .foregroundStyle(rdLevelColor(left))
+                .contentTransition(.numericText(value: Double(left)))
+            if let reset {
+                Text(reset)
+                    .font(appFont(size: 12))
+                    .foregroundStyle(rdText3)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            rdPrimaryButton(tr("打開", "Open"), busy: busyProfiles.contains(profile.id)) {
+                rdOpen(profile)
+            }
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(themePrimary.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(themePrimary.opacity(0.20), lineWidth: 1))
+        .help(tr("剩餘最多；一樣多時揀最快重設嗰個，額度唔會浪費。", "Most quota left; on a tie, the one that resets first so nothing is wasted."))
+    }
+
+    private var rdFilterBar: some View {
+        let all = profiles
+        let options: [(String, String, String)] = [
+            ("all", tr("全部", "All"), "square.grid.2x2"),
+            ("available", tr("可用", "Available"), "checkmark.circle"),
+            ("waiting", tr("等待重設", "Waiting for reset"), "hourglass"),
+            ("login", tr("需要登入", "Login needed"), "person.crop.circle.badge.exclamationmark"),
+            ("unconfirmed", tr("未確認", "Unconfirmed"), "questionmark.circle")
+        ]
+        return HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                let isOn = rdFilter == option.0
+                let count = all.filter { rdMatchesFilter($0, filter: option.0) }.count
+                if option.0 == "all" || count > 0 || isOn {
+                    Button {
+                        withAnimation(rdSpring) { rdFilter = option.0 }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: option.2)
+                                .font(.system(size: 11.5, weight: .semibold))
+                            if isOn {
+                                Text(option.1)
+                                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .leading)))
+                            }
+                            Text("\(count)").foregroundStyle(rdText3).monospacedDigit()
+                        }
+                        .font(appFont(size: 12, weight: isOn ? .semibold : .regular))
+                        .foregroundStyle(isOn ? rdText : rdText2)
+                        .padding(.horizontal, 10)
+                        .frame(height: 26)
+                        .background {
+                            if isOn {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(rdInk.opacity(0.11))
+                                    .matchedGeometryEffect(id: "rdFilterSelection", in: rdNamespace)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(RDPressStyle())
+                    .help(option.1)
+                    .accessibilityLabel("\(option.1) \(count)")
+                    .accessibilityAddTraits(isOn ? .isSelected : [])
+                }
+            }
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(rdInk.opacity(0.04)))
+    }
+
+    private var rdColumnHeader: some View {
+        HStack(spacing: 16) {
+            Text(tr("帳戶", "Account")).frame(maxWidth: .infinity, alignment: .leading)
+            Text(tr("每週 / 每月剩餘", "Weekly / monthly left")).frame(width: 196, alignment: .leading)
+            Text(tr("5 小時", "5 hours")).frame(width: 84, alignment: .leading)
+            Image(systemName: "ticket")
+                .help(tr("重設券", "Reset tickets"))
+                .frame(width: 56, alignment: .leading)
+            Color.clear.frame(width: 44, height: 1)
+        }
+        .font(appFont(size: 11, weight: .medium))
+        .foregroundStyle(rdText3)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
+    /// Everything a row draws. Lazy rows can keep what they first drew when only state outside the profile
+    /// changes (a detected plan arriving, a pin), so the row is rebuilt whenever this key changes.
+    private func rdRowKey(_ profile: CodexProfile) -> String {
+        [profile.id, rdTier(profile)?.rawValue ?? "-", rdTierIsManual(profile) ? "m" : "a", rdIsPinned(profile) ? "p" : "-",
+         profile.quota, profile.reset, profile.resetCredits, profile.authStatus, profile.authMode].joined(separator: "|")
+    }
+
+    private func rdRow(_ profile: CodexProfile) -> some View {
+        let status = rdStatus(profile)
+        let selected = rdSelectedProfile?.id == profile.id
+        let compact = rdCompactRows
+        let note = rdStatusNote(status, profile: profile)
+        let pinned = rdIsPinned(profile)
+        let hovering = rdHoverRowID == profile.id
+        return HStack(spacing: 16) {
+            HStack(spacing: 11) {
+                rdBadge(profile, size: compact ? 24 : 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(profile.displayName)
+                            .font(rdDisplay(14, weight: .semibold))
+                            .lineLimit(1)
+                        if let tier = rdTier(profile) {
+                            rdTierChip(tier)
+                        }
+                        Button {
+                            rdTogglePin(profile)
+                        } label: {
+                            Image(systemName: pinned ? "pin.fill" : "pin")
+                                .symbolEffect(.bounce, value: pinned)
+                                .font(.system(size: 10.5, weight: .bold))
+                                .rotationEffect(.degrees(45))
+                                .foregroundStyle(pinned ? themePrimary : rdText3)
+                                .frame(width: 20, height: 20)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(RDPressStyle())
+                        .opacity(pinned || hovering ? 1 : 0)
+                        .animation(.easeOut(duration: 0.15), value: hovering)
+                        .help(pinned ? tr("取消置頂", "Unpin") : tr("置頂", "Pin to top"))
+                        .accessibilityLabel(pinned ? tr("取消置頂", "Unpin") : tr("置頂", "Pin to top"))
+                    }
+                    if let note {
+                        Text(note)
+                            .font(appFont(size: 12))
+                            .foregroundStyle(status == .failed ? rdOrange : (status == .waiting ? rdAmber : rdText3))
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            rdLongCell(profile, status: status)
+                .frame(width: 196, alignment: .leading)
+            rdShortCell(profile)
+                .frame(width: 84, alignment: .leading)
+            rdTicketChip(profile)
+                .frame(width: 56, alignment: .leading)
+            rdRowAction(profile, highlighted: selected)
+                .frame(width: 44, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, compact ? 6 : 10)
+        .contentShape(Rectangle())
+        .background {
+            if selected {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(rdPalette.selection.opacity(0.7))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(rdPalette.selectionLine, lineWidth: 1))
+                    .matchedGeometryEffect(id: "rdRowSelection", in: rdNamespace)
+            }
+        }
+        .modifier(RDHoverFill(cornerRadius: 10, base: .clear, hover: selected ? .clear : rdInk.opacity(0.03)))
+        .onHover { inside in
+            if inside { rdHoverRowID = profile.id } else if rdHoverRowID == profile.id { rdHoverRowID = nil }
+        }
+        .onTapGesture(count: 2) {
+            rdSelectedProfileID = profile.id
+            rdOpen(profile)
+        }
+        .onTapGesture {
+            withAnimation(rdSpring) {
+                rdSelectedProfileID = profile.id
+            }
+        }
+        .contextMenu {
+            Button(rdPrimaryTitle(profile)) { rdOpen(profile) }
+            Button(tr("只更新此帳戶", "Refresh This Account")) { rdRefreshSingle(profile) }
+            Button(tr("關閉視窗", "Close Window")) { closeAccount(profile) }
+            Divider()
+            Button(pinned ? tr("取消置頂", "Unpin") : tr("置頂", "Pin to Top")) { rdTogglePin(profile) }
+            if pinned {
+                let order = rdPinnedOrder
+                Button(tr("上移", "Move Up")) { rdMovePin(profile, by: -1) }
+                    .disabled(order.first?.id == profile.id)
+                Button(tr("下移", "Move Down")) { rdMovePin(profile, by: 1) }
+                    .disabled(order.last?.id == profile.id)
+            }
+            if !isExternalProvider(profile) {
+                rdPlanMenu(profile)
+            }
+            Divider()
+            Button(tr("改名…", "Rename…")) { renameProfile(profile) }
+            Button(tr("自訂 Icon…", "Custom Icon…")) { chooseCustomIcon(for: profile) }
+            Button(tr("喺 Finder 顯示", "Reveal in Finder")) { revealProfile(profile) }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The headline number: quota left in the long window, big and colored by level.
+    private func rdLongCell(_ profile: CodexProfile, status: RDStatus) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let window = rdLongWindow(profile), let percent = window.percent {
+                HStack(spacing: 8) {
+                    rdQuotaBar(percent, height: rdCompactRows ? 18 : 22)
+                        .frame(width: 132)
+                    Text(window.id == "30d" ? rdWindowName("30d") : rdResetShort(window.reset))
+                        .font(appFont(size: 11))
+                        .foregroundStyle(rdText3)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            } else {
+                Text(status == .login ? tr("登入後顯示", "After login") : (status == .api ? tr("外部 API", "External API") : "—"))
+                    .font(appFont(size: 12))
+                    .foregroundStyle(rdText3)
+            }
+        }
+    }
+
+    private func rdShortCell(_ profile: CodexProfile) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let window = rdWindow(profile, id: "5h"), let percent = window.percent {
+                rdQuotaBar(percent, height: rdCompactRows ? 15 : 17)
+                    .frame(width: 76)
+            } else {
+                Text("—")
+                    .font(appFont(size: 12))
+                    .foregroundStyle(rdText3)
+                    .help(rdLongWindow(profile) != nil ? tr("呢個帳戶冇 5 小時限額", "No 5-hour limit on this account") : "")
+            }
+        }
+    }
+
+    private func rdTicketChip(_ profile: CodexProfile) -> some View {
+        Group {
+            if let summary = resetCreditSummary(for: profile) {
+                let soon = rdTicketExpiringSoon(profile)
+                HStack(spacing: 4) {
+                    Image(systemName: soon ? "exclamationmark.triangle.fill" : "ticket")
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Text("\(summary.count)")
+                        .font(rdNumber(12.5))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(soon ? rdOrange : rdTicket)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Capsule().fill((soon ? rdOrange : rdTicket).opacity(0.12)))
+                .help(summary.expiries.first.map { tr("最早 \(rdTicketDate($0)) 到期", "First expires \(rdTicketDate($0))") } ?? "")
+            } else {
+                Text("—")
+                    .font(appFont(size: 12))
+                    .foregroundStyle(rdText3)
+            }
+        }
+    }
+
+    private func rdPrimaryIcon(_ profile: CodexProfile) -> String {
+        switch rdStatus(profile) {
+        case .login: return "person.badge.key.fill"
+        case .failed: return "arrow.clockwise"
+        default: return "arrow.up.forward"
+        }
+    }
+
+    private func rdRowAction(_ profile: CodexProfile, highlighted: Bool) -> some View {
+        let status = rdStatus(profile)
+        let filled = highlighted || status == .login
+        let busy = busyProfiles.contains(profile.id) || rdRefreshingIDs.contains(profile.id)
+        return Button {
+            rdOpen(profile)
+        } label: {
+            ZStack {
+                Image(systemName: rdPrimaryIcon(profile)).opacity(busy ? 0 : 1)
+                if busy {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .font(.system(size: 12.5, weight: .bold))
+            .foregroundStyle(filled ? rdOnAccent : rdText2)
+            .frame(width: 40, height: 28)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(filled ? themePrimary : rdInk.opacity(0.06)))
+            .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.18), value: filled)
+        }
+        .buttonStyle(RDPressStyle())
+        .disabled(busy || isClosingAllAccounts)
+        .help(rdPrimaryTitle(profile) + " " + profile.displayName)
+        .accessibilityLabel(rdPrimaryTitle(profile) + " " + profile.displayName)
+    }
+
+    // MARK: Inspector
+
+    private func rdGauge(_ percent: Int, size: CGFloat) -> some View {
+        let fraction = CGFloat(min(max(percent, 0), 100)) / 100
+        return ZStack {
+            Circle()
+                .stroke(percent == 0 ? rdLevelColor(0).opacity(0.18) : rdPalette.track, lineWidth: 14)
+            Circle()
+                .trim(from: 0, to: fraction * (rdRevealed ? 1 : 0))
+                .stroke(
+                    AngularGradient(colors: [rdLevelColor(percent).opacity(0.75), rdLevelColor(percent)], center: .center, startAngle: .degrees(0), endAngle: .degrees(360 * Double(max(fraction, 0.01)))),
+                    style: StrokeStyle(lineWidth: 14, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .shadow(color: rdLevelColor(percent).opacity(rdIsDark ? 0.35 : 0.15), radius: 8)
+            VStack(spacing: 0) {
+                Text("\(percent)%")
+                    .font(rdNumber(30))
+                    .foregroundStyle(rdLevelColor(percent))
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(percent)))
+                Text(tr("剩餘", "left"))
+                    .font(appFont(size: 11))
+                    .foregroundStyle(rdText3)
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(.spring(response: 0.9, dampingFraction: 0.85), value: rdRevealed)
+        .animation(.spring(response: 0.7, dampingFraction: 0.85), value: percent)
+    }
+
+    private func rdInspector(_ profile: CodexProfile) -> some View {
+        let status = rdStatus(profile)
+        let long = rdLongWindow(profile)
+        let others = quotaWindows(for: profile).filter { $0.percent != nil && $0.id != long?.id }
+        return VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        rdBadge(profile, size: 38)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(profile.displayName)
+                                .font(rdDisplay(16, weight: .semibold))
+                                .lineLimit(1)
+                            if let note = rdStatusNote(status, profile: profile) {
+                                Text(note)
+                                    .font(appFont(size: 12))
+                                    .foregroundStyle(status == .failed ? rdOrange : (status == .waiting ? rdAmber : rdText3))
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 4)
+                        Button {
+                            rdTogglePin(profile)
+                        } label: {
+                            Image(systemName: rdIsPinned(profile) ? "pin.fill" : "pin")
+                                .symbolEffect(.bounce, value: rdIsPinned(profile))
+                                .font(.system(size: 12, weight: .semibold))
+                                .rotationEffect(.degrees(45))
+                                .foregroundStyle(rdIsPinned(profile) ? themePrimary : rdText2)
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
+                                .modifier(RDHoverFill(cornerRadius: 7, base: rdIsPinned(profile) ? themePrimary.opacity(0.14) : .clear, hover: rdInk.opacity(0.08)))
+                        }
+                        .buttonStyle(RDPressStyle())
+                        .help(rdIsPinned(profile) ? tr("取消置頂", "Unpin") : tr("置頂", "Pin to top"))
+                        .accessibilityLabel(rdIsPinned(profile) ? tr("取消置頂", "Unpin") : tr("置頂", "Pin to top"))
+                        Button {
+                            showProfilePopupMenu(for: profile)
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(rdText2)
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
+                                .modifier(RDHoverFill(cornerRadius: 7, base: .clear, hover: rdInk.opacity(0.08)))
+                        }
+                        .buttonStyle(RDPressStyle())
+                        .accessibilityLabel(tr("更多操作", "More actions"))
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 20)
+                    .padding(.bottom, 8)
+
+                    if !isExternalProvider(profile) {
+                        rdPlanPicker(profile)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 4)
+                    }
+
+                    if let long, let percent = long.percent {
+                        VStack(spacing: 8) {
+                            rdGauge(percent, size: 132)
+                            Text(rdWindowName(long.id))
+                                .font(appFont(size: 12, weight: .medium))
+                                .foregroundStyle(rdText2)
+                            if let reset = rdResetFull(long.reset) {
+                                Text(reset)
+                                    .font(appFont(size: 12))
+                                    .foregroundStyle(rdText3)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                    } else {
+                        Text(status == .login ? tr("登入後先會顯示額度", "Log in to see quota") : tr("未有額度資料", "No quota data"))
+                            .font(appFont(size: 13))
+                            .foregroundStyle(rdText3)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 36)
+                    }
+
+                    if !others.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(others) { window in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(rdWindowName(window.id)).font(appFont(size: 12)).foregroundStyle(rdText2)
+                                        Spacer()
+                                        Text("\(window.percent ?? 0)%")
+                                            .font(rdNumber(15))
+                                            .monospacedDigit()
+                                            .contentTransition(.numericText(value: Double(window.percent ?? 0)))
+                                    }
+                                    rdQuotaBar(window.percent ?? 0, height: 16, label: false)
+                                    if let reset = rdResetFull(window.reset) {
+                                        Text(reset).font(appFont(size: 11)).foregroundStyle(rdText3)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .overlay(alignment: .top) { Rectangle().fill(rdLine).frame(height: 1) }
+                    }
+
+                    if let summary = resetCreditSummary(for: profile) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "ticket").foregroundStyle(rdTicket)
+                                Text("\(summary.count)").font(rdNumber(15)).foregroundStyle(rdTicket)
+                                Text(tr("張重設券", "reset tickets")).font(appFont(size: 12)).foregroundStyle(rdText2)
+                                Spacer()
+                            }
+                            ForEach(Array(summary.expiries.enumerated()), id: \.offset) { _, expiry in
+                                HStack {
+                                    Text(rdTicketDate(expiry))
+                                    Spacer()
+                                    Text(resetCreditRemainingText(expiry)).foregroundStyle(rdText3)
+                                }
+                                .font(appFont(size: 12))
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .overlay(alignment: .top) { Rectangle().fill(rdLine).frame(height: 1) }
+                    }
+
+                    if !isExternalProvider(profile) {
+                        let mode = profileHistoryMode(for: profile)
+                        let anchor = isHistoryAnchor(profile)
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text(tr("本機對話", "Local chats")).font(appFont(size: 12)).foregroundStyle(rdText2)
+                                Spacer()
+                                rdIconSegmented(
+                                    rdHistoryOptions,
+                                    selection: mode == .shared,
+                                    key: "inspector-history",
+                                    disabled: anchor
+                                ) { shared in
+                                    if shared, mode != .shared {
+                                        shareHistory(profile)
+                                    } else if !shared, mode != .privateOnly {
+                                        separateHistory(profile)
+                                    }
+                                }
+                            }
+                            Button {
+                                revealProfile(profile)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder")
+                                    Text(rdHomeRelative(profile.home))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                .font(appFont(size: 12))
+                                .foregroundStyle(rdText3)
+                            }
+                            .buttonStyle(.plain)
+                            .help(tr("喺 Finder 顯示", "Reveal in Finder"))
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
+                        .overlay(alignment: .top) { Rectangle().fill(rdLine).frame(height: 1) }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                rdIconButton("arrow.clockwise", help: tr("只更新此帳戶", "Refresh this account"), busy: rdRefreshingIDs.contains(profile.id)) {
+                    rdRefreshSingle(profile)
+                }
+                if profile.id != "account1", profile.id != "opencodex-lab" {
+                    rdIconButton("trash", help: tr("刪除 Profile…", "Delete Profile…")) {
+                        deleteProfile(profile)
+                    }
+                }
+                Spacer(minLength: 4)
+                rdPrimaryButton(rdPrimaryTitle(profile), busy: busyProfiles.contains(profile.id)) {
+                    rdOpen(profile)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .overlay(alignment: .top) { Rectangle().fill(rdLine).frame(height: 1) }
+        }
+    }
+
+    // MARK: Insights page
+
+    private func rdRefreshAnalytics(force: Bool = false) {
+        if !force, let snapshot = rdAnalytics, !snapshot.insights.isEmpty, Date().timeIntervalSince(snapshot.scannedAt) < 300 { return }
+        guard !rdAnalyticsLoading, !profiles.isEmpty else { return }
+        rdAnalyticsLoading = true
+        let inputs = profiles.filter { !isExternalProvider($0) }.map { (id: $0.id, name: $0.displayName, home: $0.home) }
+        var current: [String: (left: Int, minutes: Int, reset: Date?)] = [:]
+        for profile in profiles {
+            guard let window = rdLongWindow(profile), let percent = window.percent else { continue }
+            let reset = window.reset.flatMap { resetDate(from: $0) }
+            if let reset, reset < Date().addingTimeInterval(-60) { continue }
+            current[profile.id] = (percent, window.id == "30d" ? 43200 : 10080, reset)
+        }
+        RDAnalyticsEngine.queue.async {
+            let snapshot = RDAnalyticsEngine.scan(profiles: inputs, current: current)
+            DispatchQueue.main.async {
+                rdAnalyticsLoading = false
+                withAnimation(rdSpring) {
+                    rdAnalytics = snapshot
+                    if rdChartProfileID == nil {
+                        rdChartProfileID = snapshot.insights
+                            .filter { (snapshot.samplesByProfile[$0.id]?.count ?? 0) > 1 }
+                            .max { ($0.activeSeconds7d) < ($1.activeSeconds7d) }?.id
+                    }
+                }
+            }
+            let tokenData = RDTokenEngine.scan(profiles: inputs)
+            DispatchQueue.main.async {
+                rdTokenData = tokenData
+                rdUpdateTokenReport()
+            }
+        }
+    }
+
+    private func rdUpdateTokenReport() {
+        guard let data = rdTokenData else { return }
+        let known = data.pools.contains { $0.id == rdAnalysisScope }
+        let report = RDTokenEngine.report(data, scope: known ? rdAnalysisScope : nil, days: rdAnalysisDays)
+        let overall = known ? RDTokenEngine.report(data, scope: nil, days: rdAnalysisDays).totals.total : report.totals.total
+        withAnimation(rdSpring) {
+            rdTokenReport = report
+            rdTokenOverallTotal = overall
+        }
+    }
+
+    private func rdSetAnalysisScope(_ id: String) {
+        rdAnalysisScope = id
+        if let snapshot = rdAnalytics, let pool = rdTokenData?.pools.first(where: { $0.id == id }),
+           let member = pool.members.first(where: { (snapshot.samplesByProfile[$0]?.count ?? 0) > 1 }) {
+            rdChartProfileID = member
+        }
+        rdUpdateTokenReport()
+    }
+
+    private var rdInsightsPage: some View {
+        VStack(spacing: 0) {
+            rdPageHeader(tr("分析", "Insights"), subtitle: rdAnalytics.map { tr("\(DateFormatter.localizedString(from: $0.scannedAt, dateStyle: .none, timeStyle: .short)) 分析", "analysed \(DateFormatter.localizedString(from: $0.scannedAt, dateStyle: .none, timeStyle: .short))") }) {
+                HStack(spacing: 8) {
+                    rdAnalysisScopeMenu
+                    rdSegmented([(7, tr("7 日", "7 days")), (30, tr("30 日", "30 days")), (0, tr("全部", "All"))], selection: rdAnalysisDays, key: "analysis-days") { days in
+                        rdAnalysisDays = days
+                        rdUpdateTokenReport()
+                    }
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(rdText3)
+                        .frame(width: 30, height: 30)
+                        .help(tr(
+                            "Token 數字嚟自 Codex 自己記低嘅用量，只讀數字、模型同項目資料夾，唔會讀對話內容。帳戶靠額度重設時間辨認，舊紀錄未必認得出。API 等值按官方標準價估算，唔係實際收費。",
+                            "Token numbers come from Codex's own usage records: only numbers, models and project folders are read, never conversation text. Accounts are matched by quota reset time, so older records may stay unmatched. API equivalent is an estimate at published standard prices, not a bill."
+                        ))
+                    rdIconButton("arrow.clockwise", help: tr("重新分析", "Analyse again"), busy: rdAnalyticsLoading) {
+                        rdRefreshAnalytics(force: true)
+                    }
+                }
+            }
+            if let snapshot = rdAnalytics {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        rdTokenSection(snapshot)
+                        rdSectionLabel(tr("額度狀況", "Quota status"))
+                        rdKPIStrip(snapshot)
+                        rdAllAccountsQuotaCard(snapshot)
+                        HStack(alignment: .top, spacing: 16) {
+                            rdQuotaTrendCard(snapshot)
+                            rdDailyUsageCard(snapshot)
+                        }
+                        rdInsightTable(snapshot)
+                        EmptyView()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
+                    .padding(.top, 4)
+                }
+                .transition(.opacity)
+            } else {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text(tr("分析緊各帳戶紀錄…", "Reading account history…"))
+                        .font(appFont(size: 13))
+                        .foregroundStyle(rdText3)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear { rdRefreshAnalytics() }
+    }
+
+    // MARK: Token analysis
+
+    private func rdTokens(_ value: Double) -> String {
+        if value >= 100_000_000 {
+            let n = value / 100_000_000
+            return tr(String(format: n >= 100 ? "%.0f 億" : "%.1f 億", n), String(format: value >= 1e10 ? "%.0fB" : "%.1fB", value / 1e9))
+        }
+        if value >= 10_000 {
+            let n = value / 10_000
+            return tr(String(format: n >= 100 ? "%.0f 萬" : "%.1f 萬", n), String(format: value >= 1e6 ? "%.1fM" : "%.0fK", value >= 1e6 ? value / 1e6 : value / 1e3))
+        }
+        return String(Int(value))
+    }
+
+    private func rdMoney(_ value: Double) -> String {
+        if value >= 10 {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = 0
+            return "$" + (formatter.string(from: NSNumber(value: value)) ?? String(Int(value)))
+        }
+        return String(format: "$%.2f", value)
+    }
+
+    private func rdPercentText(_ fraction: Double) -> String {
+        "\(Int((fraction * 100).rounded()))%"
+    }
+
+    private func rdSectionLabel(_ title: String) -> some View {
+        Text(title)
+            .font(appFont(size: 13, weight: .semibold))
+            .foregroundStyle(rdText2)
+            .padding(.top, 6)
+    }
+
+    private func rdAnalysisCardTitle(_ title: String, subtitle: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(rdDisplay(15, weight: .semibold))
+            if let subtitle {
+                Text(subtitle)
+                    .font(appFont(size: 12))
+                    .foregroundStyle(rdText3)
+                    .lineSpacing(2.5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var rdAnalysisScopeMenu: some View {
+        let pools = rdTokenData?.pools ?? []
+        let current = pools.first { $0.id == rdAnalysisScope }?.name ?? tr("全部帳戶", "All accounts")
+        return Menu {
+            Button(tr("全部帳戶", "All accounts")) { rdSetAnalysisScope("") }
+            Divider()
+            ForEach(pools) { pool in
+                Button(pool.name) { rdSetAnalysisScope(pool.id) }
+            }
+        } label: {
+            Label(current, systemImage: "person.2")
+                .font(appFont(size: 13, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(rdInk.opacity(0.06)))
+        .disabled(pools.isEmpty)
+        .accessibilityLabel(tr("分析範圍", "Analysis scope"))
+    }
+
+    @ViewBuilder
+    private func rdTokenSection(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        if let report = rdTokenReport {
+            if report.totals.total > 0 {
+                rdTokenKPIs(report)
+                rdTokenTrendCard(report)
+                if rdTokenData?.pools.contains(where: { $0.id == rdAnalysisScope }) == true {
+                    rdScopeConversionCard(report)
+                } else {
+                    rdTokenAccountsCard(report)
+                }
+                HStack(alignment: .top, spacing: 16) {
+                    rdQuotaPlanCard(snapshot)
+                    rdTokenTipsCard(report, snapshot)
+                }
+                HStack(alignment: .top, spacing: 16) {
+                    rdMixCard(tr("模型", "Models"), rows: report.models, total: report.totals.total, showMoney: true)
+                    rdMixCard(tr("推理級別", "Reasoning effort"), rows: report.efforts, total: report.totals.total, showMoney: true)
+                    rdMixCard(tr("項目資料夾", "Project folders"), rows: report.projects, total: report.totals.total, showMoney: false)
+                }
+                HStack(alignment: .top, spacing: 16) {
+                    rdHeatmapCard(report)
+                    rdAgentSplitCard(report)
+                }
+                rdTopThreadsCard(report)
+            } else {
+                rdCard {
+                    Text(tr("呢個帳戶喺呢段時間冇 token 紀錄。", "No token records for this account in this period."))
+                        .font(appFont(size: 13))
+                        .foregroundStyle(rdText3)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(28)
+                }
+            }
+        } else {
+            rdCard {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(tr("整理緊 token 紀錄，第一次會耐少少…", "Reading token records; the first time takes a little longer…"))
+                        .font(appFont(size: 13))
+                        .foregroundStyle(rdText3)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(28)
+            }
+        }
+    }
+
+    private func rdTokenKPIs(_ report: RDTokenReport) -> some View {
+        let totals = report.totals
+        // Older records mostly cannot be matched to an account, so the comparison only means something overall.
+        let isOverall = rdTokenData?.pools.contains { $0.id == rdAnalysisScope } != true
+        let change: String? = (isOverall ? report.previousTotal : nil).map { previous in
+            let percent = Int(((totals.total - previous) / previous * 100).rounded())
+            return tr("比上一段時間 \(percent >= 0 ? "+" : "")\(percent)%", "\(percent >= 0 ? "+" : "")\(percent)% vs previous")
+        }
+        let inputs = totals.cached + totals.fresh
+        let cacheRate = inputs > 0 ? totals.cached / inputs : nil
+        let coverage = totals.total > 0 ? totals.detailed / totals.total : 0
+        let averageContext = totals.requests > 0 ? totals.requestInput / Double(totals.requests) : nil
+        let turns = report.turnsCompleted + report.turnsFailed + report.turnsInterrupted
+        let failedShare = turns > 0 ? Double(report.turnsFailed) / Double(turns) : 0
+        return HStack(spacing: 12) {
+            rdKPI(tr("Token 總量", "Total tokens"), value: rdTokens(totals.total), detail: change ?? tr("新輸入 \(rdTokens(totals.fresh)) · 輸出 \(rdTokens(totals.output))", "Fresh \(rdTokens(totals.fresh)) · Output \(rdTokens(totals.output))"))
+            rdKPI(tr("API 等值（估算）", "API equivalent (est.)"), value: rdMoney(totals.usd), detail: tr("計咗 \(rdPercentText(coverage)) 用量", "Covers \(rdPercentText(coverage)) of use"), tint: themePrimary)
+            rdKPI(tr("快取命中率", "Cache hit rate"), value: cacheRate.map(rdPercentText) ?? "—", detail: averageContext.map { tr("平均每次 \(rdTokens($0)) 上下文", "\(rdTokens($0)) context per request") })
+            rdKPI(tr("AI 工作時間", "AI working time"), value: rdHours(report.workSeconds), detail: tr("\(turns) 個回合 · 失敗 \(rdPercentText(failedShare))", "\(turns) turns · \(rdPercentText(failedShare)) failed"))
+            rdKPI(tr("對話", "Conversations"), value: "\(report.mainCount + report.subCount)", detail: tr("主對話 \(report.mainCount) · Sub-agent \(report.subCount)", "Main \(report.mainCount) · Sub-agent \(report.subCount)"))
+        }
+    }
+
+    private func rdTokenTrendCard(_ report: RDTokenReport) -> some View {
+        let kinds: [String]
+        let names: [String]
+        let colors: [Color]
+        switch rdTokenChartMode {
+        case "work":
+            kinds = ["fresh", "output"]
+            names = [tr("新輸入", "Fresh input"), tr("輸出", "Output")]
+            colors = [themePrimary, rdAmber]
+        case "usd":
+            kinds = ["usd"]
+            names = [tr("API 等值", "API equivalent")]
+            colors = [themePrimary]
+        default:
+            kinds = ["cached", "fresh", "output", "unsplit"]
+            names = [tr("快取輸入", "Cached input"), tr("新輸入", "Fresh input"), tr("輸出", "Output"), tr("未細分", "Not itemised")]
+            colors = [themeSecondary.opacity(0.62), themePrimary, rdAmber, rdInk.opacity(0.18)]
+        }
+        let points = report.days.filter { kinds.contains($0.kind) }
+        let isMoney = rdTokenChartMode == "usd"
+        return rdCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    rdAnalysisCardTitle(tr("每日用量", "Daily use"), subtitle: rdTokenChartMode == "work" ? tr("唔計快取，最接近實際消耗。", "Without cache: closest to real consumption.") : nil)
+                    Spacer()
+                    rdSegmented([("all", tr("全部", "All")), ("work", tr("新輸入＋輸出", "Fresh + output")), ("usd", tr("API 等值", "API equivalent"))], selection: rdTokenChartMode, key: "token-chart") { mode in
+                        withAnimation(rdSpring) { rdTokenChartMode = mode }
+                    }
+                }
+                if points.isEmpty {
+                    Text(tr("呢段時間未有細項紀錄。", "No itemised records in this period."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .frame(maxWidth: .infinity, minHeight: 200)
+                } else {
+                    Chart(points) { point in
+                        BarMark(x: .value("day", point.date, unit: .day), y: .value("value", point.value))
+                            .foregroundStyle(by: .value("kind", names[kinds.firstIndex(of: point.kind) ?? 0]))
+                            .cornerRadius(2)
+                    }
+                    .chartForegroundStyleScale(domain: names, range: colors)
+                    .chartLegend(kinds.count > 1 ? .visible : .hidden)
+                    .chartLegend(position: .top, alignment: .leading, spacing: 10)
+                    .chartYAxis {
+                        AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                            AxisGridLine().foregroundStyle(rdLine)
+                            AxisValueLabel {
+                                if let number = value.as(Double.self) {
+                                    Text(isMoney ? rdMoney(number) : rdTokens(number))
+                                        .font(appFont(size: 11))
+                                        .foregroundStyle(rdText3)
+                                }
+                            }
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: 8)) { _ in
+                            AxisValueLabel(format: .dateTime.month(.defaultDigits).day())
+                                .font(appFont(size: 11))
+                                .foregroundStyle(rdText3)
+                        }
+                    }
+                    .frame(height: 200)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func rdAccountColumn(_ text: String, width: CGFloat, tint: Color? = nil) -> some View {
+        Text(text)
+            .font(appFont(size: 12))
+            .monospacedDigit()
+            .foregroundStyle(tint ?? rdText2)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .contentTransition(.numericText())
+            .frame(width: width, alignment: .trailing)
+    }
+
+    private func rdAllAccountsQuotaPoints(_ snapshot: RDAnalyticsSnapshot) -> (names: [String], points: [RDChartPoint]) {
+        let since = Date().addingTimeInterval(-7 * 86_400).timeIntervalSince1970
+        var names: [String] = []
+        var points: [RDChartPoint] = []
+        for pool in rdTokenData?.pools ?? [] {
+            let weekly = pool.members
+                .map { id in (snapshot.samplesByProfile[id] ?? []).filter { $0.w == 10080 && $0.t >= since }.sorted { $0.t < $1.t } }
+                .max { $0.count < $1.count } ?? []
+            guard weekly.count > 1, weekly.contains(where: { $0.u > 0 }) else { continue }
+            names.append(pool.name)
+            for sample in weekly {
+                points.append(RDChartPoint(id: "\(pool.id)|\(sample.t)", date: Date(timeIntervalSince1970: sample.t), left: max(0, 100 - sample.u), series: pool.name))
+            }
+        }
+        return (names, points)
+    }
+
+    /// Every paid account's weekly quota on one chart, from the readings taken every minute.
+    @ViewBuilder
+    private func rdAllAccountsQuotaCard(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        let isOverall = rdTokenData?.pools.contains { $0.id == rdAnalysisScope } != true
+        let data = rdAllAccountsQuotaPoints(snapshot)
+        if isOverall, data.names.count > 1 {
+            let palette: [Color] = [themePrimary, themeSecondary, rdAmber, rdSuccess, rdOrange, rdDanger]
+            rdCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    rdAnalysisCardTitle(tr("各帳戶每週額度", "Weekly quota by account"), subtitle: tr("近 7 日，App 開住時每分鐘更新。", "Last 7 days, refreshed every minute while the app is open."))
+                    Chart(data.points) { point in
+                        LineMark(x: .value("time", point.date), y: .value("left", point.left))
+                            .foregroundStyle(by: .value("account", point.series))
+                            .interpolationMethod(.stepEnd)
+                            .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
+                    }
+                    .chartForegroundStyleScale(domain: data.names, range: Array(palette.prefix(max(1, data.names.count))))
+                    .chartYScale(domain: 0...100)
+                    .chartYAxis {
+                        AxisMarks(values: [0, 50, 100]) { value in
+                            AxisGridLine().foregroundStyle(rdLine)
+                            AxisValueLabel {
+                                if let number = value.as(Double.self) {
+                                    Text("\(Int(number))%").font(appFont(size: 10)).foregroundStyle(rdText3)
+                                }
+                            }
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .stride(by: .day)) { _ in
+                            AxisValueLabel(format: .dateTime.month(.defaultDigits).day(), centered: true)
+                                .foregroundStyle(rdText3)
+                        }
+                    }
+                    .chartLegend(position: .top, alignment: .leading, spacing: 10)
+                    .frame(height: 190)
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    private func rdTokenAccountsCard(_ report: RDTokenReport) -> some View {
+        let largest = report.accounts.map(\.totals.total).max() ?? 1
+        return rdCard {
+            VStack(alignment: .leading, spacing: 10) {
+                rdAnalysisCardTitle(
+                    tr("帳戶比較", "Accounts"),
+                    subtitle: tr("撳一行睇嗰個帳戶。靠額度重設時間辨認；同一個 ChatGPT 帳戶登入幾次會算埋一齊。", "Click a row for that account. Matched by quota reset time; one ChatGPT account signed in several times counts together.")
+                )
+                HStack(spacing: 10) {
+                    Text(tr("帳戶", "Account")).frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Token").frame(width: 62, alignment: .trailing)
+                    Text(tr("API 等值", "API equiv.")).frame(width: 62, alignment: .trailing)
+                    Text(tr("快取", "Cache")).frame(width: 44, alignment: .trailing)
+                    Text(tr("每 1% 額度", "Per 1%")).frame(width: 66, alignment: .trailing)
+                    Text(tr("滿額值", "Full window"))
+                        .frame(width: 66, alignment: .trailing)
+                        .help(tr("一個額度週期用滿大約等於幾多 API 費用，用記錄最完整嗰個週期估算。", "Roughly what one full quota window is worth at API prices, estimated from the best-recorded window."))
+                }
+                .font(appFont(size: 11))
+                .foregroundStyle(rdText3)
+                ForEach(report.accounts) { account in
+                    let inputs = account.totals.cached + account.totals.fresh
+                    Button {
+                        if !account.id.isEmpty { rdSetAnalysisScope(account.id) }
+                    } label: {
+                        VStack(spacing: 5) {
+                            HStack(spacing: 10) {
+                                Text(account.id.isEmpty ? tr("未能歸屬（舊紀錄）", "Unmatched (older records)") : account.name)
+                                    .font(appFont(size: 13, weight: .medium))
+                                    .foregroundStyle(account.id.isEmpty ? rdText3 : rdText)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                rdAccountColumn(rdTokens(account.totals.total), width: 62, tint: rdText)
+                                rdAccountColumn(rdMoney(account.totals.usd), width: 62, tint: themePrimary)
+                                rdAccountColumn(inputs > 0 ? rdPercentText(account.totals.cached / inputs) : "—", width: 44)
+                                rdAccountColumn(account.pool?.tokensPerPercent.map(rdTokens) ?? "—", width: 66)
+                                rdAccountColumn(account.pool?.usdPerFullWindow.map(rdMoney) ?? "—", width: 66)
+                            }
+                            GeometryReader { bar in
+                                Capsule().fill(rdInk.opacity(0.06))
+                                    .overlay(alignment: .leading) {
+                                        Capsule().fill(account.id.isEmpty ? rdInk.opacity(0.22) : themePrimary)
+                                            .frame(width: max(3, bar.size.width * CGFloat(account.totals.total / largest)))
+                                    }
+                            }
+                            .frame(height: 4)
+                        }
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 8)
+                        .contentShape(Rectangle())
+                        .modifier(RDHoverFill(cornerRadius: 8, base: .clear, hover: account.id.isEmpty ? .clear : rdInk.opacity(0.05)))
+                        .padding(.horizontal, -8)
+                    }
+                    .buttonStyle(RDPressStyle())
+                    .disabled(account.id.isEmpty)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func rdWindowPhrase(_ minutes: Int?) -> String {
+        switch minutes {
+        case 43200: return tr("一個月", "month")
+        case 300: return tr("5 小時", "5 hours")
+        default: return tr("一星期", "week")
+        }
+    }
+
+    private func rdScopeConversionCard(_ report: RDTokenReport) -> some View {
+        let pool = rdTokenData?.pools.first { $0.id == rdAnalysisScope }
+        let share = rdTokenOverallTotal > 0 ? report.totals.total / rdTokenOverallTotal : 0
+        return HStack(spacing: 12) {
+            rdKPI(tr("每 1% 額度約等於", "1% of quota is about"), value: pool?.tokensPerPercent.map(rdTokens) ?? "—", detail: tr("Token", "tokens"))
+            rdKPI(tr("\(rdWindowPhrase(pool?.windowMinutes))額度用滿約值", "A full \(rdWindowPhrase(pool?.windowMinutes)) is worth"), value: pool?.usdPerFullWindow.map(rdMoney) ?? "—", detail: tr("API 等值，估算", "API equivalent, estimated"), tint: themePrimary)
+            rdKPI(tr("佔全部用量", "Share of all use"), value: rdPercentText(share), detail: (pool?.members.count ?? 1) > 1 ? tr("\(pool?.members.count ?? 1) 個 Profile 共用同一額度", "\(pool?.members.count ?? 1) profiles share this quota") : nil)
+        }
+    }
+
+    private struct RDPlanRow: Identifiable {
+        let id: String
+        let name: String
+        let left: Int
+        let reset: Date
+        let leftover: Double?
+    }
+
+    /// Which paid quota will expire unused, soonest first. A pool signed in several times is listed once.
+    private func rdPlanRows(_ snapshot: RDAnalyticsSnapshot) -> [RDPlanRow] {
+        let now = Date()
+        let pools = rdTokenData?.pools ?? []
+        let scoped = pools.first { $0.id == rdAnalysisScope }
+        var seen = Set<String>()
+        var rows: [RDPlanRow] = []
+        for insight in snapshot.insights {
+            guard let left = insight.left, let reset = insight.resetAt, reset > now else { continue }
+            if left >= 100, (insight.perDay ?? 0) < 0.5 { continue }     // Never used: nothing is being wasted.
+            if let scoped, !scoped.members.contains(insight.id) { continue }
+            let pool = pools.first { $0.members.contains(insight.id) }
+            guard seen.insert(pool?.id ?? insight.id).inserted else { continue }
+            let days = reset.timeIntervalSince(now) / 86_400
+            let leftover = insight.perDay.map { max(0, Double(left) - $0 * days) }
+            rows.append(RDPlanRow(id: insight.id, name: pool?.name ?? insight.name, left: left, reset: reset, leftover: leftover))
+        }
+        return rows.sorted { $0.reset < $1.reset }
+    }
+
+    private func rdQuotaPlanCard(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        let rows = Array(rdPlanRows(snapshot).prefix(6))
+        return rdCard {
+            VStack(alignment: .leading, spacing: 10) {
+                rdAnalysisCardTitle(tr("重設前會唔會嘥額度", "Quota at risk before reset"), subtitle: tr("按最近用量推算，最快重設排先。", "Projected from recent use; soonest reset first."))
+                if rows.isEmpty {
+                    Text(tr("未有足夠額度紀錄。", "Not enough quota history yet."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                }
+                ForEach(rows) { row in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(row.name)
+                                .font(appFont(size: 13, weight: .medium))
+                                .lineLimit(1)
+                            Text(tr("剩 \(row.left)% · \(rdRelative(row.reset))重設", "\(row.left)% left · resets \(rdRelative(row.reset))"))
+                                .font(appFont(size: 12))
+                                .foregroundStyle(rdText3)
+                        }
+                        Spacer(minLength: 8)
+                        if row.left == 0 {
+                            Text(tr("已用完", "Used up"))
+                                .font(appFont(size: 12, weight: .semibold))
+                                .foregroundStyle(rdDanger)
+                        } else if let leftover = row.leftover {
+                            Text(leftover >= 5 ? tr("預計嘥 \(Int(leftover.rounded()))%", "~\(Int(leftover.rounded()))% unused") : tr("用得晒", "On pace"))
+                                .font(appFont(size: 12, weight: .semibold))
+                                .foregroundStyle(leftover >= 5 ? rdAmber : rdSuccess)
+                        } else {
+                            Text(tr("未夠數據", "No pace yet"))
+                                .font(appFont(size: 12))
+                                .foregroundStyle(rdText3)
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func rdTokenTips(_ report: RDTokenReport, _ snapshot: RDAnalyticsSnapshot) -> [(icon: String, text: String, tint: Color)] {
+        var tips: [(icon: String, text: String, tint: Color)] = []
+        let total = report.totals.total
+        guard total > 0 else { return tips }
+        if let waste = rdPlanRows(snapshot).first(where: { ($0.leftover ?? 0) >= 15 }) {
+            tips.append(("hourglass", tr("\(waste.name) \(rdRelative(waste.reset))重設，預計會嘥 \(Int((waste.leftover ?? 0).rounded()))%，可以優先用佢。", "\(waste.name) resets \(rdRelative(waste.reset)) with about \(Int((waste.leftover ?? 0).rounded()))% unused. Use it first."), rdAmber))
+        }
+        let heavy = report.efforts.filter { ["xhigh", "ultra", "max"].contains($0.id) }.reduce(0) { $0 + $1.tokens }
+        if heavy / total >= 0.5 {
+            tips.append(("brain", tr("xhigh、ultra、max 佔咗 \(rdPercentText(heavy / total)) token。例行工作轉用 high 或 medium，額度會撐耐啲。", "xhigh, ultra and max make up \(rdPercentText(heavy / total)) of tokens. Using high or medium for routine work stretches your quota."), themePrimary))
+        }
+        if report.totals.requests > 0 {
+            let average = report.totals.requestInput / Double(report.totals.requests)
+            if average >= 200_000 {
+                tips.append(("text.alignleft", tr("平均每次請求帶住 \(rdTokens(average)) 上下文，已經幾大。開新對話或者 compact 可以減少消耗。", "Each request carries \(rdTokens(average)) of context on average. A new conversation or a compact reduces it."), themeSecondary))
+            }
+        }
+        let agentTotal = report.mainTokens + report.subTokens
+        if agentTotal > 0, report.subTokens / agentTotal >= 0.4 {
+            tips.append(("point.3.connected.trianglepath.dotted", tr("Sub-agent 用咗 \(rdPercentText(report.subTokens / agentTotal)) token。簡單嘅子任務揀細啲嘅模型會慳好多。", "Sub-agents used \(rdPercentText(report.subTokens / agentTotal)) of tokens. A smaller model for simple subtasks saves a lot."), themeSecondary))
+        }
+        if let top = report.top.first, top.tokens / total >= 0.2 {
+            tips.append(("flame", tr("最大嗰個對話佔咗 \(rdPercentText(top.tokens / total))。太長嘅對話每次都要重新帶上下文。", "The largest conversation is \(rdPercentText(top.tokens / total)) of use. Very long conversations resend their context each time."), rdOrange))
+        }
+        let turns = report.turnsCompleted + report.turnsFailed + report.turnsInterrupted
+        if turns >= 20, Double(report.turnsFailed) / Double(turns) >= 0.05 {
+            tips.append(("exclamationmark.triangle", tr("\(rdPercentText(Double(report.turnsFailed) / Double(turns))) 回合失敗，呢啲回合嘅額度都算用咗。", "\(rdPercentText(Double(report.turnsFailed) / Double(turns))) of turns failed, and those still count against your quota."), rdDanger))
+        }
+        return tips
+    }
+
+    private func rdTokenTipsCard(_ report: RDTokenReport, _ snapshot: RDAnalyticsSnapshot) -> some View {
+        let tips = Array(rdTokenTips(report, snapshot).prefix(4))
+        return rdCard {
+            VStack(alignment: .leading, spacing: 10) {
+                rdAnalysisCardTitle(tr("建議", "Suggestions"))
+                if tips.isEmpty {
+                    Text(tr("呢段時間嘅用量冇明顯問題。", "Nothing stands out in this period."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                }
+                ForEach(Array(tips.enumerated()), id: \.offset) { _, tip in
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(systemName: tip.icon)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(tip.tint)
+                            .frame(width: 18, height: 18)
+                        Text(tip.text)
+                            .font(appFont(size: 12))
+                            .foregroundStyle(rdText2)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func rdMixCard(_ title: String, rows: [RDTokenShare], total: Double, showMoney: Bool) -> some View {
+        rdCard {
+            VStack(alignment: .leading, spacing: 9) {
+                rdAnalysisCardTitle(title)
+                ForEach(rows) { row in
+                    let share = total > 0 ? row.tokens / total : 0
+                    VStack(spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(row.label)
+                                .font(appFont(size: 12))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            if showMoney, row.usd >= 0.01 {
+                                Text(rdMoney(row.usd))
+                                    .font(appFont(size: 11))
+                                    .foregroundStyle(themePrimary)
+                            }
+                            Text(rdPercentText(share))
+                                .font(appFont(size: 12))
+                                .monospacedDigit()
+                                .foregroundStyle(rdText2)
+                                .contentTransition(.numericText())
+                        }
+                        GeometryReader { bar in
+                            Capsule().fill(rdInk.opacity(0.06))
+                                .overlay(alignment: .leading) {
+                                    Capsule().fill(themePrimary.opacity(0.8))
+                                        .frame(width: max(2, bar.size.width * CGFloat(share)))
+                                }
+                        }
+                        .frame(height: 4)
+                    }
+                    .help("\(row.label): \(rdTokens(row.tokens))")
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func rdHeatmapCard(_ report: RDTokenReport) -> some View {
+        let largest = report.heat.values.max() ?? 1
+        let days = [tr("一", "M"), tr("二", "T"), tr("三", "W"), tr("四", "T"), tr("五", "F"), tr("六", "S"), tr("日", "S")]
+        let peak = report.heat.max { $0.value < $1.value }?.key
+        let peakText = peak.map { slot in
+            tr("最忙：星期\(days[slot / 24]) \(slot % 24):00", "Busiest: \(days[slot / 24]) \(slot % 24):00")
+        }
+        return rdCard {
+            VStack(alignment: .leading, spacing: 10) {
+                rdAnalysisCardTitle(tr("幾時用得最多", "When you use it most"), subtitle: peakText)
+                VStack(spacing: 3) {
+                    ForEach(0..<7, id: \.self) { day in
+                        HStack(spacing: 3) {
+                            Text(days[day])
+                                .font(appFont(size: 11))
+                                .foregroundStyle(rdText3)
+                                .frame(width: 16, alignment: .leading)
+                            ForEach(0..<24, id: \.self) { hour in
+                                let value = report.heat[day * 24 + hour] ?? 0
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .fill(value > 0 ? themePrimary.opacity(0.18 + 0.82 * sqrt(value / largest)) : rdInk.opacity(0.05))
+                                    .frame(height: 14)
+                                    .help(value > 0 ? "\(hour):00 · \(rdTokens(value))" : "\(hour):00")
+                            }
+                        }
+                    }
+                    HStack(spacing: 0) {
+                        Color.clear.frame(width: 19, height: 1)
+                        ForEach([0, 6, 12, 18], id: \.self) { hour in
+                            Text("\(hour)")
+                                .font(appFont(size: 10))
+                                .foregroundStyle(rdText3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func rdAgentSplitCard(_ report: RDTokenReport) -> some View {
+        let total = report.mainTokens + report.subTokens
+        let subShare = total > 0 ? report.subTokens / total : 0
+        let conversations = report.mainCount + report.subCount
+        let turns = report.turnsCompleted + report.turnsFailed + report.turnsInterrupted
+        let stats: [(String, String)] = [
+            (tr("平均每個對話", "Per conversation"), conversations > 0 ? rdTokens(total / Double(conversations)) : "—"),
+            (tr("平均每個回合時間", "Per turn"), turns > 0 ? rdHours(report.workSeconds / Double(turns)) : "—"),
+            (tr("中斷咗嘅回合", "Interrupted turns"), "\(report.turnsInterrupted)"),
+            (tr("失敗嘅回合", "Failed turns"), "\(report.turnsFailed)")
+        ]
+        return rdCard {
+            VStack(alignment: .leading, spacing: 12) {
+                rdAnalysisCardTitle(tr("主對話同 Sub-agent", "Main and sub-agents"))
+                GeometryReader { bar in
+                    HStack(spacing: 2) {
+                        Capsule().fill(themePrimary).frame(width: max(3, (bar.size.width - 2) * CGFloat(1 - subShare)))
+                        Capsule().fill(themeSecondary)
+                    }
+                }
+                .frame(height: 10)
+                HStack {
+                    Text(tr("主對話 \(rdPercentText(1 - subShare))", "Main \(rdPercentText(1 - subShare))")).foregroundStyle(themePrimary)
+                    Spacer()
+                    Text("Sub-agent \(rdPercentText(subShare))").foregroundStyle(themeSecondary)
+                }
+                .font(appFont(size: 12, weight: .medium))
+                ForEach(stats, id: \.0) { stat in
+                    HStack {
+                        Text(stat.0).foregroundStyle(rdText3)
+                        Spacer()
+                        Text(stat.1).monospacedDigit().foregroundStyle(rdText)
+                    }
+                    .font(appFont(size: 12))
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func rdTopThreadsCard(_ report: RDTokenReport) -> some View {
+        let total = report.totals.total
+        return rdCard {
+            VStack(alignment: .leading, spacing: 10) {
+                rdAnalysisCardTitle(tr("最多 Token 嘅對話", "Largest conversations"))
+                ForEach(Array(report.top.enumerated()), id: \.element.id) { index, thread in
+                    HStack(spacing: 10) {
+                        Text("\(index + 1)")
+                            .font(appFont(size: 12, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(rdText3)
+                            .frame(width: 18, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(thread.fact.title ?? thread.fact.folder)
+                                .font(appFont(size: 13, weight: .medium))
+                                .lineLimit(1)
+                            Text("\(thread.fact.folder) · \(thread.fact.model) · \(thread.fact.effort)\(thread.fact.isSubAgent ? " · Sub-agent" : "")")
+                                .font(appFont(size: 11))
+                                .foregroundStyle(rdText3)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Text(rdTokens(thread.tokens))
+                            .font(appFont(size: 13, weight: .semibold))
+                            .monospacedDigit()
+                        Text(total > 0 ? rdPercentText(thread.tokens / total) : "")
+                            .font(appFont(size: 12))
+                            .monospacedDigit()
+                            .foregroundStyle(rdText3)
+                            .frame(width: 36, alignment: .trailing)
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func rdKPI(_ title: String, value: String, detail: String? = nil, tint: Color? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(appFont(size: 12))
+                .foregroundStyle(rdText3)
+            Text(value)
+                .font(rdNumber(24))
+                .foregroundStyle(tint ?? rdText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .contentTransition(.numericText())
+            if let detail {
+                Text(detail)
+                    .font(appFont(size: 12))
+                    .foregroundStyle(rdText2)
+                    .lineLimit(1)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(rdCardFill))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(rdLine, lineWidth: 1))
+    }
+
+    private func rdKPIStrip(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        let ready = profiles.filter { rdStatus($0) == .ready }
+        let weekly = ready.compactMap { rdWindow($0, id: "7d")?.percent }
+        let average = weekly.isEmpty ? nil : weekly.reduce(0, +) / weekly.count
+        let nextReset = profiles
+            .filter { rdStatus($0) == .waiting || (rdWeekly($0)?.percent ?? 100) <= 20 }
+            .compactMap { profile -> (CodexProfile, Date)? in
+                guard let reset = rdWeekly(profile)?.reset, let date = resetDate(from: reset) else { return nil }
+                return (profile, date)
+            }
+            .min { $0.1 < $1.1 }
+        let activeWeek = snapshot.insights.reduce(0) { $0 + $1.activeSeconds7d }
+        let burning = snapshot.insights.filter { insight in
+            guard let empty = insight.emptyAt else { return false }
+            return empty < (insight.resetAt ?? .distantFuture)
+        }
+        return HStack(spacing: 12) {
+            rdKPI(tr("可用帳戶", "Available"), value: "\(ready.count) / \(profiles.count)")
+            rdKPI(tr("每週額度平均剩餘", "Avg weekly left"), value: average.map { "\($0)%" } ?? "—", tint: average.map { rdLevelColor($0) })
+            rdKPI(
+                tr("下一個重設", "Next reset"),
+                value: nextReset.map { rdRelative($0.1) } ?? "—",
+                detail: nextReset.map { $0.0.displayName }
+            )
+            rdKPI(tr("近 7 日使用", "Used in 7 days"), value: rdHours(activeWeek), detail: burning.isEmpty ? nil : tr("\(burning.count) 個帳戶會喺重設前用完", "\(burning.count) may run out before reset"))
+        }
+    }
+
+    private func rdHours(_ seconds: Double) -> String {
+        let hours = seconds / 3600
+        if hours >= 10 { return tr("\(Int(hours.rounded())) 小時", "\(Int(hours.rounded())) h") }
+        if hours >= 1 { return tr(String(format: "%.1f 小時", hours), String(format: "%.1f h", hours)) }
+        let minutes = Int((seconds / 60).rounded())
+        return tr("\(minutes) 分鐘", "\(minutes) min")
+    }
+
+    private func rdTrendPoints(_ snapshot: RDAnalyticsSnapshot, profileID: String) -> [RDChartPoint] {
+        let since = Date().addingTimeInterval(-7 * 86_400).timeIntervalSince1970
+        let samples = (snapshot.samplesByProfile[profileID] ?? []).filter { $0.t >= since }.sorted { $0.t < $1.t }
+        return samples.compactMap { sample in
+            let series: String
+            switch sample.w {
+            case 300: series = tr("5 小時", "5 hours")
+            case 10080: series = tr("1 星期", "1 week")
+            case 43200: series = tr("1 個月", "1 month")
+            default: return nil
+            }
+            return RDChartPoint(id: "\(sample.t)|\(sample.w)", date: Date(timeIntervalSince1970: sample.t), left: max(0, 100 - sample.u), series: series)
+        }
+    }
+
+    private func rdQuotaTrendCard(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        let candidates = snapshot.insights.filter { (snapshot.samplesByProfile[$0.id]?.count ?? 0) > 1 }
+        let selectedID = rdChartProfileID ?? candidates.first?.id
+        let selectedName = candidates.first { $0.id == selectedID }?.name ?? tr("揀帳戶", "Choose")
+        let points = selectedID.map { rdTrendPoints(snapshot, profileID: $0) } ?? []
+        let seriesNames = [tr("1 星期", "1 week"), tr("1 個月", "1 month"), tr("5 小時", "5 hours")]
+        return rdCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(tr("額度變化", "Quota over time")).font(rdDisplay(15, weight: .semibold))
+                    Text(tr("近 7 日", "7 days")).font(appFont(size: 12)).foregroundStyle(rdText3)
+                    Spacer()
+                    Menu {
+                        ForEach(candidates) { insight in
+                            Button(insight.name) {
+                                withAnimation(rdSpring) { rdChartProfileID = insight.id }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(selectedName)
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+                        }
+                        .font(appFont(size: 12, weight: .medium))
+                        .foregroundStyle(rdText2)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                }
+                if points.count > 1 {
+                    Chart(points) { point in
+                        LineMark(
+                            x: .value(tr("時間", "Time"), point.date),
+                            y: .value(tr("剩餘", "Left"), point.left)
+                        )
+                        .foregroundStyle(by: .value(tr("額度", "Window"), point.series))
+                        .interpolationMethod(.stepEnd)
+                        .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
+                    }
+                    .chartForegroundStyleScale(domain: seriesNames, range: [themePrimary, themeSecondary, rdText3])
+                    .chartYScale(domain: 0...100)
+                    .chartYAxis {
+                        AxisMarks(values: [0, 50, 100]) { value in
+                            AxisGridLine().foregroundStyle(rdInk.opacity(0.06))
+                            AxisValueLabel {
+                                if let number = value.as(Double.self) {
+                                    Text("\(Int(number))%").font(appFont(size: 10)).foregroundStyle(rdText3)
+                                }
+                            }
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .stride(by: .day)) { _ in
+                            AxisGridLine().foregroundStyle(rdInk.opacity(0.04))
+                            AxisValueLabel(format: .dateTime.month(.defaultDigits).day(), centered: true)
+                                .foregroundStyle(rdText3)
+                        }
+                    }
+                    .chartLegend(position: .top, alignment: .leading)
+                    .frame(height: 190)
+                    .id(selectedID)
+                    .transition(.opacity)
+                } else {
+                    Text(tr("仲未有足夠紀錄；用多幾次 Codex 就會見到變化。", "Not enough history yet; it fills in as you use Codex."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .frame(maxWidth: .infinity, minHeight: 190)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func rdDailyUsageCard(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        let totals = Dictionary(grouping: snapshot.daily, by: { $0.name }).mapValues { $0.reduce(0) { $0 + $1.hours } }
+        let top = totals.sorted { $0.value > $1.value }.prefix(5).map(\.key)
+        let others = tr("其他", "Others")
+        let rows: [RDDailyUsage] = snapshot.daily.map { item in
+            top.contains(item.name) ? item : RDDailyUsage(id: item.id, day: item.day, name: others, hours: item.hours)
+        }
+        let domain = top + (rows.contains { $0.name == others } ? [others] : [])
+        let palette: [Color] = [themePrimary, themeSecondary, themeWarm, Color(red: 0.55, green: 0.62, blue: 0.95), Color(red: 0.95, green: 0.55, blue: 0.70), rdText3]
+        return rdCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(tr("每日使用時間", "Daily use")).font(rdDisplay(15, weight: .semibold))
+                    Text(tr("近 14 日", "14 days")).font(appFont(size: 12)).foregroundStyle(rdText3)
+                    Spacer()
+                }
+                if rows.isEmpty {
+                    Text(tr("仲未有使用紀錄。", "No activity recorded yet."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .frame(maxWidth: .infinity, minHeight: 190)
+                } else {
+                    Chart(rows) { item in
+                        BarMark(
+                            x: .value(tr("日期", "Day"), item.day, unit: .day),
+                            y: .value(tr("小時", "Hours"), item.hours)
+                        )
+                        .foregroundStyle(by: .value(tr("帳戶", "Account"), item.name))
+                        .cornerRadius(3)
+                    }
+                    .chartForegroundStyleScale(domain: domain, range: Array(palette.prefix(max(domain.count, 1))))
+                    .chartYAxis {
+                        AxisMarks { value in
+                            AxisGridLine().foregroundStyle(rdInk.opacity(0.06))
+                            AxisValueLabel {
+                                if let number = value.as(Double.self) {
+                                    Text(tr("\(Int(number))h", "\(Int(number))h")).font(appFont(size: 10)).foregroundStyle(rdText3)
+                                }
+                            }
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .stride(by: .day, count: 2)) { _ in
+                            AxisValueLabel(format: .dateTime.month(.defaultDigits).day(), centered: true)
+                                .foregroundStyle(rdText3)
+                        }
+                    }
+                    .chartLegend(position: .top, alignment: .leading)
+                    .frame(height: 190)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func rdForecast(_ insight: RDAccountInsight) -> (String, Color) {
+        guard let left = insight.left else { return ("—", rdText3) }
+        if left == 0 { return (tr("已用完", "Used up"), rdAmber) }
+        guard let perDay = insight.perDay, perDay >= 0.5, let empty = insight.emptyAt else {
+            return (tr("用得好少", "Barely used"), rdText3)
+        }
+        if let reset = insight.resetAt, empty >= reset {
+            return (tr("夠用到重設", "Lasts to reset"), themePrimary)
+        }
+        return (tr("約 \(rdRelative(empty))用完", "Runs out \(rdRelative(empty))"), rdOrange)
+    }
+
+    private func rdPercentText(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return value < 0.5 ? "0%" : "\(Int(value.rounded()))%"
+    }
+
+    private func rdInsightTable(_ snapshot: RDAnalyticsSnapshot) -> some View {
+        let rows = snapshot.insights
+            .filter { $0.left != nil || $0.activeSeconds7d > 0 }
+            .sorted { ($0.activeSeconds7d, $0.used7d ?? 0) > ($1.activeSeconds7d, $1.used7d ?? 0) }
+        return rdCard {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(tr("帳戶分析", "Accounts")).font(rdDisplay(15, weight: .semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, 10)
+                HStack(spacing: 12) {
+                    Text(tr("帳戶", "Account")).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(tr("剩餘", "Left")).frame(width: 56, alignment: .trailing)
+                    Text(tr("24 小時用咗", "Used 24h")).frame(width: 76, alignment: .trailing)
+                    Text(tr("7 日用咗", "Used 7d")).frame(width: 66, alignment: .trailing)
+                    Text(tr("每日平均", "Per day")).frame(width: 64, alignment: .trailing)
+                    Text(tr("預計", "Forecast")).frame(width: 110, alignment: .leading)
+                    Text(tr("使用時間", "Active")).frame(width: 70, alignment: .trailing)
+                    Text(tr("對話", "Chats")).frame(width: 44, alignment: .trailing)
+                }
+                .font(appFont(size: 11, weight: .medium))
+                .foregroundStyle(rdText3)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
+                ForEach(rows) { insight in
+                    let forecast = rdForecast(insight)
+                    HStack(spacing: 12) {
+                        Text(insight.name).font(appFont(size: 13, weight: .medium)).lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(insight.left.map { "\($0)%" } ?? "—")
+                            .font(rdNumber(14))
+                            .foregroundStyle(insight.left.map { $0 <= 20 ? rdOrange : rdText } ?? rdText3)
+                            .frame(width: 56, alignment: .trailing)
+                        Text(rdPercentText(insight.used24h)).frame(width: 76, alignment: .trailing)
+                        Text(rdPercentText(insight.used7d)).frame(width: 66, alignment: .trailing)
+                        Text(insight.perDay.map { rdPercentText($0) } ?? "—").frame(width: 64, alignment: .trailing)
+                        Text(forecast.0).foregroundStyle(forecast.1).lineLimit(1).frame(width: 110, alignment: .leading)
+                        Text(insight.activeSeconds7d > 0 ? rdHours(insight.activeSeconds7d) : "—").frame(width: 70, alignment: .trailing)
+                        Text(insight.threads7d > 0 ? "\(insight.threads7d)" : "—").frame(width: 44, alignment: .trailing)
+                    }
+                    .font(appFont(size: 12))
+                    .monospacedDigit()
+                    .foregroundStyle(rdText2)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .overlay(alignment: .top) { Rectangle().fill(rdLine).frame(height: 1) }
+                }
+            }
+            .padding(.bottom, 6)
+        }
+    }
+
+    // MARK: Chats & projects page
+
+    private var rdConversationsPage: some View {
+        let localProfiles = rdSortedProfiles.filter { !isExternalProvider($0) }
+        let modes = Dictionary(uniqueKeysWithValues: localProfiles.map { ($0.id, profileHistoryMode(for: $0)) })
+        let sharedCount = modes.values.filter { $0 == .shared }.count
+        let target = rdSelectedProfile ?? localProfiles.first
+        return VStack(spacing: 0) {
+            rdPageHeader(
+                tr("對話與項目", "Chats & Projects")
+            ) {
+                HStack(spacing: 12) {
+                    Label("\(sharedCount)", systemImage: "person.2.fill")
+                        .help(tr("共享本機對話", "Shared local chats"))
+                    Label("\(localProfiles.count - sharedCount)", systemImage: "lock.fill")
+                        .help(tr("私人本機對話", "Private local chats"))
+                }
+                .font(rdNumber(13))
+                .foregroundStyle(rdText2)
+                .padding(.trailing, 6)
+                rdSecondaryButton(tr("立即同步", "Sync Now"), icon: "arrow.triangle.2.circlepath", busy: isSyncing) {
+                    syncMemories()
+                }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    rdCard {
+                        ForEach(Array(localProfiles.enumerated()), id: \.element.id) { index, profile in
+                            let mode = modes[profile.id] ?? .shared
+                            let anchor = isHistoryAnchor(profile)
+                            HStack(spacing: 12) {
+                                rdBadge(profile, size: 24)
+                                Text(profile.displayName).font(appFont(size: 13, weight: .medium)).lineLimit(1)
+                                if anchor {
+                                    Text(tr("主帳戶", "Main"))
+                                        .font(appFont(size: 11, weight: .semibold))
+                                        .foregroundStyle(rdText3)
+                                }
+                                Spacer(minLength: 8)
+                                rdIconSegmented(
+                                    rdHistoryOptions,
+                                    selection: mode == .shared,
+                                    key: "history-\(profile.id)",
+                                    disabled: anchor
+                                ) { shared in
+                                    if shared, mode != .shared {
+                                        shareHistory(profile)
+                                    } else if !shared, mode != .privateOnly {
+                                        separateHistory(profile)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .overlay(alignment: .top) {
+                                if index > 0 { Rectangle().fill(rdLine).frame(height: 1) }
+                            }
+                        }
+                    }
+
+                    Text(tr("共享會合併對話、項目同分類；登入、模型同代理路由仍然各自獨立。私人只隔離本機紀錄。", "Sharing merges chats, projects and folders; sign-in, models and proxy routes stay separate. Private only isolates local records."))
+                        .font(appFont(size: 12))
+                        .foregroundStyle(rdText3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    rdCard {
+                        VStack(alignment: .leading, spacing: 14) {
+                            rdToggleRow(tr("每 10 分鐘自動同步", "Sync every 10 minutes"), subtitle: tr("上次 \(lastAutoSyncLabel)", "Last \(lastAutoSyncLabel)"), isOn: $autoSync)
+                            Rectangle().fill(rdLine).frame(height: 1)
+                            HStack(spacing: 8) {
+                                rdSecondaryButton(tr("共享全部", "Share All"), icon: "person.3") { shareAll() }
+                                rdSecondaryButton(tr("整理側欄", "Tidy Sidebar"), icon: "sidebar.left", busy: isCleaningSidebarState) { cleanupSidebarProjects() }
+                                rdSecondaryButton(tr("修復大型對話", "Repair Large Chats"), icon: "bandage", busy: isRepairingHistoryPayloads) { repairLargeHistoryPayloads() }
+                                Spacer(minLength: 0)
+                                if let target {
+                                    rdSecondaryButton(tr("匯入…", "Import…"), icon: "square.and.arrow.down") { importConversationPackage(defaultTarget: target) }
+                                    rdSecondaryButton(tr("匯出…", "Export…"), icon: "square.and.arrow.up") { exportConversationPackage(from: target) }
+                                }
+                            }
+                        }
+                        .padding(16)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: Tools page
+
+    private var rdToolsPage: some View {
+        return VStack(spacing: 0) {
+            rdPageHeader(tr("工作工具", "Tools")) { EmptyView() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    rdCard {
+                        HStack(spacing: 16) {
+                            rdCardTitle(tr("防睡眠", "Keep Awake"), subtitle: keepAwakeModeDescription, icon: "cup.and.saucer")
+                            if keepAwake.isSwitching {
+                                ProgressView().controlSize(.small)
+                            }
+                            rdSegmented(
+                                [(KeepAwakeMode.off, tr("關閉", "Off")), (KeepAwakeMode.display, tr("保持開屏", "Screen on")), (KeepAwakeMode.clamshell, tr("合蓋運作", "Lid closed"))],
+                                selection: keepAwake.mode,
+                                key: "keep-awake",
+                                disabled: keepAwake.isSwitching
+                            ) { mode in
+                                keepAwake.setMode(mode)
+                            }
+                        }
+                        .padding(16)
+                    }
+
+                    rdCard {
+                        HStack(spacing: 16) {
+                            rdCardTitle(
+                                tr("鍵盤清潔", "Keyboard Clean"),
+                                subtitle: keyboardClean.isLocked ? tr("鍵盤已鎖定，抹完撳解除。", "Keyboard locked; unlock when done.") : tr("暫停鍵盤輸入，滑鼠照用。", "Pauses the keyboard; the mouse still works."),
+                                icon: "keyboard"
+                            )
+                            if keyboardClean.isLocked {
+                                rdSecondaryButton(tr("解除鎖定", "Unlock"), icon: "lock.open", busy: keyboardClean.isSwitching) { keyboardClean.toggle() }
+                            } else {
+                                rdPrimaryButton(tr("開始清潔", "Start"), icon: "sparkles", busy: keyboardClean.isSwitching) { keyboardClean.toggle() }
+                            }
+                        }
+                        .padding(16)
+                        Rectangle().fill(rdLine).frame(height: 1)
+                        HStack(spacing: 16) {
+                            rdCardTitle(
+                                tr("螢幕清潔", "Screen Clean"),
+                                subtitle: tr("黑屏 15 秒並暫停觸控，方便抹螢幕。", "Blacks out the screen for 15 seconds and pauses touch."),
+                                icon: "display"
+                            )
+                            rdPrimaryButton(tr("開始清潔", "Start"), icon: "sparkles", busy: screenClean.isActive) { rdConfirmScreenClean() }
+                        }
+                        .padding(16)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: Models & proxy page
+
+    private var rdModelsPage: some View {
+        VStack(spacing: 0) {
+            rdPageHeader(tr("模型與代理", "Models & Proxy")) { EmptyView() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    rdCard {
+                        ForEach(Array(rdSortedProfiles.enumerated()), id: \.element.id) { index, profile in
+                            HStack(spacing: 10) {
+                                rdBadge(profile, size: 22)
+                                Text(profile.displayName).font(appFont(size: 13)).lineLimit(1)
+                                Spacer(minLength: 6)
+                                Text(isExternalProvider(profile) ? tr("外部 API", "External API") : tr("原生 Codex", "Native Codex"))
+                                    .font(appFont(size: 12))
+                                    .foregroundStyle(isExternalProvider(profile) ? themeSecondary : rdText3)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 7)
+                            .overlay(alignment: .top) {
+                                if index > 0 { Rectangle().fill(rdLine).frame(height: 1) }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: Theme cards
+
+    /// A theme as a small window: its sidebar, three accounts with quota bars in the shared level colours,
+    /// and its accent button, drawn in the appearance currently in use.
+    private func rdThemeCard(_ theme: RDTheme) -> some View {
+        let palette = theme.palette(dark: rdIsDark)
+        let isOn = rdTheme.id == theme.id
+        return Button {
+            withAnimation(.easeInOut(duration: 0.35)) { setTheme(theme.id) }
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Circle().fill(palette.accent).frame(width: 12, height: 12)
+                        RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(palette.accent.opacity(0.85)).frame(width: 30, height: 6)
+                        RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(palette.ink.opacity(0.16)).frame(width: 24, height: 5)
+                        RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(palette.ink.opacity(0.16)).frame(width: 28, height: 5)
+                    }
+                    .padding(9)
+                    .frame(width: 52, alignment: .topLeading)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .background(palette.sidebar)
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array([(92, palette.accent), (47, palette.accent2), (9, palette.warm)].enumerated()), id: \.offset) { _, row in
+                            HStack(spacing: 6) {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous).fill(row.1).frame(width: 11, height: 11)
+                                RoundedRectangle(cornerRadius: 2, style: .continuous).fill(palette.text.opacity(0.75)).frame(width: 26, height: 4)
+                                Spacer(minLength: 4)
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(palette.track)
+                                    Capsule().fill(palette.level(row.0)).frame(width: max(8, 64 * CGFloat(row.0) / 100))
+                                }
+                                .frame(width: 64, height: 8)
+                            }
+                        }
+                        HStack {
+                            Spacer()
+                            Capsule().fill(palette.accent).frame(width: 34, height: 12)
+                                .overlay(Capsule().fill(palette.onAccent.opacity(0.85)).frame(width: 14, height: 3))
+                        }
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(palette.canvas)
+                }
+                .frame(height: 92)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(palette.ink.opacity(0.10), lineWidth: 1))
+
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr(theme.zh, theme.en))
+                            .font(appFont(size: 13, weight: .semibold))
+                            .foregroundStyle(rdText)
+                        Text(tr(theme.moodZh, theme.moodEn))
+                            .font(appFont(size: 11))
+                            .foregroundStyle(rdText3)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    HStack(spacing: -4) {
+                        ForEach(Array([palette.accent, palette.accent2, palette.warm].enumerated()), id: \.offset) { _, color in
+                            Circle().fill(color).frame(width: 12, height: 12)
+                                .overlay(Circle().stroke(rdSurface, lineWidth: 1.5))
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(isOn ? rdRaised : rdInk.opacity(0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(isOn ? themePrimary : rdLine, lineWidth: isOn ? 2 : 1))
+            .overlay(alignment: .topTrailing) {
+                if isOn {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(themePrimary, rdSurface)
+                        .padding(6)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .contentShape(Rectangle())
+            .modifier(RDHoverScale())
+        }
+        .buttonStyle(RDPressStyle())
+        .accessibilityLabel(tr(theme.zh, theme.en))
+        .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+
+    // MARK: Settings page
+
+    private var rdSettingsPage: some View {
+        VStack(spacing: 0) {
+            rdPageHeader(tr("設定", "Settings")) { EmptyView() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    rdCard {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tr("外觀", "Appearance")).font(rdDisplay(15, weight: .semibold))
+                                    Text(tr("每個主題都有深色同淺色兩套", "Every theme has a dark and a light version"))
+                                        .font(appFont(size: 12))
+                                        .foregroundStyle(rdText3)
+                                }
+                                Spacer()
+                                rdSegmented([("system", tr("跟隨系統", "System")), ("dark", tr("深色", "Dark")), ("light", tr("淺色", "Light"))], selection: rdAppearance, key: "appearance") { mode in
+                                    rdAppearance = mode
+                                    rdApplyAppearance()
+                                }
+                            }
+                            Rectangle().fill(rdLine).frame(height: 1)
+                            Text(tr("主題", "Theme")).font(rdDisplay(15, weight: .semibold))
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 196, maximum: 260), spacing: 12)], spacing: 12) {
+                                ForEach(RDTheme.all) { theme in
+                                    rdThemeCard(theme)
+                                }
+                            }
+                            Rectangle().fill(rdLine).frame(height: 1)
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tr("背景圖片", "Background picture")).font(appFont(size: 13, weight: .medium))
+                                    Text(rdBackdropPicture == nil
+                                         ? tr("揀一張自己嘅圖做背景；白底線稿會自動去走白色。圖片只會留喺呢部 Mac。", "Choose a picture of your own. A drawing on white paper loses its white. The picture stays on this Mac.")
+                                         : tr("拉滑桿調濃淡，拉到最左就關閉。", "Drag to adjust; fully left turns it off."))
+                                        .font(appFont(size: 12))
+                                        .foregroundStyle(rdText3)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Spacer(minLength: 16)
+                                if rdBackdropPicture != nil {
+                                    Slider(value: $rdBackdropStrength, in: 0...0.6)
+                                        .controlSize(.small)
+                                        .tint(themePrimary)
+                                        .frame(width: 150)
+                                        .accessibilityLabel(tr("背景圖片濃度", "Background picture strength"))
+                                    Text(rdBackdropStrength > 0.005 ? "\(Int((rdBackdropStrength * 100).rounded()))%" : tr("關", "Off"))
+                                        .font(appFont(size: 12))
+                                        .monospacedDigit()
+                                        .foregroundStyle(rdText2)
+                                        .frame(width: 34, alignment: .trailing)
+                                    rdSecondaryButton(tr("移除", "Remove")) { rdRemoveBackdrop() }
+                                }
+                                rdSecondaryButton(rdBackdropPicture == nil ? tr("揀圖片…", "Choose…") : tr("更換…", "Change…"), icon: "photo") { rdChooseBackdrop() }
+                            }
+                            Rectangle().fill(rdLine).frame(height: 1)
+                            HStack {
+                                Text(tr("語言", "Language")).font(appFont(size: 13, weight: .medium))
+                                Spacer()
+                                rdSegmented(AppLanguage.allCases.map { ($0, $0.shortTitle) }, selection: selectedLanguage, key: "language") { item in
+                                    setLanguage(item)
+                                }
+                            }
+                        }
+                        .padding(16)
+                    }
+
+                    rdCard {
+                        VStack(alignment: .leading, spacing: 14) {
+                            rdToggleRow(tr("自動更新額度", "Refresh quota automatically"), isOn: $autoRefresh)
+                            Rectangle().fill(rdLine).frame(height: 1)
+                            rdToggleRow(
+                                tr("提醒", "Reminders"),
+                                subtitle: tr("帳戶額度重設、重設券 48 小時內到期時通知你。", "Notifies you when an account's quota resets or a reset ticket expires within 48 hours."),
+                                isOn: Binding(get: { rdNotifyEnabled }, set: { rdSetNotifications($0) })
+                            )
+                        }
+                        .padding(16)
+                    }
+
+                    rdCard {
+                        HStack(spacing: 14) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Codex Accounts \(rdVersion)").font(appFont(size: 13, weight: .medium))
+                                if !updater.statusText.isEmpty {
+                                    Text(updater.statusText).font(appFont(size: 12)).foregroundStyle(rdText3).lineLimit(2)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            if updater.updateAvailable {
+                                rdPrimaryButton(tr("安裝更新", "Install Update"), busy: updater.isInstalling) { updater.installAvailableUpdate() }
+                            }
+                            rdSecondaryButton(tr("檢查更新", "Check for Updates"), busy: updater.isChecking) {
+                                updater.checkForUpdates(presentNoUpdate: true, notifyIfAvailable: false)
+                            }
+                        }
+                        .padding(16)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .padding(.top, 4)
             }
         }
     }
@@ -8808,6 +13373,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cachedAccounts: [Account] = []
     private var accountsCacheRefreshInFlight = false
     private var terminationCleanupInFlight = false
+    private var quotaPollingActivity: NSObjectProtocol?
 
     private var scriptPath: String {
         if let bundled = Bundle.main.path(forResource: "codex_multi_account", ofType: "zsh") {
@@ -8827,6 +13393,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        // App Nap would stretch the one-minute quota refresh once no window is showing. Idle sleep is still allowed.
+        quotaPollingActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Refreshing account quota every minute")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "Codex Accounts"
@@ -8993,17 +13561,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildWindow() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = appTr("Codex 帳戶", "Codex Accounts")
         window.center()
-        window.minSize = NSSize(width: 860, height: 560)
+        window.minSize = NSSize(width: 1000, height: 640)
         window.styleMask.insert(.fullSizeContentView)
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .visible
+        window.titleVisibility = .hidden
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -9410,6 +13978,162 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeepAwakeController.shared.stopKeepAwakeForTermination()
     }
 }
+
+#if UI_PREVIEW
+// Test builds only: print token totals, to compare against an independent count. Numbers only.
+if CommandLine.arguments.contains("--dump-token-report") {
+    let root = NSHomeDirectory() + "/.codex-accounts"
+    var homes: [(id: String, name: String, home: String)] = [(id: "account1", name: "Account 1", home: NSHomeDirectory() + "/.codex")]
+    for name in ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).sorted() where !name.hasPrefix(".") && name != "opencodex-lab" {
+        homes.append((id: name, name: name, home: root + "/" + name))
+    }
+    let started = Date()
+    let data = RDTokenEngine.scan(profiles: homes)
+    print("scan seconds:", Int(Date().timeIntervalSince(started)), "rows:", data.rows.count, "threads:", data.threads.count, "turns:", data.turns.count)
+    for days in [7, 30, 0] {
+        let r = RDTokenEngine.report(data, scope: nil, days: days)
+        print("days \(days): total \(String(format: "%.2fB", r.totals.total / 1e9)) detailed \(String(format: "%.2fB", r.totals.detailed / 1e9)) usd \(Int(r.totals.usd)) main \(r.mainCount) sub \(r.subCount) prev \(String(format: "%.2fB", (r.previousTotal ?? 0) / 1e9)) work h \(Int(r.workSeconds / 3600)) turns \(r.turnsCompleted)/\(r.turnsFailed)/\(r.turnsInterrupted)")
+        for a in r.accounts.prefix(6) { print("   \(a.id.isEmpty ? "(unmatched)" : a.id): \(String(format: "%.2fB", a.totals.total / 1e9)) usd \(Int(a.totals.usd)) per1% \(String(format: "%.2fB", (a.pool?.tokensPerPercent ?? 0) / 1e9)) full \(Int(a.pool?.usdPerFullWindow ?? 0))") }
+    }
+    let r30 = RDTokenEngine.report(data, scope: nil, days: 30)
+    print("models:", r30.models.map { "\($0.id)=\(String(format: "%.1fB", $0.tokens / 1e9))" }.joined(separator: " "))
+    print("efforts:", r30.efforts.map { "\($0.id)=\(String(format: "%.1fB", $0.tokens / 1e9))" }.joined(separator: " "))
+    exit(0)
+}
+
+// Test builds only: rehearse the screen clean timing with invisible windows. "hang" freezes the main thread
+// to prove the last-resort exit; "esc" ends early.
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--test-screen-clean") {
+    let mode = flagIndex + 1 < CommandLine.arguments.count ? CommandLine.arguments[flagIndex + 1] : "normal"
+    let testApp = NSApplication.shared
+    testApp.setActivationPolicy(.prohibited)
+    let controller = ScreenCleanController.shared
+    var finishCount = 0
+    controller.start(seconds: 1) { finishCount += 1 }
+    controller.start(seconds: 30) { finishCount += 100 }   // A second start while running must be ignored.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        print("during: active=\(controller.isActive) windows=\(controller.windowCount) screens=\(NSScreen.screens.count)")
+        if mode == "hang" {
+            print("hanging main thread"); fflush(stdout)
+            sleep(30)
+            print("FAIL: watchdog did not end the process"); exit(1)
+        }
+        if mode == "esc" { controller.finish() }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+        let passed = !controller.isActive && controller.windowCount == 0 && finishCount == 1
+        print("after: active=\(controller.isActive) windows=\(controller.windowCount) finishCount=\(finishCount)")
+        print(passed ? "PASS" : "FAIL"); exit(passed ? 0 : 1)
+    }
+    testApp.run()
+}
+
+// Test builds only (swiftc -D UI_PREVIEW): render the main window off-screen to a PNG and exit.
+// Usage: CodexAccountsPreview --render-preview out.png [width height delaySeconds]
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--render-preview"), flagIndex + 1 < CommandLine.arguments.count {
+    let arguments = CommandLine.arguments
+    let outputPath = arguments[flagIndex + 1]
+    let width = flagIndex + 2 < arguments.count ? Double(arguments[flagIndex + 2]) ?? 1280 : 1280
+    let height = flagIndex + 3 < arguments.count ? Double(arguments[flagIndex + 3]) ?? 800 : 800
+    let delay = flagIndex + 4 < arguments.count ? Double(arguments[flagIndex + 4]) ?? 8 : 8
+    let previewApp = NSApplication.shared
+    previewApp.setActivationPolicy(.prohibited)
+    let scriptPath = Bundle.main.path(forResource: "codex_multi_account", ofType: "zsh") ?? "/Applications/Codex Accounts.app/Contents/Resources/codex_multi_account.zsh"
+    let hosting = NSHostingView(rootView: AccountsRootView(scriptPath: scriptPath))
+    // PREVIEW_ONSCREEN=1 puts the (fully transparent) window on screen, so lazy lists update as they do in
+    // the real app; off screen, rows can keep showing what they first drew.
+    let onScreen = ProcessInfo.processInfo.environment["PREVIEW_ONSCREEN"] == "1"
+    // Reports itself as key so synthetic mouse events reach SwiftUI gestures without activating the app.
+    final class PreviewWindow: NSWindow {
+        override var canBecomeKey: Bool { true }
+        override var isKeyWindow: Bool { true }
+    }
+    let previewWindow = PreviewWindow(contentRect: NSRect(x: onScreen ? 0 : -4000, y: onScreen ? 0 : -4000, width: width, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
+    previewWindow.contentView = hosting
+    if onScreen {
+        previewWindow.alphaValue = 0
+        previewWindow.ignoresMouseEvents = true
+        previewWindow.level = .init(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
+    }
+    previewWindow.orderFrontRegardless()
+    func capture() {
+        hosting.layoutSubtreeIfNeeded()
+        if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: outputPath))
+            }
+        }
+        exit(0)
+    }
+    // PREVIEW_TAB=<n> moves keyboard focus n times first, to check the keyboard-only focus ring.
+    if let tabs = ProcessInfo.processInfo.environment["PREVIEW_TAB"].flatMap(Int.init) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(1, delay - 2)) {
+            RDKeyboardFocus.shared.active = ProcessInfo.processInfo.environment["PREVIEW_TAB_MOUSE"] != "1"
+            for _ in 0..<tabs { previewWindow.selectNextKeyView(nil) }
+            print("first responder:", previewWindow.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")
+        }
+    }
+    // PREVIEW_SCROLL=<points> scrolls the tallest list first, to check what happens under pinned headers.
+    func tallestScroller(in view: NSView) -> NSScrollView? {
+        let found = view.subviews.compactMap { tallestScroller(in: $0) } + [view as? NSScrollView].compactMap { $0 }
+        return found.max { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }
+    }
+    // PREVIEW_DRAG_SIDEBAR=<points> drags the sidebar's edge with mouse events, or "reset" double-clicks it.
+    // The target comes from hit testing, as it does for a real click, so a view covering the handle fails here.
+    func driveSidebar(_ command: String, then finish: @escaping () -> Void) {
+        let start = CGFloat(UserDefaults.standard.object(forKey: "rdSidebarWidth") as? Double ?? 220) + 0.5
+        let y = height / 2
+        func point(_ x: CGFloat) -> NSPoint { hosting.superview!.convert(NSPoint(x: x, y: y), from: nil) }
+        for x in [start - 4, start, start + 4] {
+            let hit = hosting.hitTest(point(x))
+            print("hit x=\(x):", hit.map { String(describing: type(of: $0)) } ?? "nil")
+        }
+        guard let target = hosting.hitTest(point(start)) else { return finish() }
+        func event(_ type: NSEvent.EventType, _ x: CGFloat, clicks: Int = 1) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: y), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: previewWindow.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: 1)!
+        }
+        if command == "hover" {
+            target.mouseEntered(with: event(.mouseMoved, start))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { finish() }
+            return
+        }
+        if command.hasPrefix("hold:") {   // Capture mid-drag, with the button still down.
+            let amount = CGFloat(Double(command.dropFirst(5)) ?? 0)
+            target.mouseDown(with: event(.leftMouseDown, start))
+            target.mouseDragged(with: event(.leftMouseDragged, start + amount))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { finish() }
+            return
+        }
+        if command == "reset" {
+            target.mouseDown(with: event(.leftMouseDown, start, clicks: 2))
+            target.mouseUp(with: event(.leftMouseUp, start, clicks: 2))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { finish() }
+            return
+        }
+        let amount = CGFloat(Double(command) ?? 0)
+        target.mouseDown(with: event(.leftMouseDown, start))
+        for step in 1...6 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(step) * 0.08) {
+                target.mouseDragged(with: event(.leftMouseDragged, start + amount * CGFloat(step) / 6))
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { target.mouseUp(with: event(.leftMouseUp, start + amount)) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { finish() }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        if let command = ProcessInfo.processInfo.environment["PREVIEW_DRAG_SIDEBAR"] {
+            return driveSidebar(command) { capture() }
+        }
+        guard let amount = ProcessInfo.processInfo.environment["PREVIEW_SCROLL"].flatMap(Double.init),
+              let scroller = tallestScroller(in: hosting) else { return capture() }
+        scroller.contentView.scroll(to: NSPoint(x: 0, y: amount))
+        scroller.reflectScrolledClipView(scroller.contentView)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { capture() }
+    }
+    previewApp.run()
+}
+#endif
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
