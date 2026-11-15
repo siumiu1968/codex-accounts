@@ -29,6 +29,9 @@ chmod +x "$RESOURCES/auto_prune_child_tasks.py"
 # OpenCodex mode was removed in 3.3.1: its runtime is no longer bundled, and an older copy is cleared.
 rm -rf "$RESOURCES/opencodex-runtime" "$RESOURCES/opencodex_runtime_seed.py"
 
+# Written Traditional Chinese, Simplified Chinese and Japanese for the interface.
+cp "$SRC_DIR/Localizations.json" "$RESOURCES/Localizations.json"
+
 if [[ -f "$SRC_DIR/AccountsLogo.png" ]]; then
   cp "$SRC_DIR/AccountsLogo.png" "$RESOURCES/AccountsLogo.png"
 fi

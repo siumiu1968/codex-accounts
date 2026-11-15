@@ -417,6 +417,112 @@ private func localizedText(_ zhHK: String, _ en: String, language rawLanguage: S
     AppTextLocalizer.localized(zhHK, en, language: AppLanguage.normalized(rawLanguage))
 }
 
+/// Written Traditional Chinese, Simplified Chinese and Japanese for every interface string, from
+/// Localizations.json. The app's text is written in Cantonese and English; each Cantonese string is the key.
+/// Strings with values inside them are stored as templates ("剩 {0} 日") and matched with the values captured,
+/// so a value that was itself translated (a time, a name) is carried over as it is.
+private enum AppCatalog {
+    struct Entry: Decodable {
+        let hant: String
+        let hans: String
+        let ja: String
+    }
+
+    private struct Template {
+        let regex: NSRegularExpression
+        let entry: Entry
+        let weight: Int
+    }
+
+    private static let table: (exact: [String: Entry], templates: [Template]) = {
+        guard let url = Bundle.main.url(forResource: "Localizations", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let raw = try? JSONDecoder().decode([String: Entry].self, from: data) else { return ([:], []) }
+        var exact: [String: Entry] = [:]
+        var templates: [Template] = []
+        let placeholder = try! NSRegularExpression(pattern: #"\{\d+\}"#)
+        for (key, entry) in raw {
+            let whole = NSRange(key.startIndex..., in: key)
+            let holes = placeholder.matches(in: key, range: whole)
+            guard !holes.isEmpty else {
+                exact[key] = entry
+                continue
+            }
+            var pattern = "^"
+            var cursor = key.startIndex
+            var literal = 0
+            for hole in holes {
+                guard let range = Range(hole.range, in: key) else { continue }
+                let text = String(key[cursor..<range.lowerBound])
+                literal += text.count
+                pattern += NSRegularExpression.escapedPattern(for: text) + "(.*?)"
+                cursor = range.upperBound
+            }
+            let tail = String(key[cursor...])
+            literal += tail.count
+            pattern += NSRegularExpression.escapedPattern(for: tail) + "$"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
+                templates.append(Template(regex: regex, entry: entry, weight: literal))
+            }
+        }
+        // The most specific templates are tried first.
+        templates.sort { $0.weight > $1.weight }
+        return (exact, templates)
+    }()
+
+    private static let lock = NSLock()
+    private static var cache: [String: String] = [:]
+    #if UI_PREVIEW
+    static var misses = Set<String>()
+    #endif
+
+    private static func text(_ entry: Entry, _ language: AppLanguage) -> String {
+        switch language {
+        case .zhHant: return entry.hant
+        case .zhCN: return entry.hans
+        default: return entry.ja
+        }
+    }
+
+    static func translate(_ zhHK: String, to language: AppLanguage) -> String? {
+        let cacheKey = language.rawValue + "\u{1}" + zhHK
+        lock.lock()
+        if let hit = cache[cacheKey] {
+            lock.unlock()
+            return hit.isEmpty && !zhHK.isEmpty ? nil : hit
+        }
+        lock.unlock()
+
+        var result: String?
+        if let entry = table.exact[zhHK] {
+            result = text(entry, language)
+        } else {
+            let whole = NSRange(zhHK.startIndex..., in: zhHK)
+            for template in table.templates {
+                guard let match = template.regex.firstMatch(in: zhHK, range: whole) else { continue }
+                var output = text(template.entry, language)
+                for index in stride(from: match.numberOfRanges - 1, through: 1, by: -1) {
+                    let value = Range(match.range(at: index), in: zhHK).map { String(zhHK[$0]) } ?? ""
+                    output = output.replacingOccurrences(of: "{\(index - 1)}", with: value)
+                }
+                result = output
+                break
+            }
+        }
+
+        lock.lock()
+        if cache.count > 6000 { cache.removeAll(keepingCapacity: true) }
+        cache[cacheKey] = result ?? ""
+        #if UI_PREVIEW
+        if result == nil, !zhHK.isEmpty, zhHK.range(of: #"[\u4E00-\u9FFF]"#, options: .regularExpression) != nil {
+            misses.insert(zhHK)
+        }
+        #endif
+        lock.unlock()
+        return result
+    }
+}
+
 private enum AppTextLocalizer {
     static func localized(_ zhHK: String, _ en: String, language: AppLanguage) -> String {
         switch language {
@@ -425,11 +531,11 @@ private enum AppTextLocalizer {
         case .zhHK:
             return cantoneseHongKong(zhHK)
         case .zhHant:
-            return writtenTraditional(zhHK)
+            return AppCatalog.translate(zhHK, to: .zhHant) ?? writtenTraditional(zhHK)
         case .zhCN:
-            return simplifiedChinese(writtenTraditional(zhHK))
+            return AppCatalog.translate(zhHK, to: .zhCN) ?? simplifiedChinese(writtenTraditional(zhHK))
         case .ja:
-            return japanese(zhHK, en)
+            return AppCatalog.translate(zhHK, to: .ja) ?? japanese(zhHK, en)
         }
     }
 
@@ -1161,7 +1267,7 @@ private func parsedExportableThreads(_ output: String) -> [ExportableThread] {
 }
 
 private func formattedExportThreadDate(_ raw: String) -> String {
-    guard !raw.isEmpty else { return "未知時間" }
+    guard !raw.isEmpty else { return localizedText("未知時間", "Unknown time", language: UserDefaults.standard.string(forKey: "language")) }
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     let fallback = ISO8601DateFormatter()
@@ -14058,6 +14164,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--render-preview"), fla
     previewWindow.orderFrontRegardless()
     func capture() {
         hosting.layoutSubtreeIfNeeded()
+        if ProcessInfo.processInfo.environment["PREVIEW_I18N_AUDIT"] == "1" {
+            for miss in AppCatalog.misses.sorted() { print("untranslated:", miss.replacingOccurrences(of: "\n", with: "⏎")) }
+            print("untranslated count:", AppCatalog.misses.count)
+        }
         if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
             hosting.cacheDisplay(in: hosting.bounds, to: rep)
             if let data = rep.representation(using: .png, properties: [:]) {
