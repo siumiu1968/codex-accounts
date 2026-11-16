@@ -18,6 +18,10 @@
 
 Codex Accounts 是一個 macOS 小工具，用來管理多個 Codex / OpenAI 帳戶。它會為每個 profile 開一個獨立的 Codex desktop 視窗，並分開 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登入狀態，不需要反覆登出登入。
 
+### V4.0.1 更新介紹
+
+繁體中文、簡體中文同日本語介面完整翻譯。以前呢三種語言只係由廣東話逐個詞替換，好多句子冇變；而家全部介面文字都有正式翻譯，包括菜單、提示、主題名稱同數字單位。
+
 ### V4.0.0 更新介紹
 
 V4.0.0 係一次由頭到尾嘅重新設計。
@@ -227,6 +231,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 
 Codex Accounts 是一个 macOS 小工具，用来管理多个 Codex / OpenAI 账号。它会为每个 profile 打开一个独立的 Codex desktop 窗口，并分开 `CODEX_HOME` 和 Electron `user-data-dir`，所以不同 profile 可以保持不同登录状态，不需要反复登出登录。
 
+### V4.0.1 更新介绍
+
+繁体中文、简体中文和日语界面完整翻译。以前这三种语言只是由粤语逐词替换，很多句子没有变化；现在全部界面文字都有正式翻译，包括菜单、提示、主题名称和数字单位。
+
 ### V4.0.0 更新介绍
 
 V4.0.0 是一次从头到尾的重新设计。
@@ -431,6 +439,10 @@ More profiles: ~/Library/Application Support/Codex Accounts/<profile-name>
 ## English
 
 Codex Accounts is a macOS helper app for managing multiple Codex / OpenAI accounts. It opens each profile in a separate Codex desktop window with its own `CODEX_HOME` and Electron `user-data-dir`, so different profiles can stay signed in to different accounts without constant logouts.
+
+### V4.0.1 Update
+
+Complete Traditional Chinese, Simplified Chinese and Japanese interfaces. These three languages used to be produced by swapping Cantonese words, so many sentences stayed unchanged; every interface string now has a proper translation, including menus, messages, theme names and number units.
 
 ### V4.0.0 Update
 
