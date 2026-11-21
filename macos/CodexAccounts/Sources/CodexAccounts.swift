@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ApplicationServices
 import Charts
 import CoreGraphics
@@ -325,30 +326,39 @@ private enum AppLanguage: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// What a first launch starts in: the closest match to the Mac's own language, English when there is none.
     static var systemDefault: AppLanguage {
-        let preferred = (Locale.preferredLanguages.first ?? "en").lowercased()
-        if preferred.hasPrefix("yue") || preferred.hasSuffix("-hk") || preferred.hasSuffix("-mo") { return .zhHK }
-        if preferred.hasPrefix("zh-hant") || preferred.hasPrefix("zh-tw") { return .zhHant }
-        if preferred.hasPrefix("zh") { return .zhCN }
-        if preferred.hasPrefix("ja") { return .ja }
-        return .en
+        systemLanguage(for: Locale.preferredLanguages.first)
     }
 
-    static func normalized(_ rawValue: String?) -> AppLanguage {
-        switch rawValue {
-        case "zh", "yue", "yue-HK", "zh-HK", "zh-Hant-HK":
+    static func systemLanguage(for identifier: String?) -> AppLanguage {
+        guard let identifier else { return .en }
+        let language = Locale.Language(identifier: identifier)
+        switch language.languageCode?.identifier {
+        case "zh":
+            return language.script?.identifier == "Hant" ? .zhHant : .zhCN
+        case "yue":
             return .zhHK
-        case "zh-Hant", "zh-TW", "zh-Hant-TW":
-            return .zhHant
-        case "zh-CN", "zh-Hans", "zh-Hans-CN":
-            return .zhCN
-        case "en", "en-US":
-            return .en
-        case "ja", "ja-JP":
+        case "ja":
             return .ja
         default:
+            return .en
+        }
+    }
+
+    static func manualPreference(_ rawValue: String?) -> AppLanguage? {
+        switch rawValue?.lowercased().replacingOccurrences(of: "_", with: "-") {
+        case "zh", "yue", "yue-hk", "zh-hk", "zh-hant-hk":
             return .zhHK
+        case "zh-hant", "zh-tw", "zh-hant-tw":
+            return .zhHant
+        case "zh-cn", "zh-hans", "zh-hans-cn":
+            return .zhCN
+        case "en", "en-us":
+            return .en
+        case "ja", "ja-jp":
+            return .ja
+        default:
+            return nil
         }
     }
 
@@ -414,7 +424,7 @@ private enum AppLanguage: String, CaseIterable, Identifiable {
 }
 
 private func localizedText(_ zhHK: String, _ en: String, language rawLanguage: String?) -> String {
-    AppTextLocalizer.localized(zhHK, en, language: AppLanguage.normalized(rawLanguage))
+    AppTextLocalizer.localized(zhHK, en, language: AppLanguage.manualPreference(rawLanguage) ?? AppLanguage.systemDefault)
 }
 
 /// Written Traditional Chinese, Simplified Chinese and Japanese for every interface string, from
@@ -2626,7 +2636,8 @@ struct AccountsRootView: View {
     @AppStorage("autoRefresh") private var autoRefresh = true
     @AppStorage("autoSync") private var autoSync = true
     @AppStorage("autoQuotaPool") private var autoQuotaPool = false
-    @AppStorage("language") private var language = "zh"
+    @AppStorage("language") private var language = "system"
+    @State private var systemLanguage = AppLanguage.systemDefault
     @State private var displayNames: [String: String] = UserDefaults.standard.dictionary(forKey: "profileDisplayNames") as? [String: String] ?? [:]
     @AppStorage("lastHistorySyncTimestamp") private var lastHistorySyncTimestamp = 0.0
     @State private var launchedAt = Date()
@@ -2765,13 +2776,7 @@ struct AccountsRootView: View {
             if lastHistorySyncTimestamp > 0 {
                 lastAutoSyncAt = Date(timeIntervalSince1970: lastHistorySyncTimestamp)
             }
-            if UserDefaults.standard.object(forKey: "language") == nil {
-                language = AppLanguage.systemDefault.rawValue
-            }
-            let normalizedLanguage = AppLanguage.normalized(language).rawValue
-            if normalizedLanguage != language {
-                language = normalizedLanguage
-            }
+            systemLanguage = AppLanguage.systemDefault
             let normalizedTheme = canonicalThemeID(appTheme)
             if normalizedTheme != appTheme {
                 appTheme = normalizedTheme
@@ -2808,12 +2813,13 @@ struct AccountsRootView: View {
         .sheet(isPresented: $showIntro) {
             introView
         }
-        .onChange(of: language) { _, newValue in
-            let normalized = AppLanguage.normalized(newValue).rawValue
-            if normalized != newValue {
-                language = normalized
-                return
-            }
+        .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
+            systemLanguage = AppLanguage.systemDefault
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            systemLanguage = AppLanguage.systemDefault
+        }
+        .onChange(of: selectedLanguage) { _, _ in
             NotificationCenter.default.post(name: Notification.Name("CodexAccountsLanguageChanged"), object: nil)
         }
         .onChange(of: updater.availableRelease?.version) { _, version in
@@ -2833,12 +2839,16 @@ struct AccountsRootView: View {
         }
     }
 
+    private var languagePreference: AppLanguage? {
+        AppLanguage.manualPreference(language)
+    }
+
     private var selectedLanguage: AppLanguage {
-        AppLanguage.normalized(language)
+        languagePreference ?? systemLanguage
     }
 
     private func tr(_ zh: String, _ en: String) -> String {
-        localizedText(zh, en, language: language)
+        AppTextLocalizer.localized(zh, en, language: selectedLanguage)
     }
 
     private func scaled(_ value: CGFloat) -> CGFloat {
@@ -3731,7 +3741,7 @@ struct AccountsRootView: View {
     private var languageSwitcher: some View {
         let current = selectedLanguage
         let menuWidth = scaled(118)
-        let expandedHeight = scaled(54 + CGFloat(AppLanguage.allCases.count) * 45)
+        let expandedHeight = scaled(54 + CGFloat(AppLanguage.allCases.count + 1) * 45)
 
         return ZStack(alignment: .topLeading) {
             Button {
@@ -3804,6 +3814,7 @@ struct AccountsRootView: View {
 
     private var languageMenuPanel: some View {
         VStack(spacing: scaled(5)) {
+            languageMenuRow(nil)
             ForEach(AppLanguage.allCases) { item in
                 languageMenuRow(item)
             }
@@ -3827,11 +3838,12 @@ struct AccountsRootView: View {
         .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 10)
     }
 
-    private func languageMenuRow(_ item: AppLanguage) -> some View {
-        let selected = selectedLanguage == item
+    private func languageMenuRow(_ preference: AppLanguage?) -> some View {
+        let item = preference ?? systemLanguage
+        let selected = languagePreference == preference
 
         return Button {
-            setLanguage(item)
+            setLanguage(preference)
         } label: {
             HStack(spacing: scaled(8)) {
                 Text(item.flag)
@@ -3839,11 +3851,11 @@ struct AccountsRootView: View {
                     .frame(width: scaled(18), alignment: .center)
 
                 VStack(alignment: .leading, spacing: scaled(1)) {
-                    Text(item.shortTitle)
+                    Text(preference?.shortTitle ?? tr("跟隨系統", "System"))
                         .font(appFont(size: 10, weight: .heavy))
                         .lineLimit(1)
                         .minimumScaleFactor(0.70)
-                    Text(item.subtitle)
+                    Text(preference?.subtitle ?? item.shortTitle)
                         .font(appFont(size: 8, weight: .semibold))
                         .foregroundStyle(.white.opacity(selected ? 0.74 : 0.46))
                         .lineLimit(1)
@@ -3881,8 +3893,8 @@ struct AccountsRootView: View {
         .foregroundStyle(selected ? .white : .white.opacity(0.78))
     }
 
-    private func setLanguage(_ item: AppLanguage) {
-        guard selectedLanguage != item else {
+    private func setLanguage(_ preference: AppLanguage?) {
+        guard languagePreference != preference else {
             withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
                 showLanguageMenu = false
             }
@@ -3890,6 +3902,7 @@ struct AccountsRootView: View {
         }
 
         let oldLanguage = selectedLanguage
+        let item = preference ?? systemLanguage
         withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
             showLanguageMenu = false
             languageTransitionActive = true
@@ -3897,7 +3910,7 @@ struct AccountsRootView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
             withAnimation(.easeInOut(duration: 0.22)) {
-                language = item.rawValue
+                language = preference?.rawValue ?? "system"
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.74) {
@@ -12982,7 +12995,9 @@ extension AccountsRootView {
                             HStack {
                                 Text(tr("語言", "Language")).font(appFont(size: 13, weight: .medium))
                                 Spacer()
-                                rdSegmented(AppLanguage.allCases.map { ($0, $0.shortTitle) }, selection: selectedLanguage, key: "language") { item in
+                                let options: [(AppLanguage?, String)] = [(nil, tr("跟隨系統", "System"))]
+                                    + AppLanguage.allCases.map { (Optional($0), $0.shortTitle) }
+                                rdSegmented(options, selection: languagePreference, key: "language") { item in
                                     setLanguage(item)
                                 }
                             }
